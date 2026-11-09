@@ -1,4 +1,5 @@
 import { blue, green, red, yellow } from 'kolorist';
+import { syncTasksToEdgeDashboard } from '../../core/d1-bridge';
 import { solveHomeworkDualTrack } from '../../core/solver';
 import {
   CourseInfo,
@@ -75,6 +76,22 @@ export class ChaoxingAdapter implements PlatformAdapter {
     }
 
     console.log(green(`\n[扫描完毕] 共检索到 ${allPending.length} 个待做作业。\n`));
+
+    if (allPending.length > 0) {
+      await syncTasksToEdgeDashboard(
+        allPending.map((pw) => ({
+          taskId: `chaoxing-hw-${pw.workId}`,
+          platform: 'chaoxing',
+          courseId: pw.courseId,
+          classId: pw.classId,
+          courseName: pw.courseName || '',
+          title: pw.title,
+          status: 'pending',
+          deadline: pw.endDate,
+        }))
+      );
+    }
+
     return allPending;
   }
 
@@ -168,6 +185,20 @@ export class ChaoxingAdapter implements PlatformAdapter {
           } else {
             console.log(red(`❌ 作业 《${hw.title}》 响应异常: ${submitRes.msg}`));
           }
+
+          await syncTasksToEdgeDashboard([
+            {
+              taskId: `chaoxing-hw-${hw.workId}`,
+              platform: 'chaoxing',
+              courseId: hw.courseId,
+              classId: hw.classId,
+              courseName: c.courseName,
+              title: hw.title,
+              status: submitRes.success ? (isAutoSubmit ? 'submitted' : 'draft_saved') : 'failed',
+              deadline: hw.endDate,
+              resultSummary: `共${solveRes.stats.total}题 (⚡缓存${solveRes.stats.cacheHits}/🚀Flash${solveRes.stats.flashSolved}/🧠Pro${solveRes.stats.proSolved})`,
+            },
+          ]);
 
           console.log(blue(`📄 作答报告: ${solveRes.reportPath}`));
           results.push(solveRes);

@@ -211,7 +211,10 @@ export async function provisionCloudflareEdge(
   if (process.env.CHAOXING_LOCATIONS_JSON) secretsPayload.CHAOXING_LOCATIONS_JSON = process.env.CHAOXING_LOCATIONS_JSON;
   if (process.env.WEBHOOK_URL) secretsPayload.WEBHOOK_URL = process.env.WEBHOOK_URL;
   if (process.env.SERVERCHAN_KEY) secretsPayload.SERVERCHAN_KEY = process.env.SERVERCHAN_KEY;
+  if (process.env.PUSHPLUS_TOKEN) secretsPayload.PUSHPLUS_TOKEN = process.env.PUSHPLUS_TOKEN;
   if (process.env.BARK_KEY) secretsPayload.BARK_KEY = process.env.BARK_KEY;
+  if (process.env.TELEGRAM_BOT_TOKEN) secretsPayload.TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  if (process.env.TELEGRAM_CHAT_ID) secretsPayload.TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
   const tmpSecretFile = path.join(os.tmpdir(), `afk-secrets-${Date.now()}.json`);
   try {

@@ -11,6 +11,7 @@ import {
   readLocalStorageState,
 } from '../../core/browser-profile';
 import { provisionCloudflareEdge } from '../../core/cf-provisioner';
+import { triggerEdgeDigestNotification } from '../../core/d1-bridge';
 import { triggerCloudBurst } from '../../core/sandbox';
 import { formatUtc8Now, PlatformName } from '../../core/types';
 
@@ -238,6 +239,17 @@ async function main(): Promise<void> {
         const { execFileSync } = await import('child_process');
         execFileSync('bash', [iamScript], { stdio: 'inherit' });
         execFileSync('bash', [crScript], { stdio: 'inherit' });
+      }
+      break;
+    }
+
+    case 'notify':
+    case 'digest': {
+      const res = await triggerEdgeDigestNotification();
+      if (res.sent) {
+        console.log(green(`✅ 已触发 Cloudflare Edge 推送全平台汇总通知:\n${res.summary}`));
+      } else {
+        console.log(yellow(`⚠️ 触发结果: ${res.summary || '请先配置 AFK_EDGE_WORKER_URL'}`));
       }
       break;
     }

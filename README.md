@@ -8,7 +8,7 @@
 
 | 算力层级 | 承载设施与免费额度 | 核心职责 | 计费与生命周期 |
 | :--- | :--- | :--- | :--- |
-| **Tier 0：边缘常驻与持久记忆层**<br>([`edge/`](./edge)) | • **Cloudflare Workers Cron**（10万次/天免费）<br>• **Cloudflare D1 SQLite**（500万读/天、**10万写/天**免费） | • 每分钟自动巡检、复用 D1 缓存的登录 Cookie（6h TTL 免重登）<br>• 秒级执行全类型学习通签到<br>• 每 10 分钟极速探测新作业红点并写入 D1 `pending_tasks`<br>• 持久化 `question_bank` 题库 SHA-256 缓存与 Web 浏览器登录态 | **100% 永久免费**；不消耗任何云主机 CPU/内存 |
+| **Tier 0：边缘常驻、全景看板与通知层**<br>([`edge/`](./edge)) | • **Cloudflare Workers Cron**（10万次/天免费）<br>• **Cloudflare D1 SQLite**（500万读/天、**10万写/天**免费） | • **零服务器全景看板 (`GET /dashboard`)**：直接运行在 Cloudflare 边缘，实时展示学习通/PTA/智慧树各平台待办任务、草稿暂存与正式提交进度、签到时间线与登录态有效期，**完全不占 GCP 服务器内存/CPU**<br>• **定期 + 不定期双模通知**：秒签成功/发现新作业/完成答题时即时推送；每天 `08:30` 与 `21:00` (UTC+8) 自动推送全平台任务汇总日报（支持飞书/钉钉/企微、微信 Server酱/PushPlus、iOS Bark、Telegram） | **100% 永久免费**；不消耗任何云主机 CPU/内存 |
 | **Tier 1：无服务器容器与常驻控制面**<br>([`packages/`](./packages) + Cloud Run) | • **GCP `e2-micro`**（Always Free 常驻机，运行 `agy` + CF Plugin）<br>• **Google Cloud Run Jobs**（每月 **36万 vCPU-秒 + 18万 GiB-秒** 永久免费） | • **Antigravity CLI (`agy`)** 自动加载仓库内 [`.agents/`](./.agents) 规则与技能，通过 Cloudflare Plugin 直连读写 D1<br>• **双轨认知答题**：90% 客观题由 **Gemini Flash** 单次批量输出 JSON；10% 主观/编程题由 **Gemini Pro** 结合沙箱自测完成 | **100% 落在免费配额内**；Cloud Run Job 按秒运行、跑完归零 |
 | **Tier 2：重负载临时云主机爆破层**<br>([`infra/gcp/`](./infra/gcp)) | • **GCE Spot / 按需临时实例**<br>• 最小权限 SA (`sa-antigravity-worker`) | • 遇到超出 `e2-micro` / Cloud Run 限制的重型并发无头浏览器或长时评测时，通过 `pnpm afk burst --mode gce` 秒级拉起新机器<br>• 内置 `at now + 15 minutes` 物理自毁保险丝 + `EXIT trap` 完结即刻销毁 | **跑完即自毁**；彻底杜绝悬挂计费 |
 
@@ -87,3 +87,5 @@ pnpm afk profile import-cookie --platform zhihuishu --cookie "CASLOGC=xxx; ..."
 | **导入并云端同步 Web 登录态** | `pnpm afk profile import-cookie --platform pta --cookie "..."` | 将 PTA/智慧树 Cookie 写入本地 Profile 并同步至 Cloudflare D1，跨机器/跨容器永久免登 |
 | **调度至 Cloud Run 免费容器** | `pnpm afk burst --mode cloud-run --task "solve"` | 使用 GCP Cloud Run Jobs 免费额度异步隔离运行 |
 | **高负载短时拉起新 GCE 机器** | `pnpm afk burst --mode gce --task "solve" --ttl 15` | 调用 `gcloud` 拉起带 15 分钟物理自毁定时器的临时 GCE 实例 |
+| **触发全平台汇总通知简报** | `pnpm afk digest` | 立即让 Cloudflare Edge 生成并向手机/Webhook 推送各平台任务与完成状况简报 |
+| **打开零服务器 Web 监控看板** | 浏览器访问 `AFK_EDGE_WORKER_URL` | 在 Cloudflare 边缘直接查看各平台任务进度、签到记录与一键触发巡检 |

@@ -5,6 +5,8 @@ import path from 'path';
 import { searchCourseMaterialsContext } from '../packages/adapters/chaoxing/materials';
 import { encryptChaoxingPassword } from '../packages/adapters/chaoxing/session';
 import { WebBrowserAdapter } from '../packages/adapters/web-agent';
+import { renderDashboardHtml } from '../edge/src/dashboard';
+import { sendDigestNotification } from '../edge/src/notify';
 import {
   getBrowserProfilePaths,
   readLocalStorageState,
@@ -167,7 +169,35 @@ async function runAllTests() {
       gceBurst.command.includes('spawn-ephemeral-gce.sh') && gceBurst.command.includes('GCE_BURST_TTL_MINUTES=15'),
       'Tier 2 应生成带 15 分钟 TTL 自毁熔断的临时 GCE 拉起指令'
     );
-    console.log(' ✅ [Test 4/4 PASS] Cloudflare 全自动编排 (setup-cf) + Tier 1/Tier 2 算力调度验证通过');
+
+    const dashboardHtml = renderDashboardHtml();
+    assert.ok(
+      dashboardHtml.includes('afk-cloud 个人云端自治看板') && dashboardHtml.includes('/api/dashboard'),
+      'Cloudflare 零服务器边缘看板 HTML 应包含完整监控面板与 API 绑定'
+    );
+    const digestText = await sendDigestNotification(
+      {},
+      {
+        pendingCount: 1,
+        draftCount: 2,
+        submittedCount: 5,
+        signinCount: 12,
+        questionBankCount: 48,
+        recentTasks: [
+          {
+            platform: 'chaoxing',
+            course_name: '数据结构与算法课程设计',
+            title: '第一次实验报告',
+            status: 'draft_saved',
+            deadline: '2026-11-20',
+          },
+        ],
+      },
+      '单元测试简报'
+    );
+    assert.ok(digestText.includes('草稿暂存 2') && digestText.includes('数据结构与算法课程设计'), '汇总简报通知应包含完整平台任务统计');
+
+    console.log(' ✅ [Test 4/4 PASS] Cloudflare 全自动编排 + 零服务器边缘看板/通知 + Tier 1/2 算力调度验证通过');
   }
 
   console.log(`\n🎉 全部 4 项核心自检测试 100% 通过！\n`);

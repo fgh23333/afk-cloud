@@ -150,3 +150,59 @@ export async function saveToQuestionBankCache(entries: CachedAnswerEntry[]): Pro
     }
   }
 }
+
+export interface EdgeTaskSyncItem {
+  taskId: string;
+  platform: string;
+  courseId: string;
+  classId: string;
+  courseName: string;
+  title: string;
+  status: 'pending' | 'processing' | 'draft_saved' | 'submitted' | 'failed';
+  deadline?: string;
+  resultSummary?: string;
+}
+
+/**
+ * 将扫描到的待办任务或已完成作答的任务状态同步至 Cloudflare Edge D1 看板，并触发边缘即时通知
+ */
+export async function syncTasksToEdgeDashboard(tasks: EdgeTaskSyncItem[]): Promise<boolean> {
+  const edgeUrl = process.env.AFK_EDGE_WORKER_URL;
+  const edgeToken = process.env.AFK_EDGE_BEARER_TOKEN;
+  if (!edgeUrl || tasks.length === 0) return false;
+
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (edgeToken) headers['Authorization'] = `Bearer ${edgeToken}`;
+
+    const res = await fetch(`${edgeUrl.replace(/\/+$/, '')}/api/tasks/sync`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ tasks }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 主动触发 Cloudflare Edge Worker 发送一次全平台汇总简报通知
+ */
+export async function triggerEdgeDigestNotification(): Promise<{ sent: boolean; summary?: string }> {
+  const edgeUrl = process.env.AFK_EDGE_WORKER_URL;
+  const edgeToken = process.env.AFK_EDGE_BEARER_TOKEN;
+  if (!edgeUrl) {
+    return { sent: false, summary: '未配置 AFK_EDGE_WORKER_URL' };
+  }
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (edgeToken) headers['Authorization'] = `Bearer ${edgeToken}`;
+
+  const res = await fetch(`${edgeUrl.replace(/\/+$/, '')}/api/digest`, {
+    method: 'POST',
+    headers,
+  });
+  if (!res.ok) return { sent: false };
+  return (await res.json()) as { sent: boolean; summary?: string };
+}
