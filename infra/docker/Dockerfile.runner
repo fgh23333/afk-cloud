@@ -1,0 +1,26 @@
+FROM node:20-slim
+
+# 安装基础编译工具链、Python3 与无头 Chromium（满足 PTA/智慧树无头浏览器操控 + C/C++/Python 编程题沙箱本地评测）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    curl \
+    fonts-noto-cjk \
+    git \
+    g++ \
+    gcc \
+    python3 \
+    tzdata \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV TZ=Asia/Shanghai
+ENV CHROME_PATH=/usr/bin/chromium
+WORKDIR /app
+
+COPY package.json pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
+COPY packages ./packages
+
+RUN corepack enable && pnpm install --prod=false
+
+ENTRYPOINT ["npx", "tsx", "packages/cli/src/index.ts"]
+CMD ["solve"]

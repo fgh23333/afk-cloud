@@ -1,0 +1,34 @@
+{
+  "name": "afk-cloud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal Autonomous Cloud Agent (Edge Cloudflare Workers+D1 + Antigravity CLI + Free-First Cloud Run & Ephemeral GCE Burst)",
+  "scripts": {
+    "afk": "tsx packages/cli/src/index.ts",
+    "afk:scan": "tsx packages/cli/src/index.ts scan",
+    "afk:solve": "tsx packages/cli/src/index.ts solve",
+    "afk:materials": "tsx packages/cli/src/index.ts materials",
+    "afk:burst": "tsx packages/cli/src/index.ts burst",
+    "afk:setup-cf": "tsx packages/cli/src/index.ts setup-cf",
+    "afk:setup-gcp": "tsx packages/cli/src/index.ts setup-gcp",
+    "afk:setup-all": "tsx packages/cli/src/index.ts setup-all",
+    "afk:status": "tsx packages/cli/src/index.ts status",
+    "edge:dev": "pnpm --filter @afk-cloud/edge dev",
+    "edge:deploy": "pnpm --filter @afk-cloud/edge deploy",
+    "edge:migrate:local": "pnpm --filter @afk-cloud/edge migrate:local",
+    "edge:migrate:remote": "pnpm --filter @afk-cloud/edge migrate:remote",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx tests/smoke.test.ts"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^20.14.0",
+    "jsdom": "^24.1.0",
+    "kolorist": "^1.8.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

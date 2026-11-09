@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Secrets & Environment
+.env
+.env.*
+!.env.example
+.dev.vars
+edge/wrangler.jsonc
+storage.json
+secrets.json
+
+# Runtime & Downloads
+downloads/
+.cache/
+dist/
+build/
+.wrangler/
+
+# OS & Logs
+.DS_Store
+Thumbs.db
+*.log

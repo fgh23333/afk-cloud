@@ -1,0 +1,15 @@
+services:
+  afk-runner:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.runner
+    container_name: afk-cloud-runner
+    env_file:
+      - ../../.env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../../downloads:/app/downloads
+      - ../../.cache:/app/.cache
+    command: ["scan"]
+    restart: "no"
