@@ -200,7 +200,75 @@ async function runAllTests() {
     console.log(' ✅ [Test 4/4 PASS] Cloudflare 全自动编排 + 零服务器边缘看板/通知 + Tier 1/2 算力调度验证通过');
   }
 
-  console.log(`\n🎉 全部 4 项核心自检测试 100% 通过！\n`);
+  // --- Test 5: Server Shim (P1) 接口契约、Bearer 鉴权与 Edge 题库 Hash 跨环境对齐 ---
+  {
+    const { createShimServer } = await import('../packages/shim/src/index');
+    const { computeQuestionHash: computeHashWorker } = await import('../edge/src/hash');
+
+    // 1. 验证 Edge Worker 的 Web Crypto SHA-256 与 Core Node Crypto SHA-256 完全一致
+    const nodeHash = computeQuestionHash('single', '1. 快速排序最坏时间复杂度', [{ key: 'A', text: 'O(n^2)' }]);
+    const workerHash = await computeHashWorker('single', '1. 快速排序最坏时间复杂度', [{ key: 'A', text: 'O(n^2)' }]);
+    assert.strictEqual(workerHash, nodeHash, 'Edge Web Crypto 与 Node.js crypto 生成的指纹应 100% 相同');
+
+    // 2. 启动临时测试 Shim Server
+    process.env.NODE_ENV = 'test';
+    process.env.SHIM_TOKEN = 'test_secret_shim_token_123';
+    const testPort = 8798;
+    const server = createShimServer();
+    await new Promise<void>((resolve) => server.listen(testPort, '127.0.0.1', () => resolve()));
+
+    try {
+      // 2.1 GET /health 应该无需鉴权返回 200
+      const healthRes = await fetch(`http://127.0.0.1:${testPort}/health`);
+      assert.strictEqual(healthRes.status, 200, '/health 应返回 200');
+      const healthJson: any = await healthRes.json();
+      assert.strictEqual(healthJson.agy, 'ok', 'health 响应中的 agy 状态应为 ok');
+
+      // 2.2 无鉴权调用 /task 应返回 401 Unauthorized
+      const unauthRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: 'test-job-unauth', taskUrl: 'https://example.com' }),
+      });
+      assert.strictEqual(unauthRes.status, 401, '缺少 Bearer Token 应当被安全拦截为 401');
+
+      // 2.3 带正确 Bearer Token 调用 /task 应返回 202 Accepted
+      const authRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test_secret_shim_token_123',
+        },
+        body: JSON.stringify({
+          jobId: 'test-job-auth-101',
+          taskUrl: 'https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=1&classId=2&workId=3',
+          platform: 'chaoxing',
+          mode: 'draft',
+        }),
+      });
+      assert.strictEqual(authRes.status, 202, '合法鉴权请求应被受理为 202');
+      const authJson: any = await authRes.json();
+      assert.strictEqual(authJson.accepted, true, '受理响应中的 accepted 应为 true');
+
+      // 2.4 GET /status/:jobId
+      const statusRes = await fetch(`http://127.0.0.1:${testPort}/status/test-job-auth-101`, {
+        headers: { Authorization: 'Bearer test_secret_shim_token_123' },
+      });
+      assert.strictEqual(statusRes.status, 200, '查询任务状态应返回 200');
+      const statusJson: any = await statusRes.json();
+      assert.strictEqual(statusJson.jobId, 'test-job-auth-101', '查询到的 jobId 应正确对应');
+
+      console.log(' ✅ [Test 5/5 PASS] Server Shim HTTP 接口契约、Bearer 鉴权与题库指纹跨环境对齐验证通过');
+    } finally {
+      const { stopManagedBrowser } = await import('../packages/shim/src/browser');
+      await stopManagedBrowser().catch(() => {});
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      delete process.env.SHIM_TOKEN;
+      delete process.env.NODE_ENV;
+    }
+  }
+
+  console.log(`\n🎉 全部 5 项核心自检测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

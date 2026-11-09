@@ -13,6 +13,7 @@
     "afk:setup-gcp": "tsx packages/cli/src/index.ts setup-gcp",
     "afk:setup-all": "tsx packages/cli/src/index.ts setup-all",
     "afk:status": "tsx packages/cli/src/index.ts status",
+    "shim": "tsx packages/shim/src/index.ts",
     "edge:dev": "pnpm --filter @afk-cloud/edge dev",
     "edge:deploy": "pnpm --filter @afk-cloud/edge deploy",
     "edge:migrate:local": "pnpm --filter @afk-cloud/edge migrate:local",

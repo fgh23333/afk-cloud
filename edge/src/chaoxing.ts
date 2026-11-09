@@ -13,7 +13,7 @@ export interface Course {
   courseId: string;
   classId: string;
   courseName: string;
-  cpi: string;
+  cpi?: string;
 }
 
 export interface SignLocation {
@@ -172,7 +172,7 @@ export async function checkHomeworkPendingCourses(
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     });
-    const list: any[] = await res.json().catch(() => []);
+    const list = (await res.json().catch(() => [])) as any[];
     if (!Array.isArray(list)) return [];
 
     const pendingClassIds = new Set(

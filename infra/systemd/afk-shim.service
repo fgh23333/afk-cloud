@@ -1,0 +1,20 @@
+[Unit]
+Description=afk-cloud Server Shim (Pet Node for Antigravity & Browser)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/afk-cloud
+Environment=NODE_ENV=production
+Environment=PORT=8788
+EnvironmentFile=/root/afk-cloud/.env
+ExecStart=/usr/bin/pnpm shim
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

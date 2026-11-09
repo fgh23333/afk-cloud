@@ -15,10 +15,23 @@ export interface KVNamespaceLike {
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
 }
 
+export interface DurableObjectNamespaceLike {
+  idFromName(name: string): any;
+  get(id: any): any;
+}
+
 export interface EdgeEnv {
   DB?: D1DatabaseLike;
   KV?: KVNamespaceLike;
   CHAOXING_KV?: KVNamespaceLike;
+  SIGN_AGENT?: DurableObjectNamespaceLike;
+  SOLVER_AGENT?: DurableObjectNamespaceLike;
+  AFK_SHIM_URL?: string;
+  SHIM_URL?: string;
+  AFK_SHIM_TOKEN?: string;
+  SHIM_TOKEN?: string;
+  AFK_EDGE_BEARER_TOKEN?: string;
+  SYNC_SECRET?: string;
   CHAOXING_PHONE?: string;
   CHAOXING_PASSWORD?: string;
   CHAOXING_REALNAME?: string;

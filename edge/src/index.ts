@@ -1,3 +1,4 @@
+import { routeAgentRequest } from 'agents';
 import {
   checkHomeworkPendingCourses,
   getCourses,
@@ -9,6 +10,8 @@ import {
 } from './chaoxing';
 import { getDashboardData, renderDashboardHtml } from './dashboard';
 import { ExtendedNotifyEnv, sendDigestNotification, sendNotification } from './notify';
+import { SignAgent } from './sign-agent';
+import { SolverAgent } from './solver-agent';
 import {
   getCachedSession,
   logExecution,
@@ -18,6 +21,8 @@ import {
   upsertPendingTask,
   upsertQuestionCache,
 } from './store';
+
+export { SignAgent, SolverAgent };
 
 function checkAuth(request: Request, env: ExtendedNotifyEnv): boolean {
   if (!env.API_BEARER_TOKEN) return true;
@@ -81,7 +86,29 @@ export default {
 
     ctx.waitUntil(
       (async () => {
-        await handleEdgeHeartbeat(env, shouldCheckHomework);
+        // 优先使用 SignAgent Durable Object 驱动巡检与秒签
+        if (env.SIGN_AGENT) {
+          try {
+            const signStub = env.SIGN_AGENT.get(env.SIGN_AGENT.idFromName('default'));
+            await (signStub as any).checkInspection();
+          } catch (e: any) {
+            console.warn(`[SignAgent scheduled 异常] ${e?.message || e}，回退至原生巡检`);
+            await handleEdgeHeartbeat(env, shouldCheckHomework);
+          }
+        } else {
+          await handleEdgeHeartbeat(env, shouldCheckHomework);
+        }
+
+        // SolverAgent 状态对账兜底 (查超时未响应的 dispatched 任务)
+        if (env.SOLVER_AGENT) {
+          try {
+            const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+            await (solverStub as any).reconcileDispatchedTasks();
+          } catch (e: any) {
+            console.warn(`[SolverAgent 对账异常] ${e?.message || e}`);
+          }
+        }
+
         if (shouldSendDigest) {
           const data = await getDashboardData(env);
           await sendDigestNotification(
@@ -117,6 +144,14 @@ export default {
           'Access-Control-Max-Age': '86400',
         },
       });
+    }
+
+    // 1. Cloudflare Agents SDK 原生路由派发 (如 /agents/sign-agent/... 与 /agents/solver-agent/...)
+    try {
+      const agentRes = await routeAgentRequest(request, env);
+      if (agentRes) return agentRes;
+    } catch (e: any) {
+      console.warn(`[routeAgentRequest 提示] ${e?.message || e}`);
     }
 
     // 1. 零服务器 Web 全景看板静态 HTML (当直接通过浏览器访问 Worker 根路径时呈现)
@@ -370,6 +405,33 @@ export default {
         return corsJson({ synced: updatedCount, time: nowUtc8() });
       }
 
+      // 核心回调接口：接收常驻服务器 shim 发来的 draft_saved / submitted / failed 结果
+      if (url.pathname === '/api/agent/callback' && request.method === 'POST') {
+        const body: any = await request.json();
+        if (env.SOLVER_AGENT) {
+          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+          const result: any = await (solverStub as any).handleCallback(body);
+          return corsJson(result);
+        }
+        return corsJson({ handled: false, reason: 'SOLVER_AGENT not configured' });
+      }
+
+      // D7 审批门接口：人工确认草稿无误后下发正式提交
+      if (
+        (url.pathname.match(/^\/api\/tasks\/([^\/]+)\/approve$/) || url.pathname === '/api/tasks/approve') &&
+        request.method === 'POST'
+      ) {
+        const match = url.pathname.match(/^\/api\/tasks\/([^\/]+)\/approve$/);
+        const body: any = await request.json().catch(() => ({}));
+        const jobId = match ? match[1] : (body.taskId || body.jobId);
+        if (env.SOLVER_AGENT && jobId) {
+          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+          const result: any = await (solverStub as any).approveTask(jobId);
+          return corsJson(result);
+        }
+        return corsJson({ success: false, reason: 'SOLVER_AGENT not available or missing jobId' });
+      }
+
       // 更新单个任务状态
       if (url.pathname === '/api/tasks/status' && request.method === 'POST') {
         if (!env.DB) return corsJson({ updated: false });
@@ -379,6 +441,16 @@ export default {
         )
           .bind(body.status, body.resultSummary || '', nowUtc8(), body.taskId)
           .run();
+
+        // 若状态推进为 submitted 且绑定了 SOLVER_AGENT，联动下发提交
+        if (body.status === 'submitted' && env.SOLVER_AGENT) {
+          try {
+            const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+            await (solverStub as any).approveTask(body.taskId);
+          } catch (e: any) {
+            console.warn(`[联动 approveTask 异常] ${e?.message || e}`);
+          }
+        }
         return corsJson({ updated: true, time: nowUtc8() });
       }
 
