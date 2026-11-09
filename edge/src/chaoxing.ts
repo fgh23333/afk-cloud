@@ -193,14 +193,16 @@ export async function performSign(
   course: Course,
   session: UserSession,
   name = '同学',
-  locations: SignLocation[] = DEFAULT_SIGN_LOCATIONS
+  locations: SignLocation[] = DEFAULT_SIGN_LOCATIONS,
+  enc = ''
 ): Promise<string> {
   const activeId = activity.id;
   const otherId = activity.otherId;
 
   const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
   const loc = pool[Math.floor(Math.random() * pool.length)];
-  const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}`;
+  const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
+  const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}`;
 
   const res = await fetch(signUrl, {
     headers: {

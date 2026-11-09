@@ -17,6 +17,7 @@
     "edge:deploy": "pnpm --filter @afk-cloud/edge deploy",
     "edge:migrate:local": "pnpm --filter @afk-cloud/edge migrate:local",
     "edge:migrate:remote": "pnpm --filter @afk-cloud/edge migrate:remote",
+    "preview": "tsx scripts/preview-server.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx tests/smoke.test.ts"
   },

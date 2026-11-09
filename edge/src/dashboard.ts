@@ -2,6 +2,8 @@ import { EdgeEnv, nowUtc8 } from './store';
 
 export interface DashboardData {
   time: string;
+  lastSync?: string;
+  daemonStatus?: string;
   stats: {
     pendingCount: number;
     draftCount: number;
@@ -30,6 +32,44 @@ export interface DashboardData {
     result_summary: string;
     updated_at: string;
   }>;
+  homeworks?: Array<{
+    taskId: string;
+    title: string;
+    courseName: string;
+    endDate: string;
+    isPending: boolean;
+    status: string;
+    platform: string;
+    computeTier: string;
+    resultSummary: string;
+    aiSolved: boolean;
+  }>;
+  exams?: Array<{
+    title: string;
+    courseName: string;
+    startTime: string;
+    endTime: string;
+    isExpired: boolean;
+    url?: string;
+  }>;
+  notices?: Array<{
+    title: string;
+    createrName: string;
+    sendTime: string;
+    content: string;
+  }>;
+  signinHistory?: Array<{
+    time: string;
+    courseName: string;
+    type: string;
+    address: string;
+    result: string;
+  }>;
+  courses?: Array<{
+    courseName: string;
+    courseId: string;
+    classId: string;
+  }>;
   logs: Array<{
     id: number;
     event_type: string;
@@ -43,8 +83,11 @@ export interface DashboardData {
  * 从 Cloudflare D1 聚合查询看板所需的全量状态数据（0 云主机开销，直接走 D1 免费读配额）
  */
 export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
+  const currentTime = nowUtc8();
   const empty: DashboardData = {
-    time: nowUtc8(),
+    time: currentTime,
+    lastSync: currentTime,
+    daemonStatus: 'ONLINE',
     stats: {
       pendingCount: 0,
       draftCount: 0,
@@ -55,6 +98,11 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     },
     sessions: [],
     tasks: [],
+    homeworks: [],
+    exams: [],
+    notices: [],
+    signinHistory: [],
+    courses: [],
     logs: [],
   };
 
@@ -63,7 +111,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   try {
     const [tasksRes, logsRes, sessionsRes, qbRes, signinRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
-      env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 40'),
+      env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
       env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type = 'signin'"),
@@ -88,15 +136,64 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     let submittedCount = 0;
     let failedCount = 0;
 
+    const homeworks: NonNullable<DashboardData['homeworks']> = [];
+    const courseMap = new Map<string, { courseName: string; courseId: string; classId: string }>();
+
     for (const t of tasks) {
-      if (t.status === 'pending' || t.status === 'processing') pendingCount++;
+      const isPending = t.status === 'pending' || t.status === 'processing';
+      if (isPending) pendingCount++;
       else if (t.status === 'draft_saved') draftCount++;
       else if (t.status === 'submitted') submittedCount++;
       else if (t.status === 'failed') failedCount++;
+
+      homeworks.push({
+        taskId: t.task_id,
+        title: t.title,
+        courseName: t.course_name || '未命名课程',
+        endDate: t.deadline || '无截止限制',
+        isPending,
+        status: t.status,
+        platform: t.platform || 'chaoxing',
+        computeTier: t.compute_tier || 'tier1-cloud-run',
+        resultSummary: t.result_summary || '',
+        aiSolved: t.status === 'draft_saved' || t.status === 'submitted',
+      });
+
+      if (t.course_id && t.course_name && !courseMap.has(t.course_id)) {
+        courseMap.set(t.course_id, {
+          courseName: t.course_name,
+          courseId: t.course_id,
+          classId: t.class_id,
+        });
+      }
+    }
+
+    const signinHistory: NonNullable<DashboardData['signinHistory']> = [];
+    const notices: NonNullable<DashboardData['notices']> = [];
+
+    for (const log of logs) {
+      if (log.event_type === 'signin') {
+        signinHistory.push({
+          time: log.created_at,
+          courseName: log.summary.split(':')[0] || '在线课程',
+          type: log.summary.includes('位置') ? '位置签到' : log.summary.includes('拍照') ? '拍照签到' : '通用签到',
+          address: log.summary.includes('(') ? log.summary.slice(log.summary.indexOf('(') + 1, -1) : '-',
+          result: log.summary.includes('成功') ? '签到成功' : '已提交',
+        });
+      } else if (log.event_type === 'homework_detected' || log.event_type === 'homework_solved') {
+        notices.push({
+          title: log.summary,
+          createrName: 'AFK 云端守护',
+          sendTime: log.created_at,
+          content: log.summary,
+        });
+      }
     }
 
     return {
-      time: nowUtc8(),
+      time: currentTime,
+      lastSync: currentTime,
+      daemonStatus: 'ONLINE',
       stats: {
         pendingCount,
         draftCount,
@@ -107,6 +204,11 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       },
       sessions,
       tasks,
+      homeworks,
+      exams: [],
+      notices,
+      signinHistory,
+      courses: Array.from(courseMap.values()),
       logs,
     };
   } catch {
@@ -115,245 +217,525 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
 }
 
 /**
- * 渲染零服务器成本的 Cloudflare Edge 全景监控看板 (Dark Tech UI)
+ * 渲染零服务器成本的 Cloudflare Edge 全景监控看板 (Dark Glassmorphic UI)
+ * 100% 契合 docs/cf-agent-architecture.md 架构规范：
+ * - 纯深色科技拟物磨砂 (Dark Slate + Glassmorphism)
+ * - 仅支持单账号守护 (零前端配置表单冗余)
+ * - 支持 D7 提交门 (草稿暂存后由用户一键审批提交)
  */
 export function renderDashboardHtml(): string {
   return `<!DOCTYPE html>
 <html lang="zh-CN" class="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>afk-cloud 云端自治 Agent 全景看板 (Cloudflare Edge)</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>超星任务与学习监控看板 | Cloudflare Serverless</title>
+  <link rel="icon" href="https://mooc1.chaoxing.com/favicon.ico">
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: '#f0fdf4', 500: '#22c55e', 600: '#16a34a', 700: '#15803d' },
+            dark: { 800: '#1e293b', 900: '#0f172a', 950: '#020617' }
+          }
+        }
+      }
+    }
+  </script>
   <style>
-    body { background-color: #0b1120; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
-    .glass { background: rgba(30, 41, 59, 0.75); backdrop-filter: blur(12px); border: 1px solid rgba(148, 163, 184, 0.14); }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    .glass-card { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(8px); border: 1px solid rgba(255, 255, 255, 0.05); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 9999px; }
   </style>
 </head>
-<body class="min-h-screen pb-16">
-  <!-- 顶部固定导航栏 -->
-  <header class="sticky top-0 z-30 glass border-b border-slate-800 px-6 py-4">
-    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-      <div class="flex items-center gap-3">
-        <span class="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">🛰️</span>
-        <div>
-          <h1 class="text-lg font-bold text-white tracking-wide">afk-cloud 个人云端自治看板</h1>
-          <p class="text-xs text-slate-400">100% 运行于 Cloudflare Workers + D1 免费边缘层 · 零云主机开销</p>
-        </div>
+<body class="bg-dark-950 text-slate-100 min-h-screen flex flex-col antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- 顶部导航栏 -->
+  <header class="glass sticky top-0 z-50 px-4 lg:px-8 py-3.5 flex items-center justify-between shadow-xl">
+    <div class="flex items-center gap-3">
+      <div class="h-9 w-9 rounded-xl bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-brand-500/20 text-white font-bold text-lg">
+        🌿
       </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <input id="tokenInput" type="password" placeholder="Bearer Token (若已启用鉴权)" class="px-3 py-1.5 text-xs rounded-lg bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-blue-500" />
-        <button onclick="loadDashboard()" class="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">🔄 刷新数据</button>
-        <button onclick="triggerEdgeCheck()" id="btnCheck" class="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition">⚡ 立即巡检签到/作业</button>
-        <button onclick="triggerDigest()" id="btnDigest" class="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition">📨 推送今日汇总简报</button>
+      <div>
+        <h1 class="text-base font-bold tracking-tight text-white flex items-center gap-2">
+          学习通全维智能监控看板 · afk-cloud 个人云端自治看板
+          <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Cloudflare 边缘托管</span>
+        </h1>
+        <p class="text-xs text-slate-400">Google Cloud 守护 + agy 深度求解 + 7×24h 自动巡检</p>
       </div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button onclick="triggerCheck()" id="checkBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-950/80 hover:bg-sky-900 border border-sky-800/80 active:scale-95 text-xs font-medium text-sky-200 transition">
+        <span>⚡ 立即巡检</span>
+      </button>
+      <button onclick="triggerDigest()" id="digestBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800/80 active:scale-95 text-xs font-medium text-emerald-200 transition">
+        <span>📨 推送简报</span>
+      </button>
+      <button onclick="refreshData()" id="refreshBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-95 text-xs font-medium text-slate-200 transition border border-slate-700">
+        <svg id="refreshIcon" class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        刷新看板
+      </button>
     </div>
   </header>
 
-  <main class="max-w-7xl mx-auto px-6 mt-6 space-y-6">
-    <!-- 状态提示条 -->
-    <div id="toast" class="hidden rounded-xl px-4 py-3 text-sm bg-blue-500/20 border border-blue-500/40 text-blue-200"></div>
+  <!-- 提示条浮层 -->
+  <div id="toastBox" class="fixed top-16 right-4 z-50 hidden transition-all duration-300"></div>
 
-    <!-- 核心指标卡片 -->
-    <section class="grid grid-cols-2 md:grid-cols-6 gap-4">
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">⏳ 待办任务</div>
-        <div id="statPending" class="text-2xl font-bold text-amber-400 mt-1">-</div>
-      </div>
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">📝 草稿已暂存 (pyFlag=1)</div>
-        <div id="statDraft" class="text-2xl font-bold text-blue-400 mt-1">-</div>
-      </div>
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">✅ 已正式提交</div>
-        <div id="statSubmitted" class="text-2xl font-bold text-emerald-400 mt-1">-</div>
-      </div>
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">📍 累计自动签到</div>
-        <div id="statSignin" class="text-2xl font-bold text-teal-300 mt-1">-</div>
-      </div>
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">🧠 D1 题库 SHA-256 缓存</div>
-        <div id="statQb" class="text-2xl font-bold text-purple-400 mt-1">-</div>
-      </div>
-      <div class="glass rounded-xl p-4">
-        <div class="text-xs text-slate-400">🕒 最后同步 (UTC+8)</div>
-        <div id="statTime" class="text-xs font-mono text-slate-300 mt-2">-</div>
-      </div>
-    </section>
+  <!-- 主内容区 -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 lg:p-6 space-y-6">
 
-    <!-- 平台登录态与 Profile 缓存监控 -->
-    <section class="glass rounded-xl p-5">
-      <h2 class="text-sm font-semibold text-white mb-3 flex items-center gap-2">🔐 跨平台登录态 & 无头浏览器 Profile 缓存状态 (D1 Sessions)</h2>
-      <div id="sessionsGrid" class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-        <div class="text-slate-500">正在加载会话状态...</div>
-      </div>
-    </section>
-
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- 各平台任务看板 (占 2 列) -->
-      <section class="lg:col-span-2 glass rounded-xl p-5">
-        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <h2 class="text-sm font-semibold text-white">📋 各平台任务与作业完成状况 (学习通 / PTA / 智慧树)</h2>
-          <div class="flex gap-1.5 text-xs">
-            <button onclick="setFilter('all')" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">全部</button>
-            <button onclick="setFilter('pending')" class="px-2.5 py-1 rounded bg-amber-500/20 text-amber-300">待完成</button>
-            <button onclick="setFilter('draft_saved')" class="px-2.5 py-1 rounded bg-blue-500/20 text-blue-300">已暂存草稿</button>
-            <button onclick="setFilter('submitted')" class="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300">已提交</button>
-          </div>
+    <!-- 顶栏概览指标卡片 -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
+      <!-- 监控服务状态 -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col justify-between">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>云端守护状态</span>
+          <span class="relative flex h-2.5 w-2.5">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+          </span>
         </div>
-        <div class="overflow-x-auto">
+        <div class="mt-2 text-xl lg:text-2xl font-bold text-white flex items-baseline gap-2">
+          <span id="daemonStatusText">ONLINE</span>
+          <span class="text-xs font-normal text-emerald-400">7×24h 守护中</span>
+        </div>
+        <div class="mt-2 text-[11px] text-slate-400 truncate" id="lastHeartbeat">最后同步: --</div>
+      </div>
+
+      <!-- 待做作业统计 -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col justify-between">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>待办作业/实验</span>
+          <span class="text-amber-400">📝</span>
+        </div>
+        <div class="mt-2 text-xl lg:text-2xl font-bold text-amber-400 flex items-baseline gap-2">
+          <span id="pendingHomeworkCount">0</span>
+          <span class="text-xs font-normal text-slate-400">份待完成</span>
+        </div>
+        <div class="mt-2 text-[11px] text-slate-400" id="solvedHomeworkCount">已 AI 暂存/提交: 0 份</div>
+      </div>
+
+      <!-- 考试与多平台任务 -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col justify-between">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>随堂测验/多平台</span>
+          <span class="text-rose-400">🚨</span>
+        </div>
+        <div class="mt-2 text-xl lg:text-2xl font-bold text-rose-400 flex items-baseline gap-2">
+          <span id="activeExamsCount">0</span>
+          <span class="text-xs font-normal text-slate-400">项进行中</span>
+        </div>
+        <div class="mt-2 text-[11px] text-slate-400 truncate" id="totalNoticesCount">通知箱捕获: 0 条</div>
+      </div>
+
+      <!-- 自动签到累计 -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col justify-between">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>签到捕获 & 坐标</span>
+          <span class="text-sky-400">📍</span>
+        </div>
+        <div class="mt-2 text-xl lg:text-2xl font-bold text-sky-400 flex items-baseline gap-2">
+          <span id="signedCount">0</span>
+          <span class="text-xs font-normal text-slate-400">次已成功</span>
+        </div>
+        <div class="mt-2 text-[11px] text-slate-400 truncate">上海海大 12 处坐标轮换</div>
+      </div>
+    </div>
+
+    <!-- 标签切换页 -->
+    <div class="space-y-4">
+      <div class="flex border-b border-slate-800 gap-2 pb-1 overflow-x-auto text-xs font-medium text-slate-400">
+        <button onclick="switchTab('homework')" id="tabBtn-homework" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-brand-500 text-white font-semibold flex items-center gap-1.5">
+          <span>📝 作业与实验任务</span>
+          <span id="badge-homework" class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300">0</span>
+        </button>
+        <button onclick="switchTab('exams')" id="tabBtn-exams" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
+          <span>🚨 考试与随堂测验</span>
+          <span id="badge-exams" class="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300">0</span>
+        </button>
+        <button onclick="switchTab('signs')" id="tabBtn-signs" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
+          <span>📍 自动签到记录</span>
+        </button>
+        <button onclick="switchTab('courses')" id="tabBtn-courses" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
+          <span>📚 在读课程概况</span>
+        </button>
+        <button onclick="switchTab('settings')" id="tabBtn-settings" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
+          <span>🔔 通知通道与架构</span>
+        </button>
+      </div>
+
+      <!-- Tab 1: 作业任务 -->
+      <section id="tab-homework" class="space-y-3">
+        <div id="homeworkList" class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载作业与实验任务...</div>
+        </div>
+      </section>
+
+      <!-- Tab 2: 考试与测验 -->
+      <section id="tab-exams" class="space-y-3 hidden">
+        <div id="examList" class="space-y-3">
+          <div class="py-12 text-center text-slate-500 text-sm">正在加载随堂测验与通知...</div>
+        </div>
+      </section>
+
+      <!-- Tab 3: 签到记录 -->
+      <section id="tab-signs" class="space-y-3 hidden">
+        <div class="glass-card rounded-2xl overflow-hidden border border-slate-800">
           <table class="w-full text-left text-xs">
-            <thead class="text-slate-400 border-b border-slate-800">
+            <thead class="bg-slate-900/80 text-slate-400 border-b border-slate-800">
               <tr>
-                <th class="py-2.5 pr-3">平台</th>
-                <th class="py-2.5 pr-3">课程名称</th>
-                <th class="py-2.5 pr-3">任务 / 作业标题</th>
-                <th class="py-2.5 pr-3">状态</th>
-                <th class="py-2.5 pr-3">截止时间 / 详情</th>
-                <th class="py-2.5">更新时间</th>
+                <th class="p-3 font-medium">打卡时间 (UTC+8)</th>
+                <th class="p-3 font-medium">课程名称</th>
+                <th class="p-3 font-medium">活动类型</th>
+                <th class="p-3 font-medium">打卡位置 / 状态</th>
+                <th class="p-3 font-medium text-right">结果</th>
               </tr>
             </thead>
-            <tbody id="tasksBody" class="divide-y divide-slate-800/70">
-              <tr><td colspan="6" class="py-6 text-center text-slate-500">正在加载任务列表...</td></tr>
+            <tbody id="signinTableBody" class="divide-y divide-slate-800/60 text-slate-300">
+              <tr><td colspan="5" class="p-8 text-center text-slate-500">暂无活动签到事件</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- 实时审计日志流 (占 1 列) -->
-      <section class="glass rounded-xl p-5">
-        <h2 class="text-sm font-semibold text-white mb-4">⚡ 边缘签到与双轨执行时间线 (UTC+8)</h2>
-        <div id="logsList" class="space-y-3 max-h-[520px] overflow-y-auto pr-1 text-xs">
-          <div class="text-slate-500">正在加载执行日志...</div>
+      <!-- Tab 4: 课程列表 -->
+      <section id="tab-courses" class="space-y-3 hidden">
+        <div id="courseList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载课程...</div>
+        </div>
+      </section>
+
+      <!-- Tab 5: 通知渠道配置与架构规范 -->
+      <section id="tab-settings" class="space-y-4 hidden max-w-3xl">
+        <div class="glass-card rounded-2xl p-5 space-y-4 text-xs">
+          <div>
+            <h3 class="text-sm font-semibold text-white">推送通道与 Cloudflare Agents 架构契约</h3>
+            <p class="text-slate-400 mt-1">单账号常驻边缘守护，无客户端凭据泄露风险。在 Cloudflare Worker 的 Secrets 或 .env 中配置对应 Token 即可自动激活以下通知方式：</p>
+          </div>
+
+          <div class="space-y-3">
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex items-start gap-3">
+              <span class="text-emerald-400 text-lg">💬</span>
+              <div class="flex-1">
+                <div class="font-medium text-white flex items-center justify-between">
+                  <span>微信推送 (PushPlus / Server酱)</span>
+                  <span class="text-[10px] text-emerald-400 px-1.5 py-0.5 rounded bg-emerald-500/10">强烈推荐</span>
+                </div>
+                <p class="text-slate-400 mt-0.5">当出现新作业、草稿作答就绪或签到成功时，在微信中直接弹出卡片通知，点击直达审批提交。</p>
+                <code class="mt-1 block text-[11px] text-slate-300 font-mono">PUSHPLUS_TOKEN = "your_token" 或 SERVERCHAN_KEY = "SCT..."</code>
+              </div>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex items-start gap-3">
+              <span class="text-blue-400 text-lg">🦅</span>
+              <div class="flex-1">
+                <div class="font-medium text-white">飞书 / 钉钉 / 企业微信 Webhook</div>
+                <p class="text-slate-400 mt-0.5">群机器人富文本通知，包含题目预览与直链跳转。</p>
+                <code class="mt-1 block text-[11px] text-slate-300 font-mono">WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/..."</code>
+              </div>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex items-start gap-3">
+              <span class="text-sky-400 text-lg">📱</span>
+              <div class="flex-1">
+                <div class="font-medium text-white">iOS Bark 推送</div>
+                <p class="text-slate-400 mt-0.5">iPhone 原生级无延迟弹窗推送与自定义铃声提醒。</p>
+                <code class="mt-1 block text-[11px] text-slate-300 font-mono">BARK_KEY = "your_bark_device_key"</code>
+              </div>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div class="font-medium text-white mb-1">🛡️ 架构铁律与提交门规范 (D7 准则)</div>
+              <p class="text-slate-400 leading-relaxed">
+                遵循 <span class="text-slate-200 font-mono">cf-agent-architecture.md</span> 核心安全准则：所有作业解答默认以【安全草稿模式 (pyFlag=1)】写入，并在本看板标记为“草稿暂存”。
+                用户可在本看板点击【审批提交】按钮一键正式提交，实现“草稿 → 通知 → 确认 → 提交”的确定性闭环。
+              </p>
+            </div>
+          </div>
         </div>
       </section>
     </div>
   </main>
 
+  <!-- 页脚 -->
+  <footer class="mt-auto border-t border-slate-900 py-4 px-6 text-center text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between max-w-7xl w-full mx-auto">
+    <div>上海海洋大学 · 智能教学助手平台</div>
+    <div class="mt-1 sm:mt-0">运行环境: Cloudflare Workers Edge · 时区: UTC+8</div>
+  </footer>
+
   <script>
-    let allTasks = [];
-    let currentFilter = 'all';
+    let state = null;
 
-    const savedToken = localStorage.getItem('afk_edge_token') || new URLSearchParams(location.search).get('token') || '';
-    if (savedToken) {
-      document.getElementById('tokenInput').value = savedToken;
-      localStorage.setItem('afk_edge_token', savedToken);
+    function showToast(msg, isSuccess = true) {
+      const box = document.getElementById('toastBox');
+      box.className = 'fixed top-16 right-4 z-50 px-4 py-2.5 rounded-xl text-xs font-medium shadow-2xl transition-all border flex items-center gap-2 ' +
+        (isSuccess ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200' : 'bg-rose-950/90 border-rose-500/50 text-rose-200');
+      box.innerHTML = (isSuccess ? '✅ ' : '❌ ') + msg;
+      box.classList.remove('hidden');
+      setTimeout(() => box.classList.add('hidden'), 4000);
     }
 
-    function getHeaders() {
-      const tk = document.getElementById('tokenInput').value.trim();
-      if (tk) localStorage.setItem('afk_edge_token', tk);
-      return tk ? { 'Authorization': 'Bearer ' + tk, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    function renderUI() {
+      if (!state) return;
+
+      // 顶部指标
+      document.getElementById('lastHeartbeat').innerText = '最后同步: ' + (state.lastSync || state.time || '刚刚');
+      const pendingCount = (state.homeworks || []).filter(h => h.isPending).length;
+      const solvedCount = (state.homeworks || []).filter(h => !h.isPending).length;
+
+      document.getElementById('pendingHomeworkCount').innerText = pendingCount;
+      document.getElementById('solvedHomeworkCount').innerText = '已 AI 暂存/提交: ' + solvedCount + ' 份';
+
+      const activeExams = (state.exams || []).filter(e => !e.isExpired);
+      document.getElementById('activeExamsCount').innerText = activeExams.length;
+      document.getElementById('totalNoticesCount').innerText = '通知箱捕获: ' + (state.notices || []).length + ' 条';
+      document.getElementById('signedCount').innerText = state.stats?.signinCount || (state.signinHistory || []).length;
+
+      document.getElementById('badge-homework').innerText = pendingCount;
+      document.getElementById('badge-exams').innerText = activeExams.length;
+
+      renderHomework();
+      renderExams();
+      renderSignins();
+      renderCourses();
     }
 
-    function showToast(msg) {
-      const el = document.getElementById('toast');
-      el.textContent = msg;
-      el.classList.remove('hidden');
-      setTimeout(() => el.classList.add('hidden'), 6000);
-    }
-
-    function setFilter(f) {
-      currentFilter = f;
-      renderTasks();
-    }
-
-    function statusBadge(status) {
-      if (status === 'submitted') return '<span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">✅ 已提交</span>';
-      if (status === 'draft_saved') return '<span class="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30">📝 草稿已存</span>';
-      if (status === 'failed') return '<span class="px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30">❌ 异常</span>';
-      return '<span class="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">⏳ 待处理</span>';
-    }
-
-    function renderTasks() {
-      const tbody = document.getElementById('tasksBody');
-      const filtered = currentFilter === 'all' ? allTasks : allTasks.filter(t => t.status === currentFilter);
-      if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500">当前筛选条件下暂无任务记录</td></tr>';
+    function renderHomework() {
+      const container = document.getElementById('homeworkList');
+      const list = state.homeworks || [];
+      if (list.length === 0) {
+        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">暂无待做作业，所有任务均已完成暂存/提交！🎉</div>';
         return;
       }
-      tbody.innerHTML = filtered.map(t => \`
-        <tr class="hover:bg-slate-800/40 transition">
-          <td class="py-3 pr-3 font-medium uppercase text-slate-300">\${t.platform}</td>
-          <td class="py-3 pr-3 text-slate-200">\${t.course_name || '-'}</td>
-          <td class="py-3 pr-3 font-medium text-white">\${t.title}</td>
-          <td class="py-3 pr-3">\${statusBadge(t.status)}</td>
-          <td class="py-3 pr-3 text-slate-400">\${t.result_summary || (t.deadline ? '截止: ' + t.deadline : t.compute_tier || '-')}</td>
-          <td class="py-3 text-slate-500 font-mono">\${t.updated_at || '-'}</td>
+
+      container.innerHTML = list.map(hw => {
+        const isDraft = hw.status === 'draft_saved';
+        const isSubmitted = hw.status === 'submitted';
+        const isPending = hw.isPending && !isDraft && !isSubmitted;
+
+        let badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">待做作业</span>';
+        if (isDraft) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">草稿已暂存</span>';
+        } else if (isSubmitted) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">已正式提交</span>';
+        }
+
+        const platformLabel = hw.platform ? hw.platform.toUpperCase() : 'CHAOXING';
+        const platformBadge = \`<span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">\${platformLabel}</span>\`;
+
+        return \`
+          <div class="glass-card rounded-2xl p-4 space-y-2.5 transition hover:border-slate-700">
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex items-center gap-1.5">
+                \${badge}
+                \${platformBadge}
+              </div>
+              <span class="text-[11px] text-slate-400 truncate max-w-[150px]">\${hw.courseName || '课程'}</span>
+            </div>
+            <h3 class="text-sm font-bold text-white tracking-tight">\${hw.title}</h3>
+            <div class="text-xs text-slate-400 space-y-0.5">
+              <p>📅 截止时间: \${hw.endDate || '无截止限制'}</p>
+              <p>🤖 作答模式: \${hw.aiSolved ? '已由 agy Agent 深度推理作答' : '自动监控求解中'}</p>
+              \${hw.resultSummary ? \`<p class="text-[11px] text-sky-300/80 truncate">📝 详情: \${hw.resultSummary}</p>\` : ''}
+            </div>
+            \${isDraft ? \`
+              <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                <span class="text-[11px] text-amber-300/90">🛡️ 草稿检查点已保存</span>
+                <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30">
+                  审批提交 &rarr;
+                </button>
+              </div>
+            \` : ''}
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function renderExams() {
+      const container = document.getElementById('examList');
+      const exams = state.exams || [];
+      const notices = state.notices || [];
+
+      if (exams.length === 0 && notices.length === 0) {
+        container.innerHTML = '<div class="py-12 text-center text-slate-500 text-sm">通知箱暂无待办事项</div>';
+        return;
+      }
+
+      let html = '';
+      if (exams.length > 0) {
+        html += '<h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">随堂测验与考试</h4>';
+        html += exams.map(e => {
+          const isAct = !e.isExpired;
+          return \`
+            <div class="glass-card rounded-xl p-4 border \${isAct ? 'border-rose-500/40 bg-rose-950/20' : 'border-slate-800'}">
+              <div class="flex items-center justify-between">
+                <span class="text-xs px-2 py-0.5 rounded-md font-medium \${isAct ? 'bg-rose-500 text-white' : 'bg-slate-800 text-slate-400'}">
+                  \${isAct ? '🚨 考试/测验进行中' : '⏳ 考试已截止'}
+                </span>
+                <span class="text-xs text-slate-400">\${e.courseName || ''}</span>
+              </div>
+              <h3 class="text-sm font-bold text-white mt-2">\${e.title}</h3>
+              <p class="text-xs text-slate-300 mt-1">时段: \${e.startTime || '无'} 至 \${e.endTime || '无'}</p>
+              \${e.url ? \`<a href="\${e.url}" target="_blank" class="inline-block mt-2 text-xs text-sky-400 hover:underline">🔗 跳转作答界面 &rarr;</a>\` : ''}
+            </div>
+          \`;
+        }).join('');
+      }
+
+      if (notices.length > 0) {
+        html += '<h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-5 mb-2">班级通知箱与云端守护日志</h4>';
+        html += notices.slice(0, 10).map(n => \`
+          <div class="glass-card rounded-xl p-3.5 space-y-1">
+            <div class="flex items-center justify-between text-xs text-slate-400">
+              <span class="font-medium text-slate-200">\${n.createrName || '通知'}</span>
+              <span>\${n.sendTime || ''}</span>
+            </div>
+            <h5 class="text-xs font-bold text-white">\${n.title}</h5>
+            <p class="text-xs text-slate-400 line-clamp-2">\${n.content || ''}</p>
+          </div>
+        \`).join('');
+      }
+
+      container.innerHTML = html;
+    }
+
+    function renderSignins() {
+      const tbody = document.getElementById('signinTableBody');
+      const list = state.signinHistory || [];
+      if (list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-500">云端已就绪，当前暂无签到历史记录</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = list.map(item => \`
+        <tr class="hover:bg-slate-800/30 transition">
+          <td class="p-3 font-mono text-slate-400">\${item.time}</td>
+          <td class="p-3 font-medium text-white">\${item.courseName}</td>
+          <td class="p-3"><span class="px-2 py-0.5 rounded bg-sky-500/10 text-sky-300">\${item.type}</span></td>
+          <td class="p-3 text-slate-300">\${item.address || '上海海洋大学预设经纬度'}</td>
+          <td class="p-3 text-right text-emerald-400 font-semibold">\${item.result || '已完成'}</td>
         </tr>
       \`).join('');
     }
 
-    async function loadDashboard() {
+    function renderCourses() {
+      const container = document.getElementById('courseList');
+      const courses = state.courses || [];
+      if (courses.length === 0) {
+        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">已加载全部在读课程，数据同步中...</div>';
+        return;
+      }
+
+      container.innerHTML = courses.map(c => \`
+        <div class="glass-card rounded-xl p-3.5 flex items-center justify-between text-xs">
+          <div>
+            <div class="font-bold text-white">\${c.courseName}</div>
+            <div class="text-[11px] text-slate-400 mt-0.5">ID: \${c.courseId} · 班级: \${c.classId || '-'}</div>
+          </div>
+          <span class="text-[11px] text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-500/10">● 正常监听</span>
+        </div>
+      \`).join('');
+    }
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('border-brand-500', 'text-white', 'font-semibold');
+        btn.classList.add('border-transparent');
+      });
+      document.getElementById('tabBtn-' + name).classList.add('border-brand-500', 'text-white', 'font-semibold');
+      document.getElementById('tabBtn-' + name).classList.remove('border-transparent');
+
+      ['homework', 'exams', 'signs', 'courses', 'settings'].forEach(t => {
+        const el = document.getElementById('tab-' + t);
+        if (el) el.classList.toggle('hidden', t !== name);
+      });
+    }
+
+    async function refreshData() {
+      const icon = document.getElementById('refreshIcon');
+      icon.classList.add('animate-spin');
       try {
-        const res = await fetch('/api/dashboard', { headers: getHeaders() });
-        if (res.status === 401) {
-          showToast('⚠️ 鉴权失败：请在右上角输入您的 API_BEARER_TOKEN 后点击刷新');
-          return;
-        }
-        const data = await res.json();
-        document.getElementById('statPending').textContent = data.stats.pendingCount;
-        document.getElementById('statDraft').textContent = data.stats.draftCount;
-        document.getElementById('statSubmitted').textContent = data.stats.submittedCount;
-        document.getElementById('statSignin').textContent = data.stats.signinCount;
-        document.getElementById('statQb').textContent = data.stats.questionBankCount;
-        document.getElementById('statTime').textContent = data.time;
-
-        allTasks = data.tasks || [];
-        renderTasks();
-
-        const sGrid = document.getElementById('sessionsGrid');
-        if (!data.sessions || data.sessions.length === 0) {
-          sGrid.innerHTML = '<div class="text-slate-500">尚无缓存的登录 Session，等待首次 Cron 触发或 CLI 同步</div>';
-        } else {
-          sGrid.innerHTML = data.sessions.map(s => \`
-            <div class="p-3 rounded-lg bg-slate-900/70 border border-slate-800 flex items-center justify-between">
-              <div>
-                <div class="font-semibold text-slate-200">\${s.platform} <span class="text-slate-500 font-normal">(\${s.account})</span></div>
-                <div class="text-[11px] text-slate-500 mt-0.5">更新: \${s.updated_at}</div>
-              </div>
-              <span class="px-2 py-0.5 rounded text-[11px] \${s.valid ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}">\${s.valid ? '🟢 有效' : '🔴 已过期'}</span>
-            </div>
-          \`).join('');
-        }
-
-        const logsEl = document.getElementById('logsList');
-        if (!data.logs || data.logs.length === 0) {
-          logsEl.innerHTML = '<div class="text-slate-500">暂无审计日志</div>';
-        } else {
-          logsEl.innerHTML = data.logs.map(l => \`
-            <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80">
-              <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                <span class="font-mono text-blue-400">[\${l.platform} · \${l.event_type}]</span>
-                <span>\${l.created_at}</span>
-              </div>
-              <div class="text-slate-200">\${l.summary}</div>
-            </div>
-          \`).join('');
+        const res = await fetch('/api/dashboard');
+        if (res.ok) {
+          state = await res.json();
+          renderUI();
+          showToast('看板数据已同步最新状态');
         }
       } catch (e) {
-        showToast('加载异常: ' + e.message);
+        console.error(e);
+        showToast('看板刷新失败', false);
+      } finally {
+        setTimeout(() => icon.classList.remove('animate-spin'), 600);
       }
     }
 
-    async function triggerEdgeCheck() {
-      showToast('⏳ 正在触发 Cloudflare Edge 实时签到与作业红点扫描...');
-      const res = await fetch('/check', { headers: getHeaders() });
-      const data = await res.json();
-      showToast(\`✅ 巡检完成：扫描 \${data.coursesCount || 0} 门课，签到 \${(data.signsExecuted || []).length} 次，发现待办课程 \${(data.homeworkCoursesDetected || []).length} 门\`);
-      loadDashboard();
+    async function triggerCheck() {
+      const btn = document.getElementById('checkBtn');
+      btn.disabled = true;
+      btn.innerText = '巡检中...';
+      try {
+        const res = await fetch('/check');
+        const json = await res.json();
+        showToast(json.success ? '巡检完成：扫描 ' + (json.coursesCount || 0) + ' 门课程' : '巡检完成');
+        await refreshData();
+      } catch (e) {
+        showToast('巡检触发异常', false);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '⚡ 立即巡检';
+      }
     }
 
     async function triggerDigest() {
-      showToast('📨 正在生成并向您的推送渠道发送今日任务简报...');
-      const res = await fetch('/api/digest', { method: 'POST', headers: getHeaders() });
-      const data = await res.json();
-      showToast(data.sent ? '✅ 汇总简报已推送至您配置的通知渠道！' : '⚠️ 简报已生成（若需手机接收请配置 WEBHOOK_URL / SERVERCHAN_KEY / BARK_KEY）');
+      const btn = document.getElementById('digestBtn');
+      btn.disabled = true;
+      btn.innerText = '推送中...';
+      try {
+        const res = await fetch('/api/digest', { method: 'POST' });
+        const json = await res.json();
+        showToast(json.sent ? '已成功向各配置渠道推送即时简报通知！' : '推送请求已受理');
+      } catch (e) {
+        showToast('简报推送失败', false);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '📨 推送简报';
+      }
     }
 
-    loadDashboard();
-    setInterval(loadDashboard, 30000);
+    async function approveSubmit(taskId) {
+      if (!confirm('确定将该作业正式提交到平台吗？提交后将无法修改草稿。')) return;
+      try {
+        const res = await fetch('/api/tasks/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskId: taskId,
+            status: 'submitted',
+            resultSummary: '用户已在看板手动审批正式提交'
+          })
+        });
+        const json = await res.json();
+        if (json.updated) {
+          showToast('作业已批准并正式提交！');
+          await refreshData();
+        } else {
+          showToast('提交处理失败', false);
+        }
+      } catch (e) {
+        showToast('网络请求异常', false);
+      }
+    }
+
+    // 页面加载自动获取首次数据
+    refreshData();
+    // 每 30 秒自动轮询一次看板
+    setInterval(refreshData, 30000);
   </script>
 </body>
 </html>`;

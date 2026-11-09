@@ -1,34 +1,33 @@
 {
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "afk-cloud-edge",
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chaoxing-dashboard-worker",
   "main": "src/index.ts",
   "compatibility_date": "2024-11-01",
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  // 每分钟触发一次轻量级巡检 (100% 在 Cloudflare Free Tier 每日 10万次额度内)
   "triggers": {
     "crons": [
-      "* * * * *"
+      "*/5 * * * *"
     ]
   },
-  // 非敏感运行参数 (敏感账号密码请使用 `npx wrangler secret put CHAOXING_PHONE` 和 `CHAOXING_PASSWORD` 注入)
   "vars": {
-    "CHAOXING_REALNAME": "您的真实姓名",
+    "CHAOXING_REALNAME": "同学",
     "AUTO_SUBMIT_HOMEWORK": "false",
-    "HOMEWORK_SCAN_INTERVAL_MINUTES": "10"
+    "HOMEWORK_SCAN_INTERVAL_MINUTES": "10",
+    "SYNC_SECRET": "chaoxing_secure_sync_key"
   },
-  // Cloudflare D1 免费 SQLite 数据库 (每日 500万读 / 10万写 免费，远优于 KV 的 1000 写限制)
-  // 运行 `npx wrangler d1 create afk-cloud-db` 后将生成的 database_id 填入下方
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "afk-cloud-db",
       "database_id": "<YOUR_D1_DATABASE_ID>"
     }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "CHAOXING_KV",
+      "id": "<YOUR_KV_NAMESPACE_ID>"
+    }
   ]
-  // 可选：如需额外绑定 Workers KV，可取消下方注释
-  // "kv_namespaces": [
-  //   { "binding": "KV", "id": "<YOUR_KV_NAMESPACE_ID>" }
-  // ]
 }

@@ -18,6 +18,7 @@ export interface KVNamespaceLike {
 export interface EdgeEnv {
   DB?: D1DatabaseLike;
   KV?: KVNamespaceLike;
+  CHAOXING_KV?: KVNamespaceLike;
   CHAOXING_PHONE?: string;
   CHAOXING_PASSWORD?: string;
   CHAOXING_REALNAME?: string;
@@ -60,9 +61,10 @@ export async function getCachedSession<T>(env: EdgeEnv, platform: string, accoun
     }
   }
 
-  if (env.KV) {
+  const kv = env.KV || env.CHAOXING_KV;
+  if (kv) {
     try {
-      const cached = await env.KV.get(`session:${platform}:${account}`, 'json');
+      const cached = await kv.get(`session:${platform}:${account}`, 'json');
       if (cached) return cached as T;
     } catch {
       // ignore
@@ -103,9 +105,10 @@ export async function saveCachedSession(
     }
   }
 
-  if (env.KV) {
+  const kv = env.KV || env.CHAOXING_KV;
+  if (kv) {
     try {
-      await env.KV.put(`session:${platform}:${account}`, jsonStr, { expirationTtl: ttlSeconds });
+      await kv.put(`session:${platform}:${account}`, jsonStr, { expirationTtl: ttlSeconds });
     } catch {
       // ignore
     }
