@@ -4,71 +4,136 @@
 
 ---
 
-## 一、 三级免费优先算力架构全景
+## 零、 费用精细核算（为什么整套系统 100% 永久免费 $0.00/月）
 
-| 算力层级 | 承载设施与免费额度 | 核心职责 | 计费与生命周期 |
-| :--- | :--- | :--- | :--- |
-| **Tier 0：边缘常驻、全景看板与通知层**<br>([`edge/`](./edge)) | • **Cloudflare Workers Cron**（10万次/天免费）<br>• **Cloudflare D1 SQLite**（500万读/天、**10万写/天**免费） | • **零服务器全景看板 (`GET /dashboard`)**：直接运行在 Cloudflare 边缘，实时展示学习通/PTA/智慧树各平台待办任务、草稿暂存与正式提交进度、签到时间线与登录态有效期，**完全不占 GCP 服务器内存/CPU**<br>• **定期 + 不定期双模通知**：秒签成功/发现新作业/完成答题时即时推送；每天 `08:30` 与 `21:00` (UTC+8) 自动推送全平台任务汇总日报（支持飞书/钉钉/企微、微信 Server酱/PushPlus、iOS Bark、Telegram） | **100% 永久免费**；不消耗任何云主机 CPU/内存 |
-| **Tier 1：无服务器容器与常驻控制面**<br>([`packages/`](./packages) + Cloud Run) | • **GCP `e2-micro`**（Always Free 常驻机，运行 `agy` + CF Plugin）<br>• **Google Cloud Run Jobs**（每月 **36万 vCPU-秒 + 18万 GiB-秒** 永久免费） | • **Antigravity CLI (`agy`)** 自动加载仓库内 [`.agents/`](./.agents) 规则与技能，通过 Cloudflare Plugin 直连读写 D1<br>• **双轨认知答题**：90% 客观题由 **Gemini Flash** 单次批量输出 JSON；10% 主观/编程题由 **Gemini Pro** 结合沙箱自测完成 | **100% 落在免费配额内**；Cloud Run Job 按秒运行、跑完归零 |
-| **Tier 2：重负载临时云主机爆破层**<br>([`infra/gcp/`](./infra/gcp)) | • **GCE Spot / 按需临时实例**<br>• 最小权限 SA (`sa-antigravity-worker`) | • 遇到超出 `e2-micro` / Cloud Run 限制的重型并发无头浏览器或长时评测时，通过 `pnpm afk burst --mode gce` 秒级拉起新机器<br>• 内置 `at now + 15 minutes` 物理自毁保险丝 + `EXIT trap` 完结即刻销毁 | **跑完即自毁**；彻底杜绝悬挂计费 |
+系统在架构设计上严格执行**“免费额度金字塔”**，各组件的额度与真实消耗对比如下：
+
+| 服务组件 | 官方永久免费额度 (Always Free) | 本项目实际月度预估消耗 | 额度占用率 | 费用 |
+| :--- | :--- | :--- | :---: | :---: |
+| **Cloudflare Workers** | **100,000 次请求 / 天** | 约 288 次/天（每 5 分钟定时唤醒一次） | **< 0.3%** | **$0.00** |
+| **Cloudflare D1 (SQLite)** | **5,000,000 次读/天 + 100,000 次写/天**<br>存储上限 5 GB | 读 < 3,000 次/天，写 < 100 次/天<br>存储 < 5 MB | **< 0.1%** | **$0.00** |
+| **Cloudflare Durable Objects** | **1,000,000 次请求 / 月** (免费层支持 SQLite) | 巡检 + 审批唤醒约 10,000 次/月 | **~1.0%** | **$0.00** |
+| **Cloudflare Workers KV** | 100,000 次读/天 + 1,000 次写/天 | 仅作为二级容灾缓存，< 50 次/天 | **< 5.0%** | **$0.00** |
+| **GCP `e2-micro` 云主机** | **1 台非抢占式实例 / 月**（需选美区）<br>30 GB 永久标准磁盘 + 1 GB 出网流量 | 1 台常驻运行 `afk-shim` 与 `agy` | **100% 免费** | **$0.00** |
+| **GCP Cloud Run Jobs** | **360,000 vCPU-秒 + 180,000 GiB-秒 / 月**<br>200 万次请求 / 月 | 偶发作业运行，每月约 1,200 vCPU-秒 | **< 0.4%** | **$0.00** |
+| **LLM 求解 (Antigravity CLI)** | 复用已有的 Google Antigravity / Gemini 权益 | 经 `agy` 读题解答，零额外 API 计费 | — | **$0.00** |
+| **Tier 2 临时 GCE 实例** | 按需创建（普通/Spot 计费） | 强制注入 **15 分钟物理自毁保险丝** | 仅极端兜底 | **$0.00** |
+
+> [!TIP]
+> **GCP 避免扣费避坑指南**：
+> Google Cloud 的 `e2-micro` Always Free 仅限美国三个区域：**`us-central1` (爱荷华)**、**`us-east1` (南卡罗来纳)** 或 **`us-west1` (俄勒冈)**。创建常驻机器时务必选择这三个区域之一，即可享受永久 0 元账单。
 
 ---
 
-## 二、 新用户从 0 到 1 完整部署教程（仅需 Google Cloud + Cloudflare 账号）
+## 一、 本地与云端分工（本地电脑是否可以关机？）
 
-假设一位新用户刚刚拿到了 **Cloudflare 账号** 和 **Google Cloud (GCP) 账号**，按以下 4 步即可在 10 分钟内完成全套零闲置云端自治系统的搭建：
+**结论：本地电脑完全可以随时关机，日常运行 100% 托管在云端！**
 
-### 第 1 步：在 Google Cloud 创建免费常驻控制机（或直接使用已有服务器）
-1. 登录 Google Cloud Console，创建一个新项目（例如 `my-afk-cloud`），记下 **Project ID**。
-2. 创建一台属于 **GCP Always Free（永久免费层）** 的轻量虚拟机作为常驻控制节点（或直接在本地/已有云主机执行）：
-   ```bash
-   gcloud config set project <您的_GCP_PROJECT_ID>
+- **日常 24/7 常驻**：全部由 **Cloudflare Edge Worker (`chaoxing-dashboard-worker`)** 接管，无缝进行课表窗口巡检、秒级签到、新作业红点探测、手机端定期与即时汇总通知。
+- **做题与浏览器**：托管在云端 GCP 常驻服务器的 [`packages/shim`](./packages/shim) 守护进程中。当 Cloudflare 发现新作业时，会自动通过安全通道派发给 GCP 上的 `agy` 完成浏览器读题、答题与草稿暂存。
+- **本地电脑定位**：仅用于初始代码克隆、配置部署或本地调试。本地开发预览服务已停用，不需要保持开机。
 
-   # 可选：若尚未开机器，一键创建美国西部/俄勒冈或台湾节点的 e2-micro 机器
-   gcloud compute instances create afk-control-plane \
-     --zone=us-west1-b \
-     --machine-type=e2-micro \
-     --image-family=debian-12 \
-     --image-project=debian-cloud \
-     --boot-disk-size=30GB
-   ```
-3. SSH 登录该服务器，克隆本仓库并执行一键初始化脚本：
-   ```bash
-   git clone <本仓库_GIT_URL> afk-cloud
-   cd afk-cloud
-   bash infra/gcp/bootstrap-gcp-node.sh
-   ```
+---
 
-### 第 2 步：配置 `.env` 账号并让 `agy`（或一键命令）全自动创建 Cloudflare & GCP 服务
+## 二、 部署指南：其他人如何从 0 到 1 部署？
 
-由于环境内已接入 **Cloudflare 官方技能（`cloudflare` / `wrangler`）** 与 **全自动编排引擎 [`cf-provisioner.ts`](./packages/core/cf-provisioner.ts)**，**您完全不需要手动创建数据库、不需要手动复制粘贴 `database_id` 或 Worker URL**！
+系统支持两种部署形态，用户可根据自身需求自由选择：
 
-1. 先在根目录 `.env` 中填入您的基础账号：
-   ```ini
-   CHAOXING_PHONE=您的学习通手机号
-   CHAOXING_PASSWORD=您的学习通密码
-   CHAOXING_REALNAME=您的真实姓名
-   GCP_PROJECT_ID=您的_GCP_PROJECT_ID
-   ```
-2. **任选以下一种方式全自动完成全部云端资源创建与绑定**：
-   - **方式 A（直接让 `agy` 自己干）**：
-     在 `afk-cloud` 目录下启动 `agy`，直接输入：
-     > *“帮我全自动创建并部署 Cloudflare D1、Edge Worker 和 GCP Cloud Run 服务”*
-     
-     `agy` 会自动加载 [`.agents/skills/cf-auto-provision/SKILL.md`](./.agents/skills/cf-auto-provision/SKILL.md) 与官方 Cloudflare 技能完成全套创建、建表、加密密钥上传与 `.env` 回填。
-   - **方式 B（一行命令全自动脚本化执行）**：
-     ```bash
-     # 仅需确保已登录 wrangler login 与 gcloud auth login，随后一行命令搞定全部：
-     pnpm afk setup-all
-     ```
-     *(注：也可单独运行 `pnpm afk setup-cf` 仅自动开通 Cloudflare D1 + Worker，或 `pnpm afk setup-gcp` 仅配置 GCP 最小权限围栏与免费 Cloud Run Job。脚本会自动创建 `afk-cloud-db`、提取 UUID 生成 `edge/wrangler.jsonc`、执行 SQL 迁移、通过 `secret bulk` 加密上传密码、部署 Worker 并自动把生成的 Worker URL 与鉴权 Token 写回 `.env`！)*
-
-### 第 3 步（可选）：首次导入 PTA (`pintia.cn`) / 智慧树 (`zhihuishu.com`) 浏览器登录态
-只需在电脑浏览器登录一次 PTA 或智慧树，复制 `Cookie` 执行一次导入，系统会自动写入本地 Chromium Profile **并同步加密备份至刚刚自动创建的 Cloudflare D1**（此后任何容器或临时机器拉起均直接处于已登录态）：
-```bash
-pnpm afk profile import-cookie --platform pta --cookie "PTASession=xxx; ..."
-pnpm afk profile import-cookie --platform zhihuishu --cookie "CASLOGC=xxx; ..."
 ```
+┌────────────────────────────────────────────────────────────────────────┐
+│ 模式 A：纯边缘 0 服务器极简托管（90% 同学推荐，5 分钟搞定，无需任何云主机） │
+│  - 纯靠 Cloudflare 免费配额 24/7 自动签到 + 新作业红点提醒 + 全景监控看板 │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│ 模式 B：全自动云端闭环托管（进阶：Cloudflare 边缘 + GCP 免费常驻机 agy 自动做题）│
+│  - 边缘发现作业 -> 派发常驻机 agy 浏览器读题解答 -> 暂存草稿 -> 看板人工审批提交 │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 模式 A：纯边缘 0 服务器极简托管（无需服务器）
+
+适合只需要：**24/7 自动全类型签到、手机端通知提醒、以及随时随地查看全景 Web 监控看板**的同学。
+
+#### 1. 准备工作
+- 注册一个免费的 [Cloudflare 账号](https://dash.cloudflare.com/)。
+- 本地安装 Node.js (>= 18) 与 pnpm。
+
+#### 2. 一键自动化部署
+```bash
+# 1. 克隆项目
+git clone https://github.com/fgh23333/afk-cloud.git
+cd afk-cloud
+pnpm install
+
+# 2. 登录 Cloudflare
+npx wrangler login
+
+# 3. 复制环境变量并填入账号
+cp .env.example .env
+# 编辑 .env，填入：
+# CHAOXING_PHONE=您的手机号
+# CHAOXING_PASSWORD=您的密码
+# CHAOXING_REALNAME=您的姓名
+# BARK_KEY=您的Bark推送Key（或 SERVERCHAN_KEY / WEBHOOK_URL）
+
+# 4. 一键自动开通 D1 数据库与 Worker
+pnpm afk setup-cf
+```
+
+> **全自动完成的事情**：脚本会自动在您的 Cloudflare 上创建 `afk-cloud-db` 数据库、创建 KV 命名空间、执行表结构初始化、将手机号密码通过加密 Secret 安全存入 Worker、部署 Worker 并将分配的域名写入 `.env`。
+
+部署完成后打开返回的 Worker 网址（例如 `https://chaoxing-dashboard-worker.<您的子域名>.workers.dev`），即可看到深色毛玻璃的个人专属全景监控看板！
+
+---
+
+### 模式 B：全自动云端闭环托管（含 agy 自动解题与草稿）
+
+在【模式 A】的基础上，结合一台免费的常驻云主机（例如 GCP `e2-micro`），实现全自动作业求解。
+
+#### 1. 在服务器上运行服务 Shim（Pet 节点）
+在常驻服务器上执行：
+```bash
+cd afk-cloud
+
+# 配置 .env
+cat << 'EOF' >> .env
+PORT=8788
+SHIM_TOKEN=生成一个随机Token作为通信密码
+AFK_EDGE_WORKER_URL=https://您的worker.workers.dev
+AFK_EDGE_BEARER_TOKEN=chaoxing_secure_sync_key
+EOF
+
+# 启动 Shim 守护进程 (支持 systemd 后台常驻)
+pnpm shim
+
+# 或注册为 systemd 系统自启服务：
+sudo cp infra/systemd/afk-shim.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now afk-shim
+```
+
+#### 2. 将服务器通过 Cloudflare Tunnel 与 Worker 对接
+在服务器上安装并启动 `cloudflared`：
+```bash
+cloudflared tunnel --url http://127.0.0.1:8788
+```
+记下生成的 Tunnel 域名（例如 `https://xxxx.trycloudflare.com`），在 Cloudflare Worker 中配置环境变量：
+```bash
+npx wrangler secret put AFK_SHIM_URL
+# 输入 Tunnel 域名
+
+npx wrangler secret put AFK_SHIM_TOKEN
+# 输入刚刚配置的 SHIM_TOKEN
+```
+
+#### 3. 运行效果
+- 边缘 `SignAgent` 探测到新作业，自动组装任务推入 `SolverAgent`。
+- `SolverAgent` 派发给常驻机 `afk-shim`。
+- `afk-shim` 串行唤起 `agy`，在真实浏览器中读题并暂存草稿（**绝不擅自正式提交**）。
+- 手机收到**“作业草稿已保存”**通知，用户点击看板一键审核并【审批提交】。
 
 ---
 
@@ -77,15 +142,13 @@ pnpm afk profile import-cookie --platform zhihuishu --cookie "CASLOGC=xxx; ..."
 | 操作场景 | CLI 命令 | 说明 |
 | :--- | :--- | :--- |
 | **環境与边缘连通自检** | `pnpm afk status` | 检查 `.env`、无头浏览器、Web 登录态及 Cloudflare D1 连通状态 |
-| **全自动开通 CF + GCP 服务** | `pnpm afk setup-all` | 自动创建 D1、迁移表、注入密钥、部署 Worker、回写 `.env` 并部署免费 Cloud Run |
-| **仅全自动开通 Cloudflare** | `pnpm afk setup-cf` | 零手动复制 ID/URL，一键完成 D1 创建 + Worker 部署 + `.env` 自动绑定 |
+| **一键全自动开通 CF + GCP** | `pnpm afk setup-all` | 自动创建 D1、迁移表、注入密钥、部署 Worker 并部署免费 Cloud Run |
+| **仅自动开通 Cloudflare 边缘** | `pnpm afk setup-cf` | 零手动配置，一键完成 D1 创建 + 表迁移 + 加密密钥 + Worker 部署 |
+| **启动服务器侧 Shim 守护** | `pnpm shim` | 启动服务器 HTTP Shim (Pet 节点)，提供 Bearer 鉴权与 agy 串行排队锁 |
 | **扫描在读课程与待做作业** | `pnpm afk scan` | 列出所有在读课程、未交作业、截止时间与课件数量 |
 | **批量下载课程课件 (RAG)** | `pnpm afk materials` | 下载全部课程 PPT/PDF/DOCX 并自动提取文本索引供答题检索 |
-| **双轨求解作业（草稿暂存）** | `pnpm afk solve` | **默认安全模式 (`pyFlag=1`)**：D1 缓存查表 $\rightarrow$ Flash 批量客观题 $\rightarrow$ Pro 主观题，暂存草稿并生成 UTC+8 报告 |
+| **双轨求解作业（草稿暂存）** | `pnpm afk solve` | **默认安全模式 (`pyFlag=1`)**：D1 缓存 $\rightarrow$ Flash 客观题 $\rightarrow$ Pro 主观题，暂存草稿并出报告 |
 | **双轨求解作业（正式提交）** | `pnpm afk solve --auto-submit` | 解答完毕后直接正式提交至学习通 (`pyFlag=3`) |
-| **启动 PTA/智慧树无头浏览器** | `pnpm afk web --platform pta` | 挂载 `.cache/browser-profiles/<platform>` 持久化 Profile 启动无头浏览器并暴露 CDP `9222` 端口供 `agy` 操控 |
-| **导入并云端同步 Web 登录态** | `pnpm afk profile import-cookie --platform pta --cookie "..."` | 将 PTA/智慧树 Cookie 写入本地 Profile 并同步至 Cloudflare D1，跨机器/跨容器永久免登 |
-| **调度至 Cloud Run 免费容器** | `pnpm afk burst --mode cloud-run --task "solve"` | 使用 GCP Cloud Run Jobs 免费额度异步隔离运行 |
-| **高负载短时拉起新 GCE 机器** | `pnpm afk burst --mode gce --task "solve" --ttl 15` | 调用 `gcloud` 拉起带 15 分钟物理自毁定时器的临时 GCE 实例 |
-| **触发全平台汇总通知简报** | `pnpm afk digest` | 立即让 Cloudflare Edge 生成并向手机/Webhook 推送各平台任务与完成状况简报 |
-| **打开零服务器 Web 监控看板** | 浏览器访问 `AFK_EDGE_WORKER_URL` | 在 Cloudflare 边缘直接查看各平台任务进度、签到记录与一键触发巡检 |
+| **导入 Web 登录态 (PTA/智慧树)** | `pnpm afk profile import-cookie --platform pta --cookie "..."` | 将 Cookie 写入本地 Profile 并加密备份至 Cloudflare D1，跨机器免登 |
+| **手动触发汇总推送通知** | `pnpm afk digest` | 立即触发 Cloudflare Edge 推送全平台任务与签到完成状况简报 |
+| **打开 Web 监控看板** | 浏览器访问 Worker 地址 | 在 Cloudflare 边缘直接查看任务进度、签到记录与审批提交 |

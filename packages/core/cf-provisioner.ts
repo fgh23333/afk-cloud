@@ -64,12 +64,13 @@ export function renderWranglerConfig(options: {
     compatibility_date: '2024-11-01',
     compatibility_flags: ['nodejs_compat'],
     triggers: {
-      crons: ['* * * * *'],
+      crons: ['*/5 * * * *'],
     },
     vars: {
       CHAOXING_REALNAME: options.realname || '同学',
       AUTO_SUBMIT_HOMEWORK: options.autoSubmit || 'false',
       HOMEWORK_SCAN_INTERVAL_MINUTES: '10',
+      SYNC_SECRET: 'chaoxing_secure_sync_key',
     },
     d1_databases: [
       {
@@ -77,6 +78,15 @@ export function renderWranglerConfig(options: {
         database_name: options.dbName,
         database_id: options.databaseId,
       },
+    ],
+    durable_objects: {
+      bindings: [
+        { name: 'SIGN_AGENT', class_name: 'SignAgent' },
+        { name: 'SOLVER_AGENT', class_name: 'SolverAgent' },
+      ],
+    },
+    migrations: [
+      { tag: 'v1', new_sqlite_classes: ['SignAgent', 'SolverAgent'] },
     ],
   };
 
