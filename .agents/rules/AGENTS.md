@@ -6,7 +6,7 @@ trigger: always_on
 
 本仓库是一套 **高内聚、零闲置、以协议原生 + 真实浏览器驱动的个人云端自治 Agent（Personal Autonomous Cloud Agent）** ，主要覆盖超星学习通、智慧树、PTA 等高校教学与评测平台，最大化榨干 Google Gemini Pro 深度推理与长上下文资源，并在架构上实现 **100% 永久免费 ($0.00/月)** 运行。
 
-- **官方标准线上入口**：`https://afk.idiotshoumy.com`（原备用镜像已全面下线归并，统一由此单一边缘域名提供服务）。
+- **线上服务入口**：统一由 Cloudflare Edge 分配的 Worker 域名或用户绑定的个人自定义域名（例如 `https://afk.<your-domain>.com`）提供服务。
 
 当你在本工作区执行任务时，必须严格遵守以下架构铁律：
 

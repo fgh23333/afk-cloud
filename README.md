@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://afk.idiotshoumy.com"><img src="https://img.shields.io/badge/Edge%20Domain-afk.idiotshoumy.com-emerald.svg" alt="Custom Domain"></a>
+  <img src="https://img.shields.io/badge/Edge%20Entry-Custom%20Domain%20%2F%20workers.dev-emerald.svg" alt="Edge Entry">
   <img src="https://img.shields.io/badge/Monthly%20Cost-%240.00%20(Always%20Free)-success.svg" alt="Cost: $0.00">
   <img src="https://img.shields.io/badge/Compute-Cloudflare%20Edge%20%2B%20GCP%20e2--micro-orange.svg" alt="Compute">
   <img src="https://img.shields.io/badge/Model-Gemini%20Pro%20%2B%20Flash-purple.svg" alt="Models">
@@ -15,7 +15,7 @@
 > **核心使命**：为高校学生打造的高内聚、零闲置、以协议原生 + 真实浏览器驱动的个人云端自治 Agent。深度覆盖 **超星学习通、智慧树、PTA（拼题 A）** 等平台。
 > **双轨理念**：全面榨干 Google Gemini Pro 深度推理与 1M 超大长上下文能力；严格遵循 **草稿安全优先 (`pyFlag=1`)** 与 **“边缘牛群 + 常驻宠物”** 架构，日常无需开启本地电脑，全系统 **100% 永久免费 ($0.00/月)** 运行。
 
-- **官方标准线上入口**：[`https://afk.idiotshoumy.com`](https://afk.idiotshoumy.com)（深色磨砂玻璃全景 Web 控制面板）。
+- **线上访问入口**：部署后即可通过 Cloudflare 分配的 `https://<您的 Worker 子域名>.workers.dev`（或您在 Cloudflare 绑定的个人自定义域名）进入深色磨砂玻璃全景 Web 控制面板。
 
 ---
 
@@ -61,7 +61,7 @@
 ```
 ┌─ Cloudflare Edge（牛群：无黏性状态，高可用轻量托管）───────────────────────┐
 │                                                                        │
-│  边缘 Worker (https://afk.idiotshoumy.com)                              │
+│  边缘 Worker (https://<您的 Worker 域名或自定义域名>)                     │
 │    ├─ SignAgent (DO)    24/7 秒级心跳巡检、全类型签到、作业红点探测          │
 │    ├─ SolverAgent (DO)  任务排队、去重、记账、手机即时推送通知、审批门拦截     │
 │    ├─ Cloudflare D1     SQLite 持久化（课程、签到流水、题库缓存、Web Profiles）│
@@ -222,7 +222,7 @@ pnpm install
 cat << 'EOF' > .env
 PORT=8788
 SHIM_TOKEN=generate_a_random_token_here_123456
-AFK_EDGE_WORKER_URL=https://afk.idiotshoumy.com
+AFK_EDGE_WORKER_URL=https://<您的 Worker 域名或自定义域名>
 AFK_EDGE_BEARER_TOKEN=chaoxing_secure_sync_key
 GEMINI_API_KEY=您的Gemini_API_Key
 EOF
