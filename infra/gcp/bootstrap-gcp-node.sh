@@ -115,11 +115,16 @@ EOF"
 sudo systemctl daemon-reload
 sudo systemctl enable --now afk-shim
 
-# 9. 状态自检
+# 9. 状态自检与 Cloudflare OAuth2 说明
 echo "======================================================"
 echo " 🟢 GCP 常驻节点全自动环境编排完成！"
 echo "======================================================"
 sleep 2
 curl -s http://127.0.0.1:8788/health || echo "提示：afk-shim 服务正在初始化中..."
 echo ""
-echo "🚀 提示：推荐将默认解题模型设为 Gemini 3.8 Flash (AFK_FLASH_MODEL=gemini-3.8-flash) 以大幅节省配额！"
+echo "🔑 Cloudflare OAuth2 登录提示："
+echo "   若需在云端主机执行 wrangler 边缘命令，只需运行: npx wrangler login"
+echo "   无桌面环境下 Wrangler 会直接打印 OAuth2 授权链接，在本地电脑浏览器打开并点击授权即可自动绑定！"
+echo ""
+echo "🚀 模型配额保护提示："
+echo "   推荐将主力解题模型设为 Gemini 3.8 Flash (AFK_FLASH_MODEL=gemini-3.8-flash) 以大幅节省配额！"

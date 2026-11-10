@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INSTANCE_NAME="${GCP_INSTANCE_NAME:-afk-node}"
-ZONE="${GCP_ZONE:-us-central1-a}"
+ZONE="${GCP_ZONE:-us-west1-a}"
 MACHINE_TYPE="e2-micro"
 DISK_SIZE="30GB"
 DISK_TYPE="pd-standard"

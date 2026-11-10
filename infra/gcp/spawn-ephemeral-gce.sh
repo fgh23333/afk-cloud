@@ -11,7 +11,7 @@ set -euo pipefail
 TASK_CMD="${1:-solve}"
 INSTANCE_NAME="runner-temp-$(date +%s)"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project)}"
-ZONE="${GCP_ZONE:-asia-east1-b}"
+ZONE="${GCP_ZONE:-us-west1-a}"
 MACHINE_TYPE="${GCE_BURST_MACHINE_TYPE:-e2-micro}"
 TTL_MINUTES="${GCE_BURST_TTL_MINUTES:-15}"
 USE_SPOT="${GCE_BURST_USE_SPOT:-true}"

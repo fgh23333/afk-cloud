@@ -48,11 +48,11 @@
 
 > [!TIP]
 > **GCP 避免扣费避坑指南**：
-> Google Cloud 的 `e2-micro` 免费实例必须选择以下三个美国区域之一：
-> 1. **`us-central1` (爱荷华 Iowa)**
-> 2. **`us-east1` (南卡罗来纳 South Carolina)**
-> 3. **`us-west1` (俄勒冈 Oregon)**
-> 并在创建磁盘时选择 **“标准永久磁盘 (Standard Persistent Disk)”** ，容量不超过 **30 GB**，即可享受永久 0 元账单。
+> Google Cloud 的 `e2-micro` 免费实例必须选择以下三个美国区域之一（**默认推荐美西俄勒冈**）：
+> 1. **`us-west1` (美西俄勒冈 Oregon，默认推荐)**
+> 2. **`us-central1` (爱荷华 Iowa)**
+> 3. **`us-east1` (南卡罗来纳 South Carolina)**
+> 并在创建磁盘时选择 **“标准永久磁盘 (Standard Persistent Disk)”** ，容量不超过 **30 GB** ，即可享受永久 0 元账单。
 
 ---
 
@@ -195,19 +195,19 @@ pnpm afk setup-vm
 **方式 2（在 GCP 控制台手动创建）**：
 1. 登录 [Google Cloud Console](https://console.cloud.google.com/) $\rightarrow$ **Compute Engine $\rightarrow$ 虚拟机实例 $\rightarrow$ 创建实例**：
    - **名称**：`afk-node`
-   - **区域 (Region)**：务必选择 **`us-central1` (爱荷华)**、**`us-east1` (南卡罗来纳)** 或 **`us-west1` (俄勒冈)** 之一。
+   - **区域 (Region)**：推荐选择 **`us-west1` (美西俄勒冈，默认)**，亦可选 `us-central1` (爱荷华) 或 `us-east1` (南卡罗来纳)。
    - **机器类型**：选择 **`E2` 系列 $\rightarrow$ `e2-micro` (2 vCPU, 1 GB 内存)**。
    - **引导磁盘**：操作系统选择 **Ubuntu 22.04 LTS**，磁盘类型选择 **标准永久磁盘 (Standard Persistent Disk)**，大小设为 **30 GB**。
 2. 点击 **创建**。
 
 #### 第二步：云端机器一键环境编排（含 gcloud CLI、Node 20、Chromium 与守护进程）
 
-在云端宿主机上也**必须安装 `gcloud` CLI**，以便常驻的 Agent 能自由调度 Cloud Run 与临时应急算力。
+在云端宿主机上也 **必须安装 `gcloud` CLI** ，以便常驻的 Agent 能自由调度 Cloud Run 与临时应急算力。
 
 连接云主机并执行一行全自动初始化脚本：
 ```bash
 # 通过 gcloud ssh 一键远程触发全自动初始化：
-gcloud compute ssh afk-node --zone=us-central1-a --command="curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash"
+gcloud compute ssh afk-node --zone=us-west1-a --command="curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash"
 
 # 或在 GCP 控制台打开网页 SSH 终端后直接粘贴运行：
 curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash
@@ -243,6 +243,10 @@ npx wrangler secret put AFK_SHIM_URL
 npx wrangler secret put AFK_SHIM_TOKEN
 # 输入云端 .env 中的 SHIM_TOKEN
 ```
+
+> [!NOTE]
+> **关于云端机器的 Cloudflare OAuth2 登录机制**：
+> 若您在云端 Linux 主机上需要运行 `npx wrangler login`，因为服务器没有桌面浏览器，Wrangler 会自动在终端输出一条 OAuth2 授权链接（如 `https://dash.cloudflare.com/oauth2/auth?...`）。您只需在本地电脑浏览器打开该链接点击“授权”，即可无缝将登录凭证下发至云端机器！同理，若使用命名隧道 `cloudflared tunnel login`，也是通过终端给出的 OAuth2 链接在本地浏览器一键完成证书下载。
 
 > [!TIP]
 > **模型防烧 Quota 提示（强烈推荐切到 Gemini 3.8 Flash）**：

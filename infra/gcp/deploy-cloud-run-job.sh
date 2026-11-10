@@ -7,7 +7,7 @@
 set -euo pipefail
 
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project)}"
-GCP_REGION="${GCP_REGION:-asia-east1}"
+GCP_REGION="${GCP_REGION:-us-west1}"
 JOB_NAME="${CLOUD_RUN_JOB_NAME:-afk-sandbox-runner}"
 SA_NAME="${GCP_SERVICE_ACCOUNT:-sa-antigravity-worker}"
 SA_EMAIL="${SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"

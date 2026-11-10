@@ -18,7 +18,7 @@ trigger: always_on
   - 负责 24/7 心跳巡检、复用 D1 缓存的登录 Cookie、秒级全类型签到（普通/拍照/手势/定位/二维码）、新作业红点探测（`workTestPendingNew`）、题库 SHA-256 零 Token 缓存查询、以及移动端 Web 看板与审批门管控。
   - **D1 优先原则**：D1 免费层每日提供 **500 万次读 + 10 万次写**（存储 5GB），远高于 KV 的每日 1,000 次写限额，主持久化一律走 D1。
 - **Tier 1（GCP `e2-micro` 常驻机 + Cloud Run Jobs 免费层）**：
-  - **常驻机（宠物窝）**：使用 Google Cloud 永久免费的 1 台 `e2-micro` 实例（需选 `us-central1`、`us-east1` 或 `us-west1`），机内必须安装 Node 20、pnpm、Chromium 与 `gcloud` CLI，常驻运行 `afk-shim` 与 Antigravity CLI (`agy`)。
+  - **常驻机（宠物窝）**：使用 Google Cloud 永久免费的 1 台 `e2-micro` 实例（默认推荐美西俄勒冈 `us-west1`，亦可选 `us-central1` 或 `us-east1`），机内必须安装 Node 20、pnpm、Chromium 与 `gcloud` CLI，常驻运行 `afk-shim` 与 Antigravity CLI (`agy`)。
   - **网络互联**：通过 **Cloudflare Tunnel**（零公网暴露、零开放端口）与 Cloudflare Edge 建立安全双向隧道，Edge 通过 Bearer Token 派发解题与操作指令。
   - **容器秒级算力**：高并发扫描或批量课件解压通过 Cloud Run Jobs (`gcloud run jobs execute`) 弹性分发，每月 360,000 vCPU-秒免费额度，跑完即销毁。
 - **Tier 2（极端负载 `gcloud` 短时临时 GCE 实例 + 物理 TTL 熔断）**：
