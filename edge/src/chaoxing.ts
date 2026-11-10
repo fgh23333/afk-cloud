@@ -194,7 +194,8 @@ export async function performSign(
   session: UserSession,
   name = '同学',
   locations: SignLocation[] = DEFAULT_SIGN_LOCATIONS,
-  enc = ''
+  enc = '',
+  objectId = ''
 ): Promise<string> {
   const activeId = activity.id;
   const otherId = activity.otherId;
@@ -202,7 +203,8 @@ export async function performSign(
   const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
   const loc = pool[Math.floor(Math.random() * pool.length)];
   const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
-  const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}`;
+  const objParam = objectId ? `&objectId=${encodeURIComponent(objectId)}` : '';
+  const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}`;
 
   const res = await fetch(signUrl, {
     headers: {
@@ -216,7 +218,7 @@ export async function performSign(
     return `[签到成功] 活动: ${activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
   }
 
-  const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}`;
+  const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}${objParam}`;
   const mRes = await fetch(mobileUrl, {
     headers: {
       Cookie: session.cookie,

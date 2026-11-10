@@ -14,7 +14,16 @@ import {
   getCourseMaterialsList,
   searchCourseMaterialsContext,
 } from './materials';
+import { ExamNoticeItem, fetchNoticeList, NoticeItem } from './notice';
+import { getOrUploadPhotoObject, submitPhotoSign } from './photo';
 import { ChaoxingCookies, chaoxingLogin, getChaoxingCourses } from './session';
+
+export * from './des';
+export * from './homework';
+export * from './materials';
+export * from './notice';
+export * from './photo';
+export * from './session';
 
 export class ChaoxingAdapter implements PlatformAdapter {
   public readonly name = 'chaoxing' as const;
@@ -35,6 +44,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
     console.log(blue(`[ChaoxingAdapter] 正在验证账号 ${this.phone} 登录态...`));
     this.cachedCookies = await chaoxingLogin(this.phone, this.password);
     return this.cachedCookies;
+  }
+
+  public async scanNotices(limit = 20): Promise<NoticeItem[]> {
+    const cookies = await this.ensureAuth();
+    return fetchNoticeList(cookies, limit);
   }
 
   public async scanCourses(): Promise<CourseInfo[]> {

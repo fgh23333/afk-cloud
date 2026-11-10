@@ -298,6 +298,28 @@ export default {
       return corsText(res.includes('成功') ? 'success' : res);
     }
 
+    if (url.pathname === '/photo' && request.method === 'POST') {
+      const body: any = await request.json().catch(() => ({}));
+      const session: UserSession = {
+        _uid: body.uid || body._uid || '',
+        _d: body._d || '',
+        vc3: body.vc3 || '',
+        uf: body.uf || '',
+        fid: body.fid || '2893',
+        cookie: `_uid=${body.uid || body._uid}; UID=${body.uid || body._uid}; _d=${body._d}; vc3=${body.vc3}; uf=${body.uf}; fid=${body.fid || '2893'}`,
+      };
+      const res = await performSign(
+        { id: String(body.activeId), name: '拍照签到', otherId: 2 },
+        { courseId: String(body.courseId || ''), classId: String(body.classId || ''), courseName: '拍照签到' },
+        session,
+        body.name || env.CHAOXING_REALNAME || '同学',
+        undefined,
+        '',
+        body.objectId || ''
+      );
+      return corsText(res.includes('成功') ? 'success' : res);
+    }
+
     if (url.pathname === '/uvtoken' && request.method === 'POST') {
       const body: any = await request.json().catch(() => ({}));
       const cookie = `_uid=${body.uid || body._uid}; UID=${body.uid || body._uid}; _d=${body._d}; vc3=${body.vc3}; uf=${body.uf}`;
