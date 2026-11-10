@@ -5,7 +5,7 @@ description: Google Cloud 免费算力（Cloud Run Jobs）与高负载短时拉�
 
 # `cloud-burst-runner` 弹性算力与安全围栏操作手册
 
-本技能遵循**“优先榨干免费配额（Cloud Run Jobs），高负载按需秒级拉起临时 GCE 并强制 TTL 自毁”**的原则。
+本技能遵循 **“优先榨干免费配额（Cloud Run Jobs），高负载按需秒级拉起临时 GCE 并强制 TTL 自毁”** 的原则。
 
 ## 1. 安全围栏初始化（首次在 GCP 上执行一次）
 
