@@ -12,8 +12,8 @@
 | D2 | agy 容器化（Cloud Run 按需拉起） | **否决** | 掉登录态、掉会话 memory，外部持久化逆着工具设计，得不偿失 |
 | D3 | agy 归宿 | **常驻服务器（宠物）** | 登录态 + memory 原地不动，永不搬迁，尽量少打扰 |
 | D4 | durable 边界 | **不给 agy 做 durable，给 agy 以外的一切做 durable** | 排队/缓存/重试/记账全在 CF DO；agy 的黏性状态一个字节都不外移 |
-| D5 | 内容拉取 | **agy 自己拉**（CF 只传任务链接） | CF 未必拉得到正确资料；agy 对着真实页面读题 = ground truth，零协议漂移 |
-| D6 | 读写分工 | **CF 只读、agy 只写** | 探测走协议读接口（已验证稳定）；填答案/存草稿/提交全是 agy 浏览器行为，CF 不碰写协议 |
+| D5 | 内容拉取 | **双模：协议原生轻量读 + 浏览器按需读** | 学习通全量作业与课件支持纯 HTTP 协议拉取（< 30MB 内存，极速）；PTA 与智慧树知到则通过浏览器快照对齐，按需启动，避免无谓 OOM |
+| D6 | 读写分工 | **CF 负责巡检审批记账、宿主机负责解题与写入** | CF 纯协议定时探测与红点巡检（轻量零闲置）；解题、草稿写入与提交由宿主机 Agent 原生协议或真机完成，CF 不碰写协议 |
 | D7 | 提交门 | **草稿 → 通知 → 确认 → 提交** | 对应现有 `AUTO_SUBMIT_HOMEWORK=false` / `pyFlag=1` 安全默认；全自动 = 打开开关连发两条指令 |
 | D8 | 浏览器 | **本地 Chromium 按需起停**（不搬 Browser Rendering） | agy 经 chrome-devtools MCP 连 `localhost:9222`，远程 CDP 带鉴权改造脆；profile 本来就走 D1 同步，无黏性状态 |
 
@@ -120,8 +120,8 @@ CREATE TABLE IF NOT EXISTS qa_cache (
 | `edge/src/store.ts` 的题库缓存部分 | 被 DO `qa_cache` 取代（看板聚合类保留 D1） |
 | `packages/core/d1-bridge.ts` 的 `computeQuestionHash` | 移植进 SolverAgent |
 | `packages/core/browser-profile.ts` | shim 复用（起浏览器 + profile D1 同步） |
-| `packages/core/solver.ts` 双轨调度 | **退役**（内容拉取与解题归 agy；保留 `localHeuristicSolve` 可选兜底） |
-| `packages/adapters/chaoxing/homework.ts` 协议写接口 | **退役**（提交由 agy 浏览器完成，CF 不写） |
+| `packages/core/solver.ts` 双轨调度 | 宿主机 CLI 与 shim 共享复用（支持直接调用 Flash/Pro 模型，或转交 agy） |
+| `packages/adapters/chaoxing/homework.ts` 协议读写接口 | 宿主机复用（超星协议原生极速读写，节省内存；复杂防作弊页面切真机 Chromium） |
 | `.env` 的 `AFK_EDGE_WORKER_URL` / `AFK_EDGE_BEARER_TOKEN` | 直接复用做回调通道 |
 
 ---

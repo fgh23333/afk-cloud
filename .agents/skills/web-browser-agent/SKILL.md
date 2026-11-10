@@ -51,3 +51,29 @@ pnpm afk web --platform zhihuishu
   pnpm afk profile import-cookie --platform pta --domain ".pintia.cn" --cookie "PTASession=xxx; ..."
   pnpm afk profile import-cookie --platform zhihuishu --domain ".zhihuishu.com" --cookie "CASLOGC=xxx; ..."
   ```
+
+---
+
+## 3. “知到”（智慧树）Web 端视频学习与刷课实操指南
+
+很多人误以为“知到”只有手机 App，实际上 **“知到”即智慧树（zhihuishu.com）的移动端品牌名** ，智慧树官方提供完整的 Web 端播放与学习系统。
+
+### 1. 官方 Web 入口
+- **Web 视频播放与章节学习页**：`https://studyh5.zhihuishu.com/videoStudy.html`
+- **智慧树学生中心与在读课程列表**：`https://onlineweb.zhihuishu.com/onlinestudent/`
+- **门户首页**：`https://www.zhihuishu.com/`
+
+### 2. 为什么严禁伪造 HTTP 进度包？
+智慧树平台后端会对客户端的播放心跳进行严格的 **时间差与行为序列对账** ：
+1. 若进度上报时间间隔远短于视频播放时长，会直接标记异常并清空观看记录；
+2. 视频中途会随机弹出小测试弹窗，未作答并继续推进将被标记为外挂封禁；
+3. 纯 API 发包缺少浏览器端渲染、Canvas 绘图与 CDP 事件流水。
+
+因此，本项目坚决采用 **无头浏览器 + 自动化守护看门狗（Watchdog）** 的拟真挂机方案。
+
+### 3. Web 自动化看门狗机制（`ZHIHUISHU_INJECT_SCRIPT`）
+代码位于 `packages/adapters/web-agent/index.ts`，在启动无头 Chromium 打开课程播放页后，注入该看门狗脚本即可实现静默后台运行：
+- **防切屏与失焦暂停**：Hook 重写 `document.hidden` 与 `document.visibilityState`，并阻止 `window.blur` 与 `visibilitychange` 事件传递，即使浏览器处于后台或无头模式也持续播放；
+- **全自动静音与合规倍速**：强制 `video.muted = true`，并将播放倍速锁定在平台允许的安全上限 `playbackRate = 1.25`（超过 1.5x 易触发后端审计）；
+- **中途弹题秒级拦截**：每 3 秒自动探测并捕获页面内的弹窗测试组件（`.popboxes_div`、`.topic-item`），自动点击首选答案并触发关闭按钮（`.popboxes_close`），保证视频不中断；
+- **完结自动跳集**：当检测到当前视频播放进度 $\ge 95\%$ 或触发 `ended` 事件时，自动定位并点击右侧目录中的下一节按钮（`#nextBtn` 或 `.catalogue_item.active + .catalogue_item`），实现全章节自动流式挂机。

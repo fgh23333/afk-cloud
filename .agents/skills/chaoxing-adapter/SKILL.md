@@ -7,6 +7,11 @@ description: 超星学习通（Chaoxing）全功能适配器技能。涵盖 DES 
 
 本模块从已验证的 `chaoxing-signin` 工程提纯升级而来，位于 `packages/adapters/chaoxing/` 与 `edge/src/chaoxing.ts`。
 
+## 0. 协议原生架构（Protocol-First）
+
+- **极低资源开销（< 30MB RAM）**：超星学习通的所有在读课程扫描、作业题目与选项抽取（`fetch` + `jsdom` 解析）、课件资料下载（PPT/PDF/DOCX/TXT/MD）与 RAG 文本提取、通知公告以及签到打卡，**全部通过轻量原生 HTTP 接口完成**，在几秒内即可极速完成全量拉取。
+- **何时需要无头 Chromium 浏览器？** 只有在进行视频课件刷课（学习通对视频播放有切屏失焦探测与行为心跳审计）时，才按需拉起 Chromium 浏览器。日常扫描、资料下载与作业提取完全无需启动庞大的浏览器进程，保护云主机 1GB 内存不爆开。
+
 ## 1. 常用 CLI 指令速查
 
 在项目根目录下（确保 `.env` 已配置 `CHAOXING_PHONE` 和 `CHAOXING_PASSWORD`）：

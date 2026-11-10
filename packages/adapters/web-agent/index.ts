@@ -22,6 +22,7 @@ export interface WebPlatformPreset {
   name: PlatformName;
   displayName: string;
   homeUrl: string;
+  studyUrl?: string;
   todoSelectorHint: string;
   editorSelectorHint: string;
 }
@@ -36,12 +37,61 @@ export const WEB_PLATFORM_PRESETS: Record<string, WebPlatformPreset> = {
   },
   zhihuishu: {
     name: 'zhihuishu',
-    displayName: '智慧树在线教育平台 (zhihuishu.com)',
-    homeUrl: 'https://onlineweb.zhihuishu.com/onlinestuh5',
-    todoSelectorHint: '在读课程 -> 章节测试 / 作业考试 -> 待完成任务列表',
-    editorSelectorHint: '.exam-question-item, .el-radio, .el-checkbox, textarea',
+    displayName: '智慧树 / 知到在线教育平台 (zhihuishu.com)',
+    homeUrl: 'https://studyh5.zhihuishu.com/videoStudy.html',
+    studyUrl: 'https://studyh5.zhihuishu.com/videoStudy.html',
+    todoSelectorHint: '我的学堂 -> 正在进行的课程 -> 视频学习 / 章节测试',
+    editorSelectorHint: '.exam-question-item, .el-radio, .el-checkbox, textarea, .popboxes_div',
   },
 };
+
+/**
+ * 智慧树 / 知到 Web 播放器自动化辅助注入脚本（防切屏暂停、安全静音、合规倍速、弹题关闭、自动换集）
+ * 可在 CDP 会话或 Playwright 页面中直接执行以实现安全静默挂机
+ */
+export const ZHIHUISHU_INJECT_SCRIPT = `
+(function afkZhihuishuWatchDog() {
+  if (window.__afk_zhs_hooked) return;
+  window.__afk_zhs_hooked = true;
+
+  // 1. 阻止切屏失焦暂停 (反作弊规避)
+  try {
+    Object.defineProperty(document, 'hidden', { get: () => false });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
+    window.addEventListener('blur', (e) => e.stopImmediatePropagation(), true);
+    document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
+  } catch {}
+
+  // 2. 视频播放器自动优化与弹题处理循环
+  setInterval(() => {
+    // 处理弹窗单选题/测试题（自动关闭或选首个选项恢复播放）
+    const dialogs = document.querySelectorAll('.popboxes_div, .topic-item, .dialog-test');
+    if (dialogs.length > 0) {
+      const option = document.querySelector('.popboxes_div input[type="radio"], .topic-item .el-radio');
+      if (option) (option as HTMLElement).click();
+      const closeBtn = document.querySelector('.popboxes_close, .btn-submit, .btn-next') as HTMLElement;
+      if (closeBtn) closeBtn.click();
+    }
+
+    // 监控当前 <video> 标签
+    const video = document.querySelector('video') as HTMLVideoElement;
+    if (video) {
+      if (!video.muted) video.muted = true;
+      if (video.playbackRate !== 1.25) video.playbackRate = 1.25; // 保持 1.25x 安全合规倍速
+      if (video.paused && !video.ended) {
+        video.play().catch(() => {});
+      }
+
+      // 播放完毕或接近完成 (>=95%) 自动点击下一节
+      if (video.ended || (video.duration > 0 && video.currentTime / video.duration >= 0.95)) {
+        const nextBtn = document.querySelector('#nextBtn, .next-video, .icon-next, .catalogue_item.active + .catalogue_item') as HTMLElement;
+        if (nextBtn) nextBtn.click();
+      }
+    }
+  }, 3000);
+  console.log('[afk-cloud] 智慧树 / 知到 Web 端自动化守护看门狗已成功注入！');
+})();
+`;
 
 /**
  * 通用无头浏览器 Web 平台适配器（适用于 PTA、智慧树等一切基于 Web 的高校教务/评测系统）
