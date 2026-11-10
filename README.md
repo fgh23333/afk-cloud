@@ -63,7 +63,7 @@
 │                                                                        │
 │  边缘 Worker (https://<您的 Worker 域名或自定义域名>)                     │
 │    ├─ SignAgent (DO)    24/7 秒级心跳巡检、全类型签到、作业红点探测          │
-│    ├─ SolverAgent (DO)  任务排队、去重、记账、手机即时推送通知、审批门拦截     │
+│    ├─ SolverAgent (DO)  任务排队、去重、记账、可选手机推送、审批门拦截     │
 │    ├─ Cloudflare D1     SQLite 持久化（课程、签到流水、题库缓存、Web Profiles）│
 │    └─ Web 看板          深色毛玻璃交互界面，真实数据展示与一键审批              │
 │                                                                        │
@@ -103,15 +103,19 @@
   - **D1 题库 SHA-256 零 Token 缓存命中**：优先匹配历史题库。
   - **Gemini Flash 客观题批量求解**：单选题、多选题、判断题打包批处理，极速高效。
   - **Gemini Pro 深度推理**：主观大题、编程题、复杂图表题精准分析。
-  - **安全草稿暂存 (`pyFlag=1`)**：默认只存草稿，手机收到推送后在 Web 看板一键人工复核提交。
+  - **安全草稿暂存 (`pyFlag=1`)**：默认只存草稿，在 Web 看板一键人工复核提交（若选配推送通道亦会收到手机提醒）。
 
 ### 2. 智慧树 (Zhihuishu) & PTA (拼题 A)
 - **Web Profile 本地持久化与 D1 备份**：Cookie 与 LocalStorage 跨机器无缝免登录同步。
 - **真实 Chromium 真机操控**：通过 Chrome DevTools Protocol (CDP) 驱动真实浏览器渲染页面与播放课件， **杜绝任何 HTTP 伪造进度包** ，彻底免疫平台作弊检测。
 - **PTA 算法题沙箱自愈**：本地沙箱编译与单测验证，若遭遇 WA/CE/TLE，由 Gemini Pro 自动反思修复并二次验证。
 
-### 3. 多通道即时通知
-- 支持 **Bark (iOS 即时弹窗)**、**Server酱 (微信通知)**、**企业微信 / 飞书 / 自定义 Webhook**。
+### 3. 多通道即时通知（完全可选增强项）
+- **100% 可选 / 非必需**：系统所有签到、未交作业与解题流水都会实时记录在 Cloudflare D1 并在 Web 看板展示。即使不配置任何推送渠道，系统依然 24/7 完整运行。
+- **支持渠道**：仅当您希望在手机通知栏接收即时弹窗时才需配置：
+  - **Bark (iOS)**：苹果官方 APNs 秒级即时弹窗
+  - **Server酱 / PushPlus**：微信模板消息推送
+  - **群机器人**：飞书 / 钉钉 / 企业微信 Webhook
 
 ---
 
@@ -119,7 +123,7 @@
 
 ### 方案 A：纯边缘 0 服务器极简版（推荐，只需 Cloudflare，5 分钟完成）
 
-> 适合只需要：**24/7 自动全类型签到、手机端通知提醒、以及随时随地查看全景 Web 监控看板**的同学。无需任何服务器！
+> 适合只需要：**24/7 自动全类型签到、作业红点探测、以及随时随地查看全景 Web 监控看板**的同学。无需任何服务器！
 
 #### 1. 准备工作
 - 注册一个免费的 [Cloudflare 账号](https://dash.cloudflare.com/)。
@@ -139,17 +143,18 @@ npx wrangler login
 cp .env.example .env
 ```
 
-用任意编辑器打开 `.env`，填入学习通账号与通知 Key：
+用任意编辑器打开 `.env`，填入学习通账号：
 ```env
-# 学习通账号与凭据
+# 学习通账号与凭据（必须配置）
 CHAOXING_PHONE=13800000000
-CHAOXING_PASSWORD=YourPassword123
-CHAOXING_REALNAME=张三
-
-# 手机推送通道（选填任意一个即可）
-BARK_KEY=https://api.day.app/your_bark_key/
-# SERVERCHAN_KEY=SCTxxxxxxxx
+CHAOXING_PASSWORD=您的登录密码
+CHAOXING_REALNAME=您的姓名
 ```
+
+> [!NOTE]
+> **关于手机推送通知（100% 可选 / 非必须）**：
+> 系统所有 24/7 签到流水与作业状态均实时落盘在 Cloudflare D1 并在 Web 看板展示，**无需任何推送 Key 即可完整运行**。
+> 仅当您希望在手机通知栏接收即时弹窗（如“签到成功”、“作业草稿已生成待审核”）时，才需在 `.env` 中选填任一通道（如 iOS 的 `BARK_KEY` 或微信的 `SERVERCHAN_KEY` / `PUSHPLUS_TOKEN`），不需要直接留空即可。
 
 #### 4. 执行一键自动化边缘编排
 ```bash
@@ -270,7 +275,7 @@ npx wrangler secret put AFK_SHIM_TOKEN
 **大功告成！** 全套闭环系统已就绪：
 - 边缘 Worker 发现新作业后，自动通过加密隧道派发给 GCP 宿主机；
 - GCP 上的 Agent 调用真实 Chromium 打开题目，利用 Gemini Pro 分析解题，并在网页上暂存为草稿 (`pyFlag=1`)；
-- 手机端收到作业草稿已生成的推送，点击看板一键核验并确认提交。
+- 作业草稿安全暂存完毕，用户在 Web 看板一键核验并确认提交（若配置了手机通知亦会同步收到即时弹窗）。
 
 ---
 
