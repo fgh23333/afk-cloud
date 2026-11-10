@@ -10,6 +10,7 @@
     "afk:materials": "tsx packages/cli/src/index.ts materials",
     "afk:burst": "tsx packages/cli/src/index.ts burst",
     "afk:setup-cf": "tsx packages/cli/src/index.ts setup-cf",
+    "afk:setup-vm": "tsx packages/cli/src/index.ts setup-vm",
     "afk:setup-gcp": "tsx packages/cli/src/index.ts setup-gcp",
     "afk:setup-all": "tsx packages/cli/src/index.ts setup-all",
     "afk:status": "tsx packages/cli/src/index.ts status",

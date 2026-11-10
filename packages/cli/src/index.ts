@@ -210,15 +210,31 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'setup-gcp-vm':
+    case 'setup-vm': {
+      const vmScript = path.resolve(process.cwd(), 'infra', 'gcp', 'provision-free-vm.sh');
+      if (dryRun) {
+        console.log(green(`✅ [DryRun] GCP Always Free e2-micro 云主机开通计划:`));
+        console.log(`   - bash "${vmScript}"`);
+      } else {
+        const { execFileSync } = await import('child_process');
+        execFileSync('bash', [vmScript], { stdio: 'inherit' });
+      }
+      break;
+    }
+
     case 'setup-gcp': {
+      const vmScript = path.resolve(process.cwd(), 'infra', 'gcp', 'provision-free-vm.sh');
       const iamScript = path.resolve(process.cwd(), 'infra', 'gcp', 'setup-iam-guardrails.sh');
       const crScript = path.resolve(process.cwd(), 'infra', 'gcp', 'deploy-cloud-run-job.sh');
       if (dryRun) {
-        console.log(green(`✅ [DryRun] GCP 安全围栏与 Cloud Run 免费层自动编排计划:`));
+        console.log(green(`✅ [DryRun] GCP Always Free 云主机、安全围栏与 Cloud Run 免费层编排计划:`));
+        console.log(`   - bash "${vmScript}"`);
         console.log(`   - bash "${iamScript}"`);
         console.log(`   - bash "${crScript}"`);
       } else {
         const { execFileSync } = await import('child_process');
+        execFileSync('bash', [vmScript], { stdio: 'inherit' });
         execFileSync('bash', [iamScript], { stdio: 'inherit' });
         execFileSync('bash', [crScript], { stdio: 'inherit' });
       }

@@ -18,7 +18,7 @@ trigger: always_on
   - 负责 24/7 心跳巡检、复用 D1 缓存的登录 Cookie、秒级全类型签到（普通/拍照/手势/定位/二维码）、新作业红点探测（`workTestPendingNew`）、题库 SHA-256 零 Token 缓存查询、以及移动端 Web 看板与审批门管控。
   - **D1 优先原则**：D1 免费层每日提供 **500 万次读 + 10 万次写**（存储 5GB），远高于 KV 的每日 1,000 次写限额，主持久化一律走 D1。
 - **Tier 1（GCP `e2-micro` 常驻机 + Cloud Run Jobs 免费层）**：
-  - **常驻机（宠物窝）**：使用 Google Cloud 永久免费的 1 台 `e2-micro` 实例（需选 `us-central1`、`us-east1` 或 `us-west1`），常驻运行 `afk-shim` 与 Antigravity CLI (`agy`)。
+  - **常驻机（宠物窝）**：使用 Google Cloud 永久免费的 1 台 `e2-micro` 实例（需选 `us-central1`、`us-east1` 或 `us-west1`），机内必须安装 Node 20、pnpm、Chromium 与 `gcloud` CLI，常驻运行 `afk-shim` 与 Antigravity CLI (`agy`)。
   - **网络互联**：通过 **Cloudflare Tunnel**（零公网暴露、零开放端口）与 Cloudflare Edge 建立安全双向隧道，Edge 通过 Bearer Token 派发解题与操作指令。
   - **容器秒级算力**：高并发扫描或批量课件解压通过 Cloud Run Jobs (`gcloud run jobs execute`) 弹性分发，每月 360,000 vCPU-秒免费额度，跑完即销毁。
 - **Tier 2（极端负载 `gcloud` 短时临时 GCE 实例 + 物理 TTL 熔断）**：
@@ -30,8 +30,8 @@ trigger: always_on
 ## 2. 深度榨干 Gemini Pro 认知能力（Tiered Intelligence）
 
 - **第 0 步（零 Token 缓存命中）**：求解任何题目前，必须先计算 `sha256(题干 + 规范化选项)` 查询 D1 / 本地 `question_bank` 缓存，命中即返。
-- **主力轨（Gemini Flash 极速结构化批处理）**：
-  - 针对常规单选题、多选题、判断题、简单填空题，**严禁逐题串行调用**！必须将整份作业的客观题打包为单次 JSON Batch Prompt，由 Flash 模型批量输出答案。
+- **主力轨（Gemini 3.8 Flash 极速批处理，保护 Quota）**：
+  - 针对常规单选题、多选题、判断题、简单填空题与例行扫描，**推荐且默认切换至 Gemini 3.8 Flash (`gemini-3.8-flash`)** ，避免过快烧干 Gemini Pro 配额；**严禁逐题串行调用**！必须将整份作业的客观题打包为单次 JSON Batch Prompt，由 Flash 模型批量输出答案。
 - **高阶轨（Gemini Pro 深度推理与多模态赋能）**：
   - **1M Token 超大上下文 RAG**：直接将全课程 PPT、PDF 课件材料一次性注入上下文，实现零幻觉检索与解答。
   - **多模态图表/公式解析**：针对包含函数图像、电路图、几何结构或手写公式的高分大题，直接输入原图调用 Pro 视觉能力精准读题。

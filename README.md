@@ -177,89 +177,61 @@ pnpm afk setup-cf
 
 ### 方案 B：全功能云端闭环版（Cloudflare 边缘 + GCP 免费常驻机，支持 AI 解题与真机刷课）
 
-> 在【方案 A】的基础上，通过一台 Google Cloud 永久免费的 `e2-micro` 云主机，让 Agent 具备真正的 Gemini Pro 深度读题、草稿暂存与真机操作能力。
+> 在【方案 A】的基础上，通过一台 Google Cloud 永久免费的 `e2-micro` 云主机，让 Agent 具备真正的 Gemini 深度读题、草稿暂存与真实 Chromium 操作能力。
+
+> [!TIP]
+> **交给 Agent 全自动配置（推荐）**：
+> 如果当前终端已登录 `gcloud`，你可以直接对 `agy` 说：`"帮我自动配置并初始化 GCP 免费云主机"`，`agy` 将自动调用 `.agents/skills/gcp-auto-provision` 完成建机与环境编排！
 
 #### 第一步：在 Google Cloud 创建永久免费 `e2-micro` 云主机
 
-1. 登录 [Google Cloud Console](https://console.cloud.google.com/)。
-2. 导航至 **Compute Engine $\rightarrow$ 虚拟机实例 $\rightarrow$ 创建实例**：
+**方式 1（一行命令全自动创建，首选推荐）**：
+```bash
+# 自动校验可用区与免费磁盘规格，幂等拉起 Always Free 实例
+pnpm afk setup-vm
+# 或直接执行: bash infra/gcp/provision-free-vm.sh
+```
+
+**方式 2（在 GCP 控制台手动创建）**：
+1. 登录 [Google Cloud Console](https://console.cloud.google.com/) $\rightarrow$ **Compute Engine $\rightarrow$ 虚拟机实例 $\rightarrow$ 创建实例**：
    - **名称**：`afk-node`
    - **区域 (Region)**：务必选择 **`us-central1` (爱荷华)**、**`us-east1` (南卡罗来纳)** 或 **`us-west1` (俄勒冈)** 之一。
    - **机器类型**：选择 **`E2` 系列 $\rightarrow$ `e2-micro` (2 vCPU, 1 GB 内存)**。
-   - **引导磁盘**：点击“更改”，操作系统选择 **Ubuntu 22.04 LTS**，磁盘类型选择 **标准永久磁盘 (Standard Persistent Disk)**，大小设为 **30 GB**。
-   - **防火墙**：勾选“允许 HTTP 流量”和“允许 HTTPS 流量”（注：我们使用 Cloudflare Tunnel，即使不开放任何端口也能安全穿透）。
-3. 点击 **创建**。
+   - **引导磁盘**：操作系统选择 **Ubuntu 22.04 LTS**，磁盘类型选择 **标准永久磁盘 (Standard Persistent Disk)**，大小设为 **30 GB**。
+2. 点击 **创建**。
 
-*(或直接使用 gcloud 命令行一键拉起)*：
+#### 第二步：云端机器一键环境编排（含 gcloud CLI、Node 20、Chromium 与守护进程）
+
+在云端宿主机上也**必须安装 `gcloud` CLI**，以便常驻的 Agent 能自由调度 Cloud Run 与临时应急算力。
+
+连接云主机并执行一行全自动初始化脚本：
 ```bash
-gcloud compute instances create afk-node \
-  --zone=us-central1-a \
-  --machine-type=e2-micro \
-  --image-family=ubuntu-2204-lts \
-  --image-project=ubuntu-os-cloud \
-  --boot-disk-size=30GB \
-  --boot-disk-type=pd-standard
+# 通过 gcloud ssh 一键远程触发全自动初始化：
+gcloud compute ssh afk-node --zone=us-central1-a --command="curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash"
+
+# 或在 GCP 控制台打开网页 SSH 终端后直接粘贴运行：
+curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash
 ```
 
-#### 第二步：SSH 连接云主机并安装基础运行环境
+> **该脚本自动完成的全部准备工作**：
+> 1. 安装 Node.js 20 LTS 与 pnpm；
+> 2. **自动安装 Google Cloud SDK (`gcloud` CLI)** 与认证工具环；
+> 3. 安装真实无头 Chromium 浏览器与相关图形渲染底层依赖；
+> 4. 安装 Cloudflare Tunnel 客户端 (`cloudflared`)；
+> 5. 克隆/更新项目代码，执行依赖安装与冒烟自检测试；
+> 6. 注册并启动 systemd `afk-shim.service` 守护进程（开机自启）。
 
-在 GCP 控制台点击实例右侧的 **“SSH”** 按钮打开网页终端，执行以下一键安装命令：
+#### 第三步：使用 Cloudflare Tunnel 打通边缘 Worker 与云主机
 
-```bash
-# 1. 更新系统并安装 Node.js 20、Git 与 Chromium
-sudo apt-get update
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs chromium-browser git build-essential
-
-# 2. 安装 pnpm
-sudo npm install -g pnpm
-```
-
-#### 第三步：部署 `afk-cloud` 与配置 Shim 守护进程
+无需公网 IP，无需防火墙开放任何端口，通过 Cloudflare Tunnel 将 GCP 宿主机与 Cloudflare Edge 安全连通：
 
 ```bash
-# 1. 克隆代码并安装依赖
-git clone https://github.com/fgh23333/afk-cloud.git ~/afk-cloud
-cd ~/afk-cloud
-pnpm install
-
-# 2. 配置服务器环境变量
-cat << 'EOF' > .env
-PORT=8788
-SHIM_TOKEN=generate_a_random_token_here_123456
-AFK_EDGE_WORKER_URL=https://<您的 Worker 域名或自定义域名>
-AFK_EDGE_BEARER_TOKEN=chaoxing_secure_sync_key
-GEMINI_API_KEY=您的Gemini_API_Key
-EOF
-
-# 3. 将 afk-shim 注册为 systemd 开机自启服务
-sudo cp infra/systemd/afk-shim.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now afk-shim
-
-# 4. 检查服务健康状态
-curl http://127.0.0.1:8788/health
-# 正常应返回: {"status":"ok","time":"..."}
-```
-
-#### 第四步：使用 Cloudflare Tunnel 实现零公网暴露安全对接
-
-无需公网 IP，无需防火墙放行，通过 Cloudflare Tunnel 将 GCP 宿主机与 Cloudflare Edge 安全连通：
-
-```bash
-# 1. 在 GCP 主机上安装 cloudflared
-curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-sudo dpkg -i cloudflared.deb
-
-# 2. 方式一：快速启动临时/持久隧道（支持零门槛直接用）
+# 在云主机上启动穿透隧道（零配置快速开箱即用）：
 cloudflared tunnel --url http://127.0.0.1:8788
 ```
-*(终端将打印类似 `https://xxxx.trycloudflare.com` 的访问地址)*
+*(终端将打印类似 `https://xxxx.trycloudflare.com` 的安全域名)*
 
-#### 第五步：将 Tunnel 凭证绑定至 Cloudflare Edge Worker
-
-在本地开发机（或 GCP 终端）执行以下命令，将隧道地址注入 Worker 密钥库：
-
+在本地终端（或云主机）将 Tunnel 域名与通信密钥写入 Worker：
 ```bash
 cd afk-cloud
 
@@ -269,12 +241,16 @@ npx wrangler secret put AFK_SHIM_URL
 
 # 注入通信密钥
 npx wrangler secret put AFK_SHIM_TOKEN
-# 输入刚刚在 .env 中设置的 SHIM_TOKEN
+# 输入云端 .env 中的 SHIM_TOKEN
 ```
+
+> [!TIP]
+> **模型防烧 Quota 提示（强烈推荐切到 Gemini 3.8 Flash）**：
+> 在 `.env` 中设置 `AFK_FLASH_MODEL=gemini-3.8-flash`（默认）。90% 的客观题批量求解、例行扫描均由 **Gemini 3.8 Flash** 处理，响应极速且配额消耗极低，避免短时间内过快烧干高价值的 Gemini Pro 额度。仅难题与代码沙箱才按需升级至 Gemini Pro。
 
 **大功告成！** 全套闭环系统已就绪：
 - 边缘 Worker 发现新作业后，自动通过加密隧道派发给 GCP 宿主机；
-- GCP 上的 Agent 调用真实 Chromium 打开题目，利用 Gemini Pro 分析解题，并在网页上暂存为草稿 (`pyFlag=1`)；
+- GCP 上的 Agent 调用真实 Chromium 打开题目，利用 Gemini 3.8 Flash / Pro 分析解题，并在网页上暂存为草稿 (`pyFlag=1`)；
 - 作业草稿安全暂存完毕，用户在 Web 看板一键核验并确认提交（若配置了手机通知亦会同步收到即时弹窗）。
 
 ---
@@ -287,6 +263,7 @@ npx wrangler secret put AFK_SHIM_TOKEN
 | :--- | :--- |
 | `pnpm afk status` | **全局自检**：检查 `.env` 配置、本地 Chromium、PTA/智慧树登录态及 Cloudflare Edge 连通状态 |
 | `pnpm afk setup-cf` | **边缘一键编排**：自动开通 D1、执行迁移、加密密钥并部署 Worker |
+| `pnpm afk setup-vm` | **GCP 主机拉起**：自动在美区一键拉起 Always Free 永久免费 `e2-micro` 云主机 |
 | `pnpm afk setup-all` | **双端编排**：一键完成 Cloudflare Edge 与 GCP Cloud Run / IAM 安全配置 |
 | `pnpm afk scan` | **课程与作业扫描**：列出全部在读课程、未交作业详情、截止时间与课件统计 |
 | `pnpm afk materials` | **课件材料下载**：下载课程全部 PPT/PDF/Word 文件并提取文本索引，供 Gemini Pro 检索 |
