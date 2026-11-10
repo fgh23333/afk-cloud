@@ -44,3 +44,16 @@ pnpm afk burst --mode gce --task "solve" --ttl 15 --machine-type e2-small
 ### 双重自毁保险机制说明
 1. **物理定时器（防卡死悬挂）**：实例启动的第一行指令即执行 `echo "gcloud compute instances delete ${INSTANCE_NAME} --zone=${ZONE} --quiet" | at now + ${TTL} minutes`，哪怕业务脚本死锁，到点依然物理销毁。
 2. **正常完结即刻自毁**：业务逻辑执行完毕并将日志/题库写回 Cloudflare D1 后，立即执行 `gcloud compute instances delete` 提前释放算力，计费精确到秒。
+
+---
+
+## 4. 算力成本控制与存储解耦架构（每月最高 $10 预算红线）
+
+为了防止意外产生云端账单，Agent 执行弹性算力调度时必须遵守以下铁律：
+- **预算硬顶：每月最高 10 美元预算**：优先使用 Cloud Run 免费层与常驻免费机 `e2-micro`；临时 GCE 实例严格限定仅用于高并发短时批处理，且必须为 Spot 抢占式机型。
+- **即用即销毁，禁止长时间占用**：所有非 Always Free 的 GCE 实例生命周期不得超过 15 分钟，严禁保留闲置运行机型。
+- **持久化存储与快照外置**：
+  - 临时实例为纯无状态节点，严禁在临时节点本地长期保存数据。
+  - **首选持久化存储：Cloudflare R2**（每月提供 **10 GB 永久免费空间**，100 万次写 + 1000 万次读，零出网流量费，S3 协议兼容，存储桶统一命名为 `afk-cloud-snapshots`）。
+  - **课件与超大资料备份：Google Drive**（支持通过 OAuth2 授权直接挂载或备份，不占服务器磁盘空间）。
+  - **结构化元数据：Cloudflare D1**（SQLite 分布式数据库）。

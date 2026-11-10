@@ -23,7 +23,9 @@ trigger: always_on
   - **容器秒级算力**：高并发扫描或批量课件解压通过 Cloud Run Jobs (`gcloud run jobs execute`) 弹性分发，每月 360,000 vCPU-秒免费额度，跑完即销毁。
 - **Tier 2（极端负载 `gcloud` 短时临时 GCE 实例 + 物理 TTL 熔断）**：
   - 仅在遇到极端并发重型任务时调用 `infra/gcp/spawn-ephemeral-gce.sh` 短时创建临时机。
-  - **强制自毁围栏**：创建时必须在 `startup-script` 内硬编码 `at now + 15 minutes` 物理自毁定时器，任务结束立即触发 `gcloud compute instances delete --quiet`。
+  - **每月预算硬顶（最多 $10/月）**：弹性算力总开销严控在每月 10 美元以内。
+  - **即用即销毁，禁止长时间占用**：除常驻 Always Free `e2-micro` 外，所有临时实例生命周期上限为 15 分钟，创建时硬编码 `at now + 15 minutes` 物理自毁定时器，任务结束立即触发 `gcloud compute instances delete --quiet`，严禁闲置与遗漏。
+  - **持久化存储与快照外置**：计算实例纯无状态，临时节点内不存数据；快照与大文件外置同步至 **Cloudflare R2**（每月 10GB 免费桶 `afk-cloud-snapshots`，0 出网费）或 **Google Drive**（OAuth2 认证）。
 
 ---
 
@@ -48,6 +50,7 @@ trigger: always_on
 
 ## 4. 安全与合规铁律
 
+- **Cloudflare 资源销毁安全防线**：允许拉起、创建与销毁 Cloudflare 资源，但 **仅允许销毁自己创建的资源（名称以 `afk-` 或 `afk-cloud-` 开头）** 。严禁误删、清空或篡改用户账户内未受管的其他生产 D1、KV 命名空间、Worker 服务或 DNS 解析记录！
 - **零明文凭据入库**：严禁在代码、`wrangler.jsonc` 或 Git 历史中写入真实手机号、密码、Token 或示例占位学号。所有敏感信息必须通过 `.env` 或 `wrangler secret put` 注入。
 - **作业安全草稿优先**：除非显式传入 `--auto-submit`（或环境变量 `CHAOXING_AUTO_SUBMIT=true`），所有作业解答默认以 **安全草稿暂存模式（`pyFlag=1`）** 写入平台，并生成详细的 Markdown 作答报告供用户在看板审核确认。
 - **统一时区规范**：所有日志、数据库时间戳、作答报告必须统一使用 **UTC+8 (`Asia/Shanghai`)** 记录。

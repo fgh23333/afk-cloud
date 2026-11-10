@@ -22,6 +22,20 @@ export interface ProvisionCloudflareResult {
 }
 
 /**
+ * Cloudflare 资源安全销毁守卫（爆炸半径围栏）
+ * 铁律：仅允许销毁自己创建的资源（带 afk- 或 afk-cloud- 前缀），严禁误删用户账户内已有的其他资源！
+ */
+export function assertSafeResourceDestruction(resourceType: string, resourceName: string): void {
+  const allowedPrefixes = ['afk-', 'afk-cloud-', 'chaoxing-dashboard-worker'];
+  const isAllowed = allowedPrefixes.some((prefix) => resourceName.toLowerCase().startsWith(prefix));
+  if (!isAllowed) {
+    throw new Error(
+      `[安全拦截] 严禁销毁未受管的 Cloudflare 资源: ${resourceType} "${resourceName}"。系统仅允许销毁以 'afk-' 或 'afk-cloud-' 开头的受管资源！`
+    );
+  }
+}
+
+/**
  * 更新根目录 .env 文件中的指定键值（保持已有注释与结构不变）
  */
 export function upsertEnvVariables(envFilePath: string, updates: Record<string, string>): void {

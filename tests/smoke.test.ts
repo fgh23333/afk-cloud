@@ -131,6 +131,18 @@ async function runAllTests() {
 
   // --- Test 4: Cloudflare 全自动编排引擎 + Cloud Run / Ephemeral GCE 调度验证 ---
   {
+    const { assertSafeResourceDestruction } = await import('../packages/core/cf-provisioner');
+    // 验证 Cloudflare 资源销毁安全守卫（仅允许销毁自己创建的 afk- 资源）
+    assert.doesNotThrow(() => {
+      assertSafeResourceDestruction('d1', 'afk-cloud-db');
+      assertSafeResourceDestruction('worker', 'afk-cloud-edge');
+      assertSafeResourceDestruction('r2', 'afk-cloud-snapshots');
+    }, 'afk- 前缀受管资源应允许销毁');
+
+    assert.throws(() => {
+      assertSafeResourceDestruction('d1', 'my-personal-prod-db');
+    }, /安全拦截/, '严禁误删用户账户内已有的外部资源');
+
     const cfDry = await provisionCloudflareEdge({ dryRun: true, dbName: 'afk-cloud-db' });
     assert.strictEqual(cfDry.stepsCompleted.length, 5, 'Cloudflare 全自动编排应包含完整 5 个自动化阶段');
     const rendered = renderWranglerConfig({

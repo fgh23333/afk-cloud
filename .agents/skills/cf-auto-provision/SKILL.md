@@ -36,3 +36,11 @@ pnpm afk setup-all
 如果当前 `agy` 会话已连接 **Cloudflare MCP Server**，你还可以直接通过原生 MCP 工具完成巡检与维护：
 - **列出/创建 D1 数据库**：直接调用 Cloudflare MCP 的 D1 管理工具，检查 `afk-cloud-db` 状态。
 - **直接执行 SQL 建表或查询**：将 [`edge/migrations/0001_init.sql`](../../edge/migrations/0001_init.sql) 的内容通过 MCP D1 Query 工具直接下发执行，或直接查询 `SELECT * FROM execution_logs ORDER BY id DESC LIMIT 20` 汇报签到与答题进展。
+
+---
+
+## 3. 资源销毁安全防线（仅允许销毁自己创建的资源）
+
+为了保证用户的 Cloudflare 账户资产绝对安全，执行任何资源销毁或清理时必须遵守：
+- **资源白名单前缀检查**：允许拉起、创建与销毁 Cloudflare 资源，但 **仅允许销毁名称以 `afk-` 或 `afk-cloud-` 开头的受管资源** （如 D1 数据库 `afk-cloud-db`、KV 命名空间、R2 存储桶 `afk-cloud-snapshots`、Worker `afk-cloud-edge` 等）。
+- **严禁越界误删**：绝对禁止销毁、清空或篡改用户账户内未受管的其他生产 D1、KV 命名空间、Worker 服务或 DNS 解析记录！调用销毁前必须经过 `assertSafeResourceDestruction` 拦截校验。
