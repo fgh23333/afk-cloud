@@ -1,10 +1,11 @@
 {
   "name": "afk-cloud",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "license": "MIT",
   "description": "Personal Autonomous Cloud Agent (Edge Cloudflare Workers+D1 + Antigravity CLI + Free-First Cloud Run & Ephemeral GCE Burst)",
   "scripts": {
     "afk": "tsx packages/cli/src/index.ts",
+    "afk:signin": "tsx packages/cli/src/index.ts signin",
     "afk:scan": "tsx packages/cli/src/index.ts scan",
     "afk:solve": "tsx packages/cli/src/index.ts solve",
     "afk:materials": "tsx packages/cli/src/index.ts materials",

@@ -97,6 +97,13 @@ async function main(): Promise<void> {
   const chaoxing = new ChaoxingAdapter();
 
   switch (cmd) {
+    case 'sign':
+    case 'signin': {
+      const realname = process.env.CHAOXING_REALNAME || '同学';
+      await chaoxing.scanAndSignIn(realname);
+      break;
+    }
+
     case 'scan': {
       await chaoxing.scanPendingHomework();
       break;

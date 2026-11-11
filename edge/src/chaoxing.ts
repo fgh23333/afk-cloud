@@ -316,7 +316,73 @@ export async function checkHomeworkPendingCourses(
 }
 
 /**
- * 执行全类型签到（包含位置/普通/拍照/手势/签到码/二维码兜底）
+ * 获取超星活动详细信息 (otherId, ifphoto 等)
+ */
+export async function getPPTActiveInfo(activeId: string, session: UserSession): Promise<any> {
+  try {
+    const res = await fetch(`https://mobilelearn.chaoxing.com/v2/apis/active/getPPTActiveInfo?activeId=${activeId}`, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+    const json: any = await res.json().catch(() => ({}));
+    return json?.data || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 自动生成 1x1 像素临时打卡图片并上传至超星云盘获取 objectId (对齐 chaoxing-signin 原生实现)
+ */
+export async function getOrUploadPhotoObject(session: UserSession): Promise<string | null> {
+  try {
+    // 1. 获取云盘 Token
+    const tokenRes = await fetch('https://pan-yz.chaoxing.com/api/token/uservalid', {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    const tokenData: any = await tokenRes.json().catch(() => ({}));
+    const token = tokenData?._token;
+    if (!token) return null;
+
+    // 2. 构造 1x1 极简透明 PNG 二进制并上传
+    const sampleBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const binaryStr = atob(sampleBase64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: 'image/png' });
+
+    const formData = new FormData();
+    formData.append('file', blob, '1.png');
+    formData.append('puid', session._uid);
+
+    const uploadRes = await fetch(`https://pan-yz.chaoxing.com/upload?_from=mobilelearn&_token=${token}`, {
+      method: 'POST',
+      headers: {
+        Cookie: session.cookie,
+      },
+      body: formData,
+    });
+    const uploadData: any = await uploadRes.json().catch(() => ({}));
+    if (uploadData?.objectId) {
+      console.log(`[PhotoSign] 自动生成打卡照片成功 (objectId: ${uploadData.objectId})`);
+      return String(uploadData.objectId);
+    }
+  } catch (err: any) {
+    console.warn(`[PhotoSign] 自动上传打卡照片异常: ${err?.message || err}`);
+  }
+  return null;
+}
+
+/**
+ * 执行全类型签到（完全对齐 chaoxing-signin 项目实现：支持位置多点轮询、拍照自动获取 objectId、手势、签到码与二维码）
  */
 export async function performSign(
   activity: any,
@@ -325,15 +391,25 @@ export async function performSign(
   name = '同学',
   locations: SignLocation[] = DEFAULT_SIGN_LOCATIONS,
   enc = '',
-  objectId = ''
+  objectId = '',
+  signCode = ''
 ): Promise<string> {
-  const activeId = activity.id;
-  const otherId = activity.otherId;
+  const activeId = String(activity.id || activity.activeId);
+  const actName = activity.name || activity.nameOne || '在线签到';
 
-  const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
-  const loc = pool[Math.floor(Math.random() * pool.length)];
+  // 1. 获取活动详细属性 (otherId 与 ifphoto)
+  let otherId = activity.otherId !== undefined ? Number(activity.otherId) : 0;
+  let ifphoto = activity.ifphoto !== undefined ? Number(activity.ifphoto) : 0;
 
-  // 1. 发起 preSign 预签
+  try {
+    const pptInfo = await getPPTActiveInfo(activeId, session);
+    if (pptInfo?.otherId !== undefined) otherId = Number(pptInfo.otherId);
+    if (pptInfo?.ifphoto !== undefined) ifphoto = Number(pptInfo.ifphoto);
+  } catch {
+    // 降级使用传入属性
+  }
+
+  // 2. 发起 preSign 预签到
   try {
     const preUrl = `https://mobilelearn.chaoxing.com/newsign/preSign?courseId=${course.courseId}&classId=${course.classId}&activePrimaryId=${activeId}&general=1&sys=1&ls=1&appType=15&uid=${session._uid}&ut=s`;
     await fetch(preUrl, {
@@ -346,10 +422,50 @@ export async function performSign(
     // ignore
   }
 
-  // 2. 主通道：stuSignajax 提交签到 (超星标准打卡接口)
+  const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
+
+  // 3. 针对不同类型分发（对齐 chaoxing-signin 的 monitor 分发逻辑）
+
+  // A. 位置签到 (otherId === 4 或名称包含位置)：多坐标轮流尝试打卡匹配
+  if (otherId === 4 || actName.includes('位置')) {
+    let lastMsg = '';
+    for (let i = 0; i < pool.length; i++) {
+      const loc = pool[i];
+      const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1`;
+      try {
+        const res = await fetch(stuSignUrl, {
+          headers: {
+            Cookie: session.cookie,
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+          },
+        });
+        const text = await res.text();
+        if (text.includes('success') || text.includes('成功')) {
+          return `[位置签到成功] 活动: ${actName} (匹配坐标: ${loc.address})`;
+        }
+        lastMsg = text;
+      } catch (e: any) {
+        lastMsg = e?.message || '网络异常';
+      }
+    }
+    return `[位置签到未匹配] 活动: ${actName} (尝试 ${pool.length} 处坐标，响应: ${lastMsg})`;
+  }
+
+  // B. 拍照签到 (ifphoto === 1 或 otherId === 0 且提示拍照)
+  let targetObjectId = objectId;
+  if (!targetObjectId && (ifphoto === 1 || actName.includes('拍照'))) {
+    console.log(`[拍照签到] 活动 ${activeId} 需上传照片，自动调用云盘接口上传打卡图...`);
+    targetObjectId = (await getOrUploadPhotoObject(session)) || '';
+  }
+
+  // 构造公用参数
+  const loc = pool[Math.floor(Math.random() * pool.length)];
   const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
-  const objParam = objectId ? `&objectId=${encodeURIComponent(objectId)}` : '';
-  const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1${encParam}${objParam}`;
+  const objParam = targetObjectId ? `&objectId=${encodeURIComponent(targetObjectId)}` : '';
+  const signCodeParam = signCode ? `&signCode=${encodeURIComponent(signCode)}` : '';
+
+  // 4. 主通道：stuSignajax 提交签到
+  const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1${encParam}${objParam}${signCodeParam}`;
 
   try {
     const res = await fetch(stuSignUrl, {
@@ -360,15 +476,16 @@ export async function performSign(
     });
     const text = await res.text();
     if (text.includes('success') || text.includes('成功')) {
-      return `[签到成功] 活动: ${activity.name || activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
+      const typeLabel = targetObjectId ? '拍照' : otherId === 3 ? '手势' : otherId === 5 ? '签到码' : otherId === 2 ? '二维码' : '通用';
+      return `[${typeLabel}签到成功] 活动: ${actName} (ID: ${activeId})`;
     }
   } catch {
     // ignore
   }
 
-  // 3. 备用通道一：receivedAttendanceWindowList
+  // 5. 备用通道一：receivedAttendanceWindowList
   try {
-    const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}`;
+    const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}${signCodeParam}`;
     const res = await fetch(signUrl, {
       headers: {
         Cookie: session.cookie,
@@ -377,13 +494,13 @@ export async function performSign(
     });
     const text = await res.text();
     if (text.includes('success') || text.includes('成功')) {
-      return `[签到成功] 活动: ${activity.name || activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
+      return `[签到成功(备用通道)] 活动: ${actName} (ID: ${activeId})`;
     }
   } catch {
     // ignore
   }
 
-  // 4. 备用通道二：pcReq
+  // 6. 备用通道二：pcReq (移动接口直通)
   try {
     const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}${objParam}`;
     const mRes = await fetch(mobileUrl, {

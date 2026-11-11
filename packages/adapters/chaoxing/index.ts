@@ -18,6 +18,7 @@ import {
 import { ExamNoticeItem, fetchNoticeList, NoticeItem } from './notice';
 import { getOrUploadPhotoObject, submitPhotoSign } from './photo';
 import { ChaoxingCookies, chaoxingLogin, getChaoxingCourses } from './session';
+import { DEFAULT_SHOU_LOCATIONS, performChaoxingSign, scanCourseActivities, SignLocation } from './signin';
 
 export * from './des';
 export * from './homework';
@@ -25,6 +26,7 @@ export * from './materials';
 export * from './notice';
 export * from './photo';
 export * from './session';
+export * from './signin';
 
 export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly name = 'chaoxing' as const;
@@ -243,6 +245,39 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
       } catch (err: any) {
         console.log(red(`[课程处理异常] 《${c.courseName}》: ${err?.message || err}`));
       }
+    }
+
+    return results;
+  }
+
+  /**
+   * 巡检全部在读课程并执行自动化签到（完全对齐 chaoxing-signin 原生实现：多坐标重试、自动上传打卡照片、手势与签到码）
+   */
+  public async scanAndSignIn(realname = '同学', customLocs?: SignLocation[]): Promise<string[]> {
+    const cookies = await this.ensureAuth();
+    const courses = await getChaoxingCourses(cookies);
+    const results: string[] = [];
+
+    console.log(blue(`\n======================================================`));
+    console.log(blue(` 📍 正在巡检在读 ${courses.length} 门课程的有效签到活动 (对齐 chaoxing-signin) 📍`));
+    console.log(blue(`======================================================\n`));
+
+    for (const c of courses) {
+      try {
+        const activities = await scanCourseActivities(c, cookies);
+        for (const act of activities) {
+          console.log(yellow(`[发现签到] 课程 《${c.courseName}》 正在进行活动: ${act.name} (ID: ${act.id})`));
+          const res = await performChaoxingSign(act, c, cookies, realname, customLocs);
+          console.log(green(`[签到结果] ${res}`));
+          results.push(`《${c.courseName}》: ${res}`);
+        }
+      } catch (err: any) {
+        console.log(red(`[课程签到扫描跳过] 《${c.courseName}》: ${err?.message || err}`));
+      }
+    }
+
+    if (results.length === 0) {
+      console.log(green('✨ 当前所有在读课程均无正在进行的签到活动。\n'));
     }
 
     return results;
