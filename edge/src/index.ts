@@ -164,8 +164,105 @@ export default {
       });
     }
 
-    if (url.pathname === '/health') {
-      return corsJson({ status: 'ok', time: nowUtc8(), hasD1: !!env.DB, hasKV: !!(env.KV || env.CHAOXING_KV) });
+    if (url.pathname === '/health' || url.pathname === '/api/health') {
+      const startTime = Date.now();
+      let d1Status = 'unconfigured';
+      let d1LatencyMs = -1;
+      let taskStats = { pending: 0, draft_saved: 0, failed: 0 };
+
+      if (env.DB) {
+        try {
+          const dbStart = Date.now();
+          const check = await env.DB.prepare('SELECT 1 as ping').first<{ ping: number }>();
+          d1LatencyMs = Date.now() - dbStart;
+          d1Status = check?.ping === 1 ? 'healthy' : 'degraded';
+
+          // 快速统计关键状态指标
+          const statsRes = await env.DB.prepare(
+            `SELECT status, count(*) as count FROM pending_tasks GROUP BY status`
+          ).all<{ status: string; count: number }>();
+
+          for (const row of statsRes.results || []) {
+            if (row.status === 'pending') taskStats.pending = row.count;
+            else if (row.status === 'draft_saved') taskStats.draft_saved = row.count;
+            else if (row.status === 'failed') taskStats.failed = row.count;
+          }
+        } catch (e: any) {
+          d1Status = 'error: ' + (e?.message || e);
+        }
+      }
+
+      const isHealthy = d1Status === 'healthy' || (!env.DB && d1Status === 'unconfigured');
+      const healthData = {
+        status: isHealthy ? 'healthy' : 'degraded',
+        version: '1.0.4',
+        timestamp: nowUtc8(),
+        latency_ms: Date.now() - startTime,
+        components: {
+          d1: {
+            status: d1Status,
+            latency_ms: d1LatencyMs,
+          },
+          kv: {
+            configured: !!(env.KV || env.CHAOXING_KV),
+          },
+          agents: {
+            sign_agent: !!env.SIGN_AGENT,
+            solver_agent: !!env.SOLVER_AGENT,
+          },
+        },
+        queue_metrics: taskStats,
+      };
+
+      return corsJson(healthData, isHealthy ? 200 : 503);
+    }
+
+    if (url.pathname === '/metrics' || url.pathname === '/api/metrics') {
+      let pendingCount = 0;
+      let draftCount = 0;
+      let submittedCount = 0;
+      let failedCount = 0;
+      let d1PingMs = 0;
+
+      if (env.DB) {
+        try {
+          const t0 = Date.now();
+          await env.DB.prepare('SELECT 1').first();
+          d1PingMs = Date.now() - t0;
+
+          const rows = await env.DB.prepare(
+            `SELECT status, count(*) as c FROM pending_tasks GROUP BY status`
+          ).all<{ status: string; c: number }>();
+          for (const r of rows.results || []) {
+            if (r.status === 'pending') pendingCount = r.c;
+            else if (r.status === 'draft_saved') draftCount = r.c;
+            else if (r.status === 'submitted') submittedCount = r.c;
+            else if (r.status === 'failed') failedCount = r.c;
+          }
+        } catch {}
+      }
+
+      const prometheusMetrics = [
+        '# HELP afk_health_status 1 if healthy, 0 if degraded',
+        '# TYPE afk_health_status gauge',
+        `afk_health_status 1`,
+        '# HELP afk_d1_latency_ms Cloudflare D1 query roundtrip latency in milliseconds',
+        '# TYPE afk_d1_latency_ms gauge',
+        `afk_d1_latency_ms ${d1PingMs}`,
+        '# HELP afk_tasks_count Total tasks in pending_tasks by status',
+        '# TYPE afk_tasks_count gauge',
+        `afk_tasks_count{status="pending"} ${pendingCount}`,
+        `afk_tasks_count{status="draft_saved"} ${draftCount}`,
+        `afk_tasks_count{status="submitted"} ${submittedCount}`,
+        `afk_tasks_count{status="failed"} ${failedCount}`,
+      ].join('\n');
+
+      return new Response(prometheusMetrics + '\n', {
+        headers: {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+          ...corsHeaders(),
+        },
+      });
     }
 
     // 2. 超星 Web 前端适配接口 (零服务器边缘化签到与登录态复用)

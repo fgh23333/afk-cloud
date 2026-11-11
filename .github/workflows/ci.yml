@@ -1,0 +1,68 @@
+name: afk-cloud CI & Verification Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Typecheck, Smoke Tests & Security Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Static Typecheck
+        run: pnpm typecheck
+
+      - name: Core Smoke & Integration Tests
+        run: pnpm test
+
+      - name: Security & Leak Detection Gate
+        run: |
+          echo "🔍 扫描敏感凭证与秘钥泄露风险..."
+          # 检查是否存在未加密 .env 或明文秘钥提交
+          if git ls-files | grep -E '^(\.env|\.env\.local)$'; then
+            echo "❌ 发现本地环境文件被 Git 追踪，请从仓库中移除！"
+            exit 1
+          fi
+          # 检查 migrations 中是否存在明文密码
+          if grep -rnEi "(password\s*=\s*'[^']+'|secret\s*=\s*'[^']+')" edge/migrations/; then
+            echo "❌ 迁移脚本中禁止硬编码明文凭证！"
+            exit 1
+          fi
+          echo "✅ 零凭据入库安全铁律校验通过"
+
+      - name: D1 Migration SQL Syntax & Idempotency Check
+        run: |
+          echo "🔍 验证所有 D1 迁移脚本有效性与幂等性..."
+          for file in edge/migrations/*.sql; do
+            echo "Checking $file..."
+            # 验证所有建表和建索引语句均具备 IF NOT EXISTS 保护
+            if grep -E 'CREATE TABLE ' "$file" | grep -v 'IF NOT EXISTS'; then
+              echo "❌ 迁移文件 $file 中的建表语句缺少 IF NOT EXISTS 幂等保护"
+              exit 1
+            fi
+            if grep -E 'CREATE INDEX ' "$file" | grep -v 'IF NOT EXISTS'; then
+              echo "❌ 迁移文件 $file 中的建索引语句缺少 IF NOT EXISTS 幂等保护"
+              exit 1
+            fi
+          done
+          echo "✅ 迁移脚本全部符合原子性与幂等性规范"
