@@ -24,6 +24,8 @@ import {
 import { runCodeInLocalSandbox, triggerCloudBurst } from '../packages/core/sandbox';
 import { extractKeywords, localHeuristicSolve, normalizeAnswerByType } from '../packages/core/solver';
 import { formatUtc8Now } from '../packages/core/types';
+import { signRequest, verifySignedRequest } from '../packages/core/request-signing';
+import { checkAuth, isAllowedTaskUrl } from '../edge/src/auth';
 
 async function runAllTests() {
   console.log(`\n======================================================`);
@@ -59,7 +61,7 @@ async function runAllTests() {
 
     const hits = await lookupQuestionBankCache([h1]);
     assert.strictEqual(hits[h1]?.answer, 'A', '本地/D1 题库缓存应命中并返回 A');
-    console.log(' ✅ [Test 1/4 PASS] DES 协议加密与题库 SHA-256 确定性哈希缓存验证通过');
+    console.log(' ✅ [Test 1/6 PASS] DES 协议加密与题库 SHA-256 确定性哈希缓存验证通过');
   }
 
   // --- Test 2: 课件资料 RAG 检索与双轨答案规范化 ---
@@ -95,7 +97,7 @@ async function runAllTests() {
         'ABC',
         '多选题答案应自动去重并按升序排列'
       );
-      console.log(' ✅ [Test 2/4 PASS] 课程资料 RAG 关键词检索与题型答案清洗验证通过');
+      console.log(' ✅ [Test 2/6 PASS] 课程资料 RAG 关键词检索与题型答案清洗验证通过');
     } finally {
       fs.rmSync(tmpCourseDir, { recursive: true, force: true });
     }
@@ -115,7 +117,6 @@ async function runAllTests() {
     });
     assert.strictEqual(sandboxRes.passed, true, '沙箱代码执行结果应与样例输出 42 完全一致');
 
-    // 验证 PTA / 智慧树无头浏览器 Profile 目录与 Cookie 状态持久化
     const ptaWeb = new WebBrowserAdapter('pta');
     const profilePaths = getBrowserProfilePaths('pta');
     await ptaWeb.importCookieString('PTASession=mock_session_token; JSESSIONID=mock_jsid', '.pintia.cn');
@@ -125,14 +126,13 @@ async function runAllTests() {
     fs.rmSync(profilePaths.storageStatePath, { force: true });
 
     console.log(
-      ` ✅ [Test 3/4 PASS] 编程沙箱评测 (${sandboxRes.durationMs}ms) 与 PTA/智慧树无头浏览器 Profile 持久化验证通过`
+      ` ✅ [Test 3/6 PASS] 编程沙箱评测 (${sandboxRes.durationMs}ms) 与 PTA/智慧树无头浏览器 Profile 持久化验证通过`
     );
   }
 
   // --- Test 4: Cloudflare 全自动编排引擎 + Cloud Run / Ephemeral GCE 调度验证 ---
   {
     const { assertSafeResourceDestruction } = await import('../packages/core/cf-provisioner');
-    // 验证 Cloudflare 资源销毁安全守卫（仅允许销毁自己创建的 afk- 资源）
     assert.doesNotThrow(() => {
       assertSafeResourceDestruction('d1', 'afk-cloud-db');
       assertSafeResourceDestruction('worker', 'afk-cloud-edge');
@@ -209,79 +209,146 @@ async function runAllTests() {
     );
     assert.ok(digestText.includes('草稿暂存 2') && digestText.includes('数据结构与算法课程设计'), '汇总简报通知应包含完整平台任务统计');
 
-    console.log(' ✅ [Test 4/4 PASS] Cloudflare 全自动编排 + 零服务器边缘看板/通知 + Tier 1/2 算力调度验证通过');
+    console.log(' ✅ [Test 4/6 PASS] Cloudflare 全自动编排 + 零服务器边缘看板/通知 + Tier 1/2 算力调度验证通过');
   }
 
-  // --- Test 5: Server Shim (P1) 接口契约、Bearer 鉴权与 Edge 题库 Hash 跨环境对齐 ---
+  // --- Test 5: Server Shim 与 agy 安全调用加固 (HMAC-SHA256 签名、防重放、URL 白名单) ---
   {
     const { createShimServer } = await import('../packages/shim/src/index');
     const { computeQuestionHash: computeHashWorker } = await import('../edge/src/hash');
 
-    // 1. 验证 Edge Worker 的 Web Crypto SHA-256 与 Core Node Crypto SHA-256 完全一致
+    // 1. 验证 Edge 与 Node 的 WebCrypto 指纹完全对齐
     const nodeHash = computeQuestionHash('single', '1. 快速排序最坏时间复杂度', [{ key: 'A', text: 'O(n^2)' }]);
     const workerHash = await computeHashWorker('single', '1. 快速排序最坏时间复杂度', [{ key: 'A', text: 'O(n^2)' }]);
     assert.strictEqual(workerHash, nodeHash, 'Edge Web Crypto 与 Node.js crypto 生成的指纹应 100% 相同');
 
-    // 2. 启动临时测试 Shim Server
+    // 2. 验证 URL 白名单校验逻辑 (防 SSRF 与钓鱼重定向)
+    assert.strictEqual(isAllowedTaskUrl('https://mooc1.chaoxing.com/mooc2/work/dowork?id=1'), true);
+    assert.strictEqual(isAllowedTaskUrl('https://studyh5.zhihuishu.com/videoStudy.html'), true);
+    assert.strictEqual(isAllowedTaskUrl('https://pintia.cn/problem-sets/1/problems/2'), true);
+    assert.strictEqual(isAllowedTaskUrl('http://mooc1.chaoxing.com/dowork'), false, '必须要求 https 协议');
+    assert.strictEqual(isAllowedTaskUrl('https://evil.attacker.com/chaoxing.com'), false, '恶意伪装域名必须被拦截');
+    assert.strictEqual(isAllowedTaskUrl('https://user:pass@mooc1.chaoxing.com'), false, '内嵌凭据 URL 必须被拦截');
+
+    // 3. 启动带安全加固的测试 Shim Server
+    const testSecret = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     process.env.NODE_ENV = 'test';
-    process.env.SHIM_TOKEN = 'test_secret_shim_token_123';
+    process.env.AFK_SHIM_SECRET = testSecret;
     const testPort = 8798;
-    const server = createShimServer();
+    const server = createShimServer({ secret: testSecret });
     await new Promise<void>((resolve) => server.listen(testPort, '127.0.0.1', () => resolve()));
 
     try {
-      // 2.1 GET /health 应该无需鉴权返回 200
+      // 3.1 公开存活探针
       const healthRes = await fetch(`http://127.0.0.1:${testPort}/health`);
       assert.strictEqual(healthRes.status, 200, '/health 应返回 200');
-      const healthJson: any = await healthRes.json();
-      assert.strictEqual(healthJson.agy, 'ok', 'health 响应中的 agy 状态应为 ok');
 
-      // 2.2 无鉴权调用 /task 应返回 401 Unauthorized
+      // 3.2 未签名调用 /task 必须被拦截为 401
       const unauthRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: 'test-job-unauth', taskUrl: 'https://example.com' }),
+        body: JSON.stringify({ jobId: 'test-job-unauth', taskUrl: 'https://mooc1.chaoxing.com/dowork' }),
       });
-      assert.strictEqual(unauthRes.status, 401, '缺少 Bearer Token 应当被安全拦截为 401');
+      assert.strictEqual(unauthRes.status, 401, '缺少 HMAC 签名的请求应被安全拦截为 401');
 
-      // 2.3 带正确 Bearer Token 调用 /task 应返回 202 Accepted
+      // 3.3 带非法域名的任务即使签名正确也应被参数校验拒绝 (400 Bad Request)
+      const invalidUrlBody = JSON.stringify({
+        jobId: 'test-job-bad-url',
+        taskUrl: 'https://evil.attacker.com/malicious',
+      });
+      const invalidUrlHeaders = await signRequest({
+        secret: testSecret,
+        method: 'POST',
+        pathWithQuery: '/task',
+        body: invalidUrlBody,
+      });
+      const badUrlRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...invalidUrlHeaders },
+        body: invalidUrlBody,
+      });
+      assert.strictEqual(badUrlRes.status, 400, '非白名单域名任务 URL 应被拒绝为 400');
+
+      // 3.4 合法签名且白名单内请求应被受理为 202 Accepted
+      const validBody = JSON.stringify({
+        jobId: 'test-job-auth-101',
+        taskUrl: 'https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=1&classId=2&workId=3',
+        platform: 'chaoxing',
+        mode: 'draft',
+      });
+      const validHeaders = await signRequest({
+        secret: testSecret,
+        method: 'POST',
+        pathWithQuery: '/task',
+        body: validBody,
+      });
       const authRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: 'Bearer test_secret_shim_token_123',
-        },
-        body: JSON.stringify({
-          jobId: 'test-job-auth-101',
-          taskUrl: 'https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=1&classId=2&workId=3',
-          platform: 'chaoxing',
-          mode: 'draft',
-        }),
+        headers: { 'Content-Type': 'application/json', ...validHeaders },
+        body: validBody,
       });
-      assert.strictEqual(authRes.status, 202, '合法鉴权请求应被受理为 202');
+      assert.strictEqual(authRes.status, 202, '合法 HMAC 签名请求应被受理为 202');
       const authJson: any = await authRes.json();
       assert.strictEqual(authJson.accepted, true, '受理响应中的 accepted 应为 true');
 
-      // 2.4 GET /status/:jobId
-      const statusRes = await fetch(`http://127.0.0.1:${testPort}/status/test-job-auth-101`, {
-        headers: { Authorization: 'Bearer test_secret_shim_token_123' },
+      // 3.5 防重放测试：使用完全相同的 Nonce/时间戳再次请求必须被判定为 401
+      const replayRes = await fetch(`http://127.0.0.1:${testPort}/task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...validHeaders },
+        body: validBody,
       });
-      assert.strictEqual(statusRes.status, 200, '查询任务状态应返回 200');
+      assert.strictEqual(replayRes.status, 401, '重放同一个 Nonce 请求应被安全拦截为 401 (Replay Attack)');
+
+      // 3.6 签名查询 GET /status/:jobId
+      const statusHeaders = await signRequest({
+        secret: testSecret,
+        method: 'GET',
+        pathWithQuery: '/status/test-job-auth-101',
+      });
+      const statusRes = await fetch(`http://127.0.0.1:${testPort}/status/test-job-auth-101`, {
+        headers: statusHeaders,
+      });
+      assert.strictEqual(statusRes.status, 200, '签名查询任务状态应返回 200');
       const statusJson: any = await statusRes.json();
       assert.strictEqual(statusJson.jobId, 'test-job-auth-101', '查询到的 jobId 应正确对应');
 
-      console.log(' ✅ [Test 5/5 PASS] Server Shim HTTP 接口契约、Bearer 鉴权与题库指纹跨环境对齐验证通过');
+      console.log(' ✅ [Test 5/6 PASS] Server Shim HMAC-SHA256 签名、防重放、域名白名单与加固契约验证通过');
     } finally {
       const { stopManagedBrowser } = await import('../packages/shim/src/browser');
       await stopManagedBrowser().catch(() => {});
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      delete process.env.SHIM_TOKEN;
+      delete process.env.AFK_SHIM_SECRET;
       delete process.env.NODE_ENV;
     }
   }
 
-  // --- Test 6: D1 幂等迁移脚本有效性与 Observability Metrics 契约 ---
+  // --- Test 6: Edge 边缘节点 Fail-Closed 访问控制与 D1 迁移脚本有效性 ---
   {
+    // 1. 验证 Edge checkAuth 严格鉴权 (Fail-Closed 原则)
+    const emptyEnv = {};
+    const unauthReq = new Request('https://afk.worker.dev/api/dashboard');
+    assert.strictEqual(checkAuth(unauthReq, emptyEnv), false, '未注入任何 Secret/Token 时必须 Fail-Closed 拒绝访问');
+
+    const securedEnv = { API_BEARER_TOKEN: 'secret_token_abc_123' };
+    const goodBearerReq = new Request('https://afk.worker.dev/api/dashboard', {
+      headers: { Authorization: 'Bearer secret_token_abc_123' },
+    });
+    assert.strictEqual(checkAuth(goodBearerReq, securedEnv), true, '合法 Bearer Token 应通过鉴权');
+
+    const badBearerReq = new Request('https://afk.worker.dev/api/dashboard', {
+      headers: { Authorization: 'Bearer wrong_token' },
+    });
+    assert.strictEqual(checkAuth(badBearerReq, securedEnv), false, '错误 Bearer Token 必须被拒绝');
+
+    const goodCookieReq = new Request('https://afk.worker.dev/dashboard', {
+      headers: { Cookie: 'afk_token=secret_token_abc_123' },
+    });
+    assert.strictEqual(checkAuth(goodCookieReq, securedEnv), true, '合法 Cookie 登录态应通过鉴权');
+
+    const goodQueryReq = new Request('https://afk.worker.dev/dashboard?token=secret_token_abc_123');
+    assert.strictEqual(checkAuth(goodQueryReq, securedEnv), true, '合法 Query Token 应通过鉴权');
+
+    // 2. 校验 D1 迁移脚本幂等性与性能索引
     const migrationsDir = path.join(__dirname, '../edge/migrations');
     const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
     assert.ok(files.includes('0004_perf_indexes.sql'), '必须包含 0004 性能索引迁移脚本');
@@ -297,16 +364,15 @@ async function runAllTests() {
       }
     }
 
-    // 校验 0004 性能索引的覆盖维度
     const sql0004 = fs.readFileSync(path.join(migrationsDir, '0004_perf_indexes.sql'), 'utf8');
     assert.ok(sql0004.includes('idx_pending_tasks_status_deadline'), '0004 需包含任务状态与截止时间联合索引');
     assert.ok(sql0004.includes('idx_question_bank_lookup'), '0004 需包含题库查询联合索引');
     assert.ok(sql0004.includes('idx_execution_logs_event_type'), '0004 需包含审计日志事件索引');
 
-    console.log(' ✅ [Test 6/6 PASS] D1 幂等迁移脚本有效性与 Observability Metrics 契约验证通过');
+    console.log(' ✅ [Test 6/6 PASS] Edge Fail-Closed 访问控制、Cookie/Bearer 鉴权与 D1 迁移规范验证通过');
   }
 
-  console.log(`\n🎉 全部 6 项核心自检测试 100% 通过！\n`);
+  console.log(`\n🎉 全部 6 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

@@ -1,21 +1,11 @@
 import { Agent, callable } from 'agents';
+import { isAllowedTaskUrl } from './auth';
 import { computeQuestionHash } from './hash';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
+import { signRequest } from './request-signing';
 import { nowUtc8, upsertPendingTask, upsertQuestionCache } from './store';
 
-export { computeQuestionHash };
-
-export interface TaskRecord {
-  job_id: string;
-  platform: string;
-  task_url: string;
-  status: 'pending' | 'dispatched' | 'draft_saved' | 'awaiting_approval' | 'submitted' | 'failed' | 'submitting';
-  deadline: string;
-  qa_json: string;
-  summary: string;
-  attempts: number;
-  updated_at: string;
-}
+export { computeQuestionHash, isAllowedTaskUrl };
 
 export interface SolverState {
   initialized: boolean;
@@ -113,7 +103,7 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   }
 
   /**
-   * 将任务派发给常驻服务器的 HTTP shim
+   * 将任务安全派发给常驻服务器的 HTTP shim (强制 URL 白名单校验 + HMAC-SHA256 签名)
    */
   async dispatchTask(jobId: string): Promise<boolean> {
     const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId);
@@ -122,7 +112,14 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     const task = rows[0] as any;
 
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
+    const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
+
+    // 安全防线 1：URL 域名白名单与 HTTPS 校验
+    if (!isAllowedTaskUrl(task.task_url, this.env.AFK_TASK_HOST_ALLOWLIST)) {
+      console.warn(`[SolverAgent Security] 任务 [${jobId}] 的 URL 不在安全白名单内，拒绝派发: ${task.task_url}`);
+      return false;
+    }
 
     const now = nowUtc8();
     this.ctx.storage.sql.exec(
@@ -145,22 +142,37 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     }
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (shimToken) headers['Authorization'] = `Bearer ${shimToken}`;
-
-      const res = await fetch(`${shimUrl.replace(/\/+$/, '')}/task`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          jobId: task.job_id,
-          taskUrl: task.task_url,
-          platform: task.platform,
-          deadline: task.deadline,
-          mode: 'draft',
-        }),
+      const endpoint = new URL('/task', shimUrl.replace(/\/+$/, '') + '/');
+      const body = JSON.stringify({
+        jobId: task.job_id,
+        taskUrl: task.task_url,
+        platform: task.platform,
+        deadline: task.deadline,
+        mode: 'draft',
       });
 
-      console.log(`[SolverAgent] 任务 [${jobId}] 派发至 shim HTTP ${res.status}`);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+      // 安全防线 2：HMAC-SHA256 请求签名 (优先) 或 Bearer 鉴权
+      if (shimSecret) {
+        const sigHeaders = await signRequest({
+          secret: shimSecret,
+          method: 'POST',
+          pathWithQuery: endpoint.pathname + endpoint.search,
+          body,
+        });
+        Object.assign(headers, sigHeaders);
+      } else if (shimToken) {
+        headers['Authorization'] = `Bearer ${shimToken}`;
+      }
+
+      const res = await fetch(endpoint.toString(), {
+        method: 'POST',
+        headers,
+        body,
+      });
+
+      console.log(`[SolverAgent] 任务 [${jobId}] 安全派发至 shim HTTP ${res.status}`);
       return res.ok;
     } catch (err: any) {
       console.error(`[SolverAgent] 派发任务至 shim 异常: ${err?.message || err}`);
@@ -294,7 +306,7 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   }
 
   /**
-   * 下发第二条指令：让 agy 回到页面点提交
+   * 下发第二条指令：让 agy 回到页面点提交 (HMAC 签名认证)
    */
   async submitTask(jobId: string): Promise<boolean> {
     const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId);
@@ -303,7 +315,14 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     const task = rows[0] as any;
 
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
+    const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
+
+    // 安全校验
+    if (!isAllowedTaskUrl(task.task_url, this.env.AFK_TASK_HOST_ALLOWLIST)) {
+      console.warn(`[SolverAgent Security] 提交任务 URL 非法: ${task.task_url}`);
+      return false;
+    }
 
     const now = nowUtc8();
     this.ctx.storage.sql.exec(
@@ -323,16 +342,29 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     if (!shimUrl) return false;
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (shimToken) headers['Authorization'] = `Bearer ${shimToken}`;
+      const endpoint = new URL('/submit', shimUrl.replace(/\/+$/, '') + '/');
+      const body = JSON.stringify({
+        jobId: task.job_id,
+        taskUrl: task.task_url,
+      });
 
-      const res = await fetch(`${shimUrl.replace(/\/+$/, '')}/submit`, {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (shimSecret) {
+        const sigHeaders = await signRequest({
+          secret: shimSecret,
+          method: 'POST',
+          pathWithQuery: endpoint.pathname + endpoint.search,
+          body,
+        });
+        Object.assign(headers, sigHeaders);
+      } else if (shimToken) {
+        headers['Authorization'] = `Bearer ${shimToken}`;
+      }
+
+      const res = await fetch(endpoint.toString(), {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          jobId: task.job_id,
-          taskUrl: task.task_url,
-        }),
+        body,
       });
       return res.ok;
     } catch (err: any) {
@@ -342,10 +374,11 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   }
 
   /**
-   * 兜底对账轮询 (当回调偶发丢失时推进状态)
+   * 兜底对账轮询 (当回调偶发丢失时推进状态，带签名查询)
    */
   async reconcileDispatchedTasks(): Promise<void> {
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
+    const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
     if (!shimUrl) return;
 
@@ -356,10 +389,22 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
 
     for (const t of tasks) {
       try {
+        const pathWithQuery = `/status/${encodeURIComponent(t.job_id)}`;
+        const endpoint = new URL(pathWithQuery, shimUrl.replace(/\/+$/, '') + '/');
         const headers: Record<string, string> = {};
-        if (shimToken) headers['Authorization'] = `Bearer ${shimToken}`;
 
-        const res = await fetch(`${shimUrl.replace(/\/+$/, '')}/status/${t.job_id}`, { headers });
+        if (shimSecret) {
+          const sigHeaders = await signRequest({
+            secret: shimSecret,
+            method: 'GET',
+            pathWithQuery,
+          });
+          Object.assign(headers, sigHeaders);
+        } else if (shimToken) {
+          headers['Authorization'] = `Bearer ${shimToken}`;
+        }
+
+        const res = await fetch(endpoint.toString(), { headers });
         if (res.ok) {
           const remote: any = await res.json();
           if (remote?.phase && remote.phase !== t.status) {

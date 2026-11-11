@@ -549,6 +549,103 @@ export interface ChaoxingNoticeItem {
 }
 
 /**
+ * 健壮地解析各类中文/超星时间字符串为 UTC+8 毫秒时间戳
+ */
+export function parseTimeToMs(timeStr?: string, fallbackYear?: number): number | null {
+  if (!timeStr) return null;
+  const s = String(timeStr).trim();
+  if (!s || s === '无截止时间' || s === '无' || s === '近期' || s === '无截止限制') return null;
+
+  // 纯数字毫秒/秒时间戳
+  if (/^\d{10,13}$/.test(s)) {
+    return Number(s.padEnd(13, '0'));
+  }
+
+  const currentYear = fallbackYear || new Date().getFullYear();
+
+  // 1. 中文日期格式，如 "11月8号 14:30" 或 "2026年11月08日 14:30:00"
+  const cnMatch = s.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[号日]?\s*(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (cnMatch) {
+    const y = cnMatch[1] ? Number(cnMatch[1]) : currentYear;
+    const m = Number(cnMatch[2]);
+    const d = Number(cnMatch[3]);
+    const hh = Number(cnMatch[4]);
+    const mm = Number(cnMatch[5]);
+    const ss = cnMatch[6] ? Number(cnMatch[6]) : 0;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const parsed = Date.parse(`${y}-${pad(m)}-${pad(d)}T${pad(hh)}:${pad(mm)}:${pad(ss)}+08:00`);
+    if (!isNaN(parsed)) return parsed;
+  }
+
+  // 2. 标准分隔符格式，如 "2026/11/08 14:30:00" 或 "11-08 14:30:00" 或 "2026-11-08 14:30"
+  const stdMatch = s.match(/(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (stdMatch) {
+    const y = stdMatch[1] ? Number(stdMatch[1]) : currentYear;
+    const m = Number(stdMatch[2]);
+    const d = Number(stdMatch[3]);
+    const hh = Number(stdMatch[4]);
+    const mm = Number(stdMatch[5]);
+    const ss = stdMatch[6] ? Number(stdMatch[6]) : 0;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const parsed = Date.parse(`${y}-${pad(m)}-${pad(d)}T${pad(hh)}:${pad(mm)}:${pad(ss)}+08:00`);
+    if (!isNaN(parsed)) return parsed;
+  }
+
+  // 3. 通用 Date.parse 兜底
+  const normalized = s.replace(/年|月/g, '-').replace(/日|号/g, '').replace(/\//g, '-').trim();
+  let ms = Date.parse(normalized);
+  if (isNaN(ms)) {
+    ms = Date.parse(normalized + ' GMT+0800');
+  }
+  return isNaN(ms) ? null : ms;
+}
+
+/**
+ * 从通知文本内容中智能提取考试/作业的起止时间、课程名称、考试/作业名称
+ */
+export function extractInfoFromContent(content?: string, referenceYear?: number): {
+  startTime?: string;
+  endTime?: string;
+  courseName?: string;
+  examName?: string;
+} {
+  if (!content) return {};
+  const res: { startTime?: string; endTime?: string; courseName?: string; examName?: string } = {};
+
+  // 提取课程名称: 课程名称：高等数学（二） 或 《高等数学（二）》
+  const courseMatch = content.match(/课程名称[:：]\s*([^\s,，。；\n\r]+)/) || content.match(/《([^》]+)》/);
+  if (courseMatch) res.courseName = courseMatch[1].trim();
+
+  // 提取试卷/考试/作业名称
+  const examMatch = content.match(/(?:试卷|考试|作业)名称[:：]\s*([^\s,，。；\n\r]+)/);
+  if (examMatch) res.examName = examMatch[1].trim();
+
+  // 模式1：标准起止时间
+  const endMatch = content.match(/(?:结束时间|截止时间)[:：]\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?\s+\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}[-/月]\d{1,2}[日号]?\s+\d{1,2}:\d{2}(?::\d{2})?)/);
+  if (endMatch) res.endTime = endMatch[1].trim();
+
+  const startMatch = content.match(/开始时间[:：]\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?\s+\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}[-/月]\d{1,2}[日号]?\s+\d{1,2}:\d{2}(?::\d{2})?)/);
+  if (startMatch) res.startTime = startMatch[1].trim();
+
+  // 模式2：考试时间：11-09 13:00:00 至 11-09 14:35:00
+  const rangeMatch = content.match(/考试时间[:：]\s*([^\s至~～—]+(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)\s*(?:至|~|～|——|-)\s*([^\s,，。；\n\r]+(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/);
+  if (rangeMatch) {
+    if (!res.startTime) res.startTime = rangeMatch[1].trim();
+    if (!res.endTime) res.endTime = rangeMatch[2].trim();
+  }
+
+  // 模式3：中文跨时间，如 "11月8号13:00——14:30"
+  const cnRange = content.match(/(\d{1,2}月\d{1,2}[号日]?)\s*(\d{1,2}:\d{2})\s*(?:至|~|～|——|-)\s*(\d{1,2}:\d{2})/);
+  if (cnRange && !res.endTime) {
+    const dayStr = cnRange[1].trim();
+    res.startTime = `${dayStr} ${cnRange[2].trim()}`;
+    res.endTime = `${dayStr} ${cnRange[3].trim()}`;
+  }
+
+  return res;
+}
+
+/**
  * 抓取超星通知中心消息列表（包含全量班级通知、随堂考试/测验、新作业发布通知）
  */
 export async function fetchNoticeList(session: UserSession, limit = 20): Promise<ChaoxingNoticeItem[]> {
@@ -633,12 +730,33 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
               }
             }
 
+            const sendYear = n.sendTime ? new Date(n.sendTime).getFullYear() : new Date().getFullYear();
+            const extracted = extractInfoFromContent(n.content, sendYear);
+
+            if (!endTime || endTime === '无截止时间' || endTime === '无') {
+              if (extracted.endTime) endTime = extracted.endTime;
+            }
+            if (!startTime || startTime === '近期') {
+              if (extracted.startTime) startTime = extracted.startTime;
+            }
+            if (!courseName || courseName.startsWith('课程_') || courseName === '在线课程') {
+              if (extracted.courseName) courseName = extracted.courseName;
+            }
+
+            // 规范化年份
+            if (endTime && !/^\d{4}/.test(endTime) && sendYear) {
+              const clean = endTime.replace(/年|月/g, '/').replace(/日|号/g, '').replace(/-/g, '/');
+              endTime = `${sendYear}/${clean}`;
+            }
+            if (startTime && !/^\d{4}/.test(startTime) && sendYear) {
+              const clean = startTime.replace(/年|月/g, '/').replace(/日|号/g, '').replace(/-/g, '/');
+              startTime = `${sendYear}/${clean}`;
+            }
+
             let isExpired = false;
-            if (endTime) {
-              const endMs = new Date(endTime).getTime();
-              if (!isNaN(endMs) && endMs < Date.now()) {
-                isExpired = true;
-              }
+            const endMs = parseTimeToMs(endTime, sendYear);
+            if (endMs !== null && endMs < Date.now()) {
+              isExpired = true;
             }
 
             const itemTitle = w.title || n.title || '在线评测';

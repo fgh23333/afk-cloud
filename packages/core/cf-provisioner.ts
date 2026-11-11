@@ -136,6 +136,8 @@ export async function provisionCloudflareEdge(
 
   const bearerToken =
     process.env.AFK_EDGE_BEARER_TOKEN || crypto.randomBytes(24).toString('hex');
+  const shimSecret =
+    process.env.AFK_SHIM_SECRET || crypto.randomBytes(32).toString('hex');
   const realname = process.env.CHAOXING_REALNAME || '同学';
   const autoSubmit = process.env.CHAOXING_AUTO_SUBMIT || 'false';
 
@@ -226,6 +228,7 @@ export async function provisionCloudflareEdge(
   console.log(blue(`🔐 [5/5] 正在从 .env 批量注入加密 Secrets 到 Cloudflare Worker...`));
   const secretsPayload: Record<string, string> = {
     API_BEARER_TOKEN: bearerToken,
+    AFK_SHIM_SECRET: shimSecret,
   };
   if (process.env.CHAOXING_PHONE) secretsPayload.CHAOXING_PHONE = process.env.CHAOXING_PHONE;
   if (process.env.CHAOXING_PASSWORD) secretsPayload.CHAOXING_PASSWORD = process.env.CHAOXING_PASSWORD;
@@ -256,10 +259,12 @@ export async function provisionCloudflareEdge(
   upsertEnvVariables(envPath, {
     AFK_EDGE_WORKER_URL: workerUrl,
     AFK_EDGE_BEARER_TOKEN: bearerToken,
+    AFK_SHIM_SECRET: shimSecret,
   });
   process.env.AFK_EDGE_WORKER_URL = workerUrl;
   process.env.AFK_EDGE_BEARER_TOKEN = bearerToken;
-  console.log(green(`🔄 已自动将 AFK_EDGE_WORKER_URL 与 AFK_EDGE_BEARER_TOKEN 回写绑定至 .env！\n`));
+  process.env.AFK_SHIM_SECRET = shimSecret;
+  console.log(green(`🔄 已自动将 AFK_EDGE_WORKER_URL、AFK_EDGE_BEARER_TOKEN 与 AFK_SHIM_SECRET 回写绑定至 .env！\n`));
 
   if (!process.env.CHAOXING_PHONE || !process.env.CHAOXING_PASSWORD) {
     console.log(

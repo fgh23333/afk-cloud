@@ -44,6 +44,9 @@ export interface EdgeEnv {
   AUTO_SUBMIT_HOMEWORK?: string;
   HOMEWORK_SCAN_INTERVAL_MINUTES?: string;
   API_BEARER_TOKEN?: string;
+  DASHBOARD_PASSWORD?: string;
+  AFK_SHIM_SECRET?: string;
+  AFK_TASK_HOST_ALLOWLIST?: string;
   WEBHOOK_URL?: string;
   SERVERCHAN_KEY?: string;
   BARK_KEY?: string;

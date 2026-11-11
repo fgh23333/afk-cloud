@@ -1,4 +1,5 @@
 import { EdgeEnv, nowUtc8 } from './store';
+import { extractInfoFromContent, parseTimeToMs } from './chaoxing';
 
 export interface DashboardData {
   time: string;
@@ -270,6 +271,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       }
     }
 
+    const examMap = new Map<string, any>();
+
     for (const n of rawNotices) {
       notices.push({
         title: n.title,
@@ -282,21 +285,104 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         try {
           const parsed = JSON.parse(n.raw_json);
           if (parsed.examInfo) {
-            exams.push({
-              examId: parsed.examInfo.examId,
-              title: parsed.examInfo.title,
-              courseName: parsed.examInfo.courseName,
-              startTime: parsed.examInfo.startTime,
-              endTime: parsed.examInfo.endTime,
-              isExpired: !!parsed.examInfo.isExpired,
-              url: parsed.examInfo.url,
-            });
+            const raw = parsed.examInfo;
+            const examId = String(raw.examId || '');
+            let title = raw.title || '在线评测';
+            let courseName = raw.courseName || '';
+            let startTime = raw.startTime || '';
+            let endTime = raw.endTime || '';
+            const url = raw.url || '';
+            const courseId = String(raw.courseId || '');
+
+            const refYear = n.send_time ? new Date(n.send_time).getFullYear() : new Date().getFullYear();
+            const extracted = extractInfoFromContent(n.content, refYear);
+
+            // 补全截止时间
+            if (!endTime || endTime === '无截止时间' || endTime === '无') {
+              if (extracted.endTime) {
+                endTime = extracted.endTime;
+              }
+            }
+            if (endTime && !/^\d{4}/.test(endTime) && refYear) {
+              const clean = endTime.replace(/年|月/g, '/').replace(/日|号/g, '').replace(/-/g, '/');
+              endTime = `${refYear}/${clean}`;
+            }
+
+            // 补全开始时间
+            if (!startTime || startTime === '近期') {
+              if (extracted.startTime) {
+                startTime = extracted.startTime;
+              }
+            }
+            if (startTime && !/^\d{4}/.test(startTime) && refYear) {
+              const clean = startTime.replace(/年|月/g, '/').replace(/日|号/g, '').replace(/-/g, '/');
+              startTime = `${refYear}/${clean}`;
+            }
+
+            // 补全课程名称（优先课程映射表与正则提取）
+            if (!courseName || courseName.startsWith('课程_') || courseName === '在线课程') {
+              if (courseId && courseMap.has(courseId)) {
+                courseName = courseMap.get(courseId)!.courseName;
+              } else if (extracted.courseName) {
+                courseName = extracted.courseName;
+              }
+            }
+
+            if ((!title || title === '在线评测') && extracted.examName) {
+              title = extracted.examName;
+            }
+
+            // 核心：基于现实当前时间（UTC+8）动态判定是否过期
+            const endMs = parseTimeToMs(endTime, refYear);
+            const isExpired = endMs !== null ? endMs < Date.now() : !!raw.isExpired;
+
+            const examKey = examId ? `id_${examId}` : `title_${title}`;
+            const existing = examMap.get(examKey);
+            if (!existing) {
+              examMap.set(examKey, {
+                examId,
+                title,
+                courseName,
+                startTime: startTime || '近期',
+                endTime: endTime || '无截止时间',
+                isExpired,
+                url,
+                endMs: endMs || 0,
+              });
+            } else {
+              // 合并同一考试的多条通知数据，保留最完整信息
+              if ((!existing.endTime || existing.endTime === '无截止时间') && endTime && endTime !== '无截止时间') {
+                existing.endTime = endTime;
+                existing.endMs = endMs || 0;
+              }
+              if ((!existing.courseName || existing.courseName.startsWith('课程_')) && courseName && !courseName.startsWith('课程_')) {
+                existing.courseName = courseName;
+              }
+              if ((!existing.startTime || existing.startTime === '近期') && startTime && startTime !== '近期') {
+                existing.startTime = startTime;
+              }
+              if (!existing.url && url) {
+                existing.url = url;
+              }
+              if (isExpired) {
+                existing.isExpired = true;
+              }
+            }
           }
         } catch {
           // ignore
         }
       }
     }
+
+    const allExams = Array.from(examMap.values());
+    allExams.sort((a, b) => {
+      if (a.isExpired !== b.isExpired) {
+        return a.isExpired ? 1 : -1;
+      }
+      return (b.endMs || 0) - (a.endMs || 0);
+    });
+    exams.push(...allExams.map(({ endMs, ...rest }) => rest));
 
     // 若通知箱为空，使用日志降级兜底展示
     if (notices.length === 0) {
@@ -643,6 +729,36 @@ export function renderDashboardHtml(): string {
       renderHomework();
     }
 
+    function parseClientTimeMs(timeStr) {
+      if (!timeStr) return null;
+      const s = String(timeStr).trim();
+      if (!s || s === '无截止时间' || s === '无' || s === '近期' || s === '无截止限制') return null;
+      if (/^\d{10,13}$/.test(s)) return Number(s.padEnd(13, '0'));
+      const match = s.match(/(?:(\d{4})[-/年])?(\d{1,2})[-/月](\d{1,2})[日号]?\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+      if (match) {
+        const y = match[1] ? Number(match[1]) : new Date().getFullYear();
+        const m = Number(match[2]);
+        const d = Number(match[3]);
+        const hh = Number(match[4]);
+        const mm = Number(match[5]);
+        const ss = match[6] ? Number(match[6]) : 0;
+        const pad = function(n) { return String(n).padStart(2, '0'); };
+        return Date.parse(y + '-' + pad(m) + '-' + pad(d) + 'T' + pad(hh) + ':' + pad(mm) + ':' + pad(ss) + '+08:00');
+      }
+      const norm = s.replace(/年|月/g, '-').replace(/日|号/g, '').replace(/\//g, '-').trim();
+      const ms = Date.parse(norm);
+      return isNaN(ms) ? Date.parse(norm + ' GMT+0800') : ms;
+    }
+
+    function checkExamIsActive(e) {
+      if (e.isExpired) return false;
+      const ms = parseClientTimeMs(e.endTime);
+      if (ms !== null && !isNaN(ms)) {
+        return ms > Date.now();
+      }
+      return !e.isExpired;
+    }
+
     function renderUI() {
       if (!state) return;
 
@@ -668,7 +784,7 @@ export function renderDashboardHtml(): string {
       const cntSubmitted = document.getElementById('cnt-submitted');
       if (cntSubmitted) cntSubmitted.innerText = submittedCount;
 
-      const activeExams = (state.exams || []).filter(e => !e.isExpired);
+      const activeExams = (state.exams || []).filter(e => checkExamIsActive(e));
       document.getElementById('activeExamsCount').innerText = activeExams.length;
       document.getElementById('totalNoticesCount').innerText = '通知箱捕获: ' + (state.notices || []).length + ' 条';
       document.getElementById('signedCount').innerText = state.stats?.signinCount || (state.signinHistory || []).length;
@@ -794,8 +910,16 @@ export function renderDashboardHtml(): string {
       let html = '';
       if (exams.length > 0) {
         html += '<h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">随堂测验与考试</h4>';
-        html += exams.map(e => {
-          const isAct = !e.isExpired;
+        const sortedExams = [...exams].sort((a, b) => {
+          const aAct = checkExamIsActive(a);
+          const bAct = checkExamIsActive(b);
+          if (aAct !== bAct) return aAct ? -1 : 1;
+          const aMs = parseClientTimeMs(a.endTime) || 0;
+          const bMs = parseClientTimeMs(b.endTime) || 0;
+          return bMs - aMs;
+        });
+        html += sortedExams.map(e => {
+          const isAct = checkExamIsActive(e);
           return \`
             <div class="glass-card rounded-xl p-4 border \${isAct ? 'border-rose-500/40 bg-rose-950/20' : 'border-slate-800'}">
               <div class="flex items-center justify-between">

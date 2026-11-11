@@ -1,3 +1,4 @@
+import { checkAuth, getExpectedAuthTokens, isAllowedTaskUrl, isAuthEnforced } from './auth';
 import { routeAgentRequest } from 'agents';
 import {
   checkHomeworkPendingCourses,
@@ -11,6 +12,7 @@ import {
 } from './chaoxing';
 import { getDashboardData, renderDashboardHtml } from './dashboard';
 import { ExtendedNotifyEnv, sendDigestNotification, sendNotification } from './notify';
+import { signRequest, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
 import { SolverAgent } from './solver-agent';
 import {
@@ -25,21 +27,13 @@ import {
   upsertQuestionCache,
 } from './store';
 
-export { SignAgent, SolverAgent };
-
-function checkAuth(request: Request, env: ExtendedNotifyEnv): boolean {
-  if (!env.API_BEARER_TOKEN) return true;
-  const auth = request.headers.get('Authorization') || '';
-  if (auth === `Bearer ${env.API_BEARER_TOKEN}`) return true;
-  const url = new URL(request.url);
-  return url.searchParams.get('token') === env.API_BEARER_TOKEN;
-}
+export { SignAgent, SolverAgent, checkAuth };
 
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AFK-Timestamp, X-AFK-Nonce, X-AFK-Signature',
   };
 }
 
@@ -61,6 +55,118 @@ function corsText(text: string, status = 200): Response {
       ...corsHeaders(),
     },
   });
+}
+
+/**
+ * 未认证访问 Web 看板时的暗黑磨砂玻璃登录解锁界面
+ */
+function renderAuthRequiredHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>安全解锁 · afk-cloud 控制面板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#10b981', 600: '#059669' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4 antialiased selection:bg-emerald-500 selection:text-white">
+  <div class="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-8 shadow-2xl backdrop-blur-xl">
+    <div class="flex items-center space-x-3 mb-6">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-slate-950 font-bold shadow-lg shadow-emerald-500/20">
+        🔐
+      </div>
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-white">afk-cloud 看板安全锁</h1>
+        <p class="text-xs text-slate-400">Personal Autonomous Agent Edge Node</p>
+      </div>
+    </div>
+
+    <p class="text-sm text-slate-300 mb-6 leading-relaxed">
+      本边缘节点已启用全量安全隔离。请输入您配置的 <code class="px-1.5 py-0.5 rounded bg-slate-800 text-emerald-400 text-xs font-mono">API_BEARER_TOKEN</code> 或访问口令解锁。
+    </p>
+
+    <form id="loginForm" class="space-y-4" onsubmit="handleLogin(event)">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1">访问口令 (Token / Password)</label>
+        <input
+          id="tokenInput"
+          type="password"
+          required
+          autocomplete="current-password"
+          placeholder="输入口令 (如 .env 中的 AFK_EDGE_BEARER_TOKEN)"
+          class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none text-sm transition-all text-white placeholder-slate-600"
+        />
+      </div>
+
+      <div id="errorMsg" class="hidden text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 rounded-lg p-2.5">
+        口令无效或已过期，请检查输入
+      </div>
+
+      <button
+        type="submit"
+        id="submitBtn"
+        class="w-full py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 active:scale-[0.98] flex items-center justify-center space-x-2"
+      >
+        <span>解锁进入看板</span>
+        <span>→</span>
+      </button>
+    </form>
+
+    <div class="mt-8 pt-6 border-t border-slate-800/60 text-center">
+      <p class="text-xs text-slate-500">
+        提示：若首次部署未配置口令，请运行 <code class="text-slate-400 font-mono">pnpm afk setup-cf</code> 自动注入
+      </p>
+    </div>
+  </div>
+
+  <script>
+    async function handleLogin(e) {
+      e.preventDefault();
+      const btn = document.getElementById('submitBtn');
+      const err = document.getElementById('errorMsg');
+      const token = document.getElementById('tokenInput').value.trim();
+      if (!token) return;
+
+      btn.disabled = true;
+      btn.innerText = '校验中...';
+      err.classList.add('hidden');
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+
+        if (res.ok) {
+          document.cookie = 'afk_token=' + encodeURIComponent(token) + '; path=/; max-age=2592000; SameSite=Lax; Secure';
+          window.location.href = '/';
+        } else {
+          err.classList.remove('hidden');
+        }
+      } catch (e) {
+        err.innerText = '网络异常，请重试';
+        err.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '解锁进入看板 →';
+      }
+    }
+  </script>
+</body>
+</html>`;
 }
 
 /**
@@ -112,6 +218,21 @@ export default {
           }
         }
 
+        // 自动巡检并派发待办作业给 agy (每轮最多派发 3 个，避免拥堵)
+        if (shouldCheckHomework && env.DB && (env.AFK_SHIM_URL || env.SHIM_URL || env.SOLVER_AGENT)) {
+          try {
+            const pending = await env.DB.prepare(
+              "SELECT task_id FROM pending_tasks WHERE status = 'pending' ORDER BY created_at ASC LIMIT 3"
+            ).all<{ task_id: string }>();
+
+            for (const row of pending.results || []) {
+              await dispatchSingleTask(env, row.task_id);
+            }
+          } catch (e: any) {
+            console.warn(`[scheduled 自动派发异常] ${e?.message || e}`);
+          }
+        }
+
         if (shouldSendDigest) {
           const data = await getDashboardData(env);
           await sendDigestNotification(
@@ -128,17 +249,12 @@ export default {
   },
 
   /**
-   * HTTP 路由：
-   * - GET / 或 /dashboard : 渲染 Cloudflare 零服务器全景 Web 看板
-   * - GET /api/dashboard  : 看板聚合数据 JSON
-   * - POST /api/digest    : 手动触发一次全平台汇总通知推送
-   * - GET /check          : 立即执行一次边缘签到与作业红点探测
-   * - /api/tasks/*        : 供 GCP / Cloud Run 同步任务状态并触发完成通知
+   * HTTP 路由安全控制
    */
   async fetch(request: Request, env: ExtendedNotifyEnv): Promise<Response> {
     const url = new URL(request.url);
 
-    // 0. CORS 跨域预检快速通道 (支持 Web 前端跨域调用边缘 Worker)
+    // 0. CORS 跨域预检快速通道
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
@@ -149,7 +265,7 @@ export default {
       });
     }
 
-    // 1. Cloudflare Agents SDK 原生路由派发 (如 /agents/sign-agent/... 与 /agents/solver-agent/...)
+    // 1. Cloudflare Agents SDK 原生路由派发
     try {
       const agentRes = await routeAgentRequest(request, env);
       if (agentRes) return agentRes;
@@ -157,13 +273,63 @@ export default {
       console.warn(`[routeAgentRequest 提示] ${e?.message || e}`);
     }
 
-    // 1. 零服务器 Web 全景看板静态 HTML (当直接通过浏览器访问 Worker 根路径时呈现)
+    // 2. 身份认证接口 (Web 看板解锁与登出)
+    if (url.pathname === '/api/auth/login' && request.method === 'POST') {
+      const body: any = await request.json().catch(() => ({}));
+      const token = String(body?.token || '').trim();
+      const validTokens = getExpectedAuthTokens(env);
+      if (!token || validTokens.length === 0 || !validTokens.includes(token)) {
+        return corsJson({ ok: false, error: '口令无效或未配置' }, 401);
+      }
+      return new Response(JSON.stringify({ ok: true, message: '认证成功' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': `afk_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure`,
+          ...corsHeaders(),
+        },
+      });
+    }
+
+    if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
+      return new Response(JSON.stringify({ ok: true, message: '已安全退出' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': `afk_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure`,
+          ...corsHeaders(),
+        },
+      });
+    }
+
+    // 3. 零服务器 Web 全景看板静态 HTML (带严格认证拦截)
     if ((url.pathname === '/' || url.pathname === '/dashboard') && request.method === 'GET') {
+      // 若带有有效 ?token= 参数，自动注入 Cookie 并 302 重定向消除 URL 栏敏感信息
+      const queryToken = url.searchParams.get('token');
+      const validTokens = getExpectedAuthTokens(env);
+      if (queryToken && validTokens.includes(queryToken)) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: '/',
+            'Set-Cookie': `afk_token=${encodeURIComponent(queryToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure`,
+          },
+        });
+      }
+
+      if (!checkAuth(request, env)) {
+        return new Response(renderAuthRequiredHtml(), {
+          status: 401,
+          headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders() },
+        });
+      }
+
       return new Response(renderDashboardHtml(), {
         headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders() },
       });
     }
 
+    // 4. 公开存活探针 (仅返回最小健康状态，不泄漏敏感数据)
     if (url.pathname === '/health' || url.pathname === '/api/health') {
       const startTime = Date.now();
       let d1Status = 'unconfigured';
@@ -177,7 +343,6 @@ export default {
           d1LatencyMs = Date.now() - dbStart;
           d1Status = check?.ping === 1 ? 'healthy' : 'degraded';
 
-          // 快速统计关键状态指标
           const statsRes = await env.DB.prepare(
             `SELECT status, count(*) as count FROM pending_tasks GROUP BY status`
           ).all<{ status: string; count: number }>();
@@ -195,9 +360,10 @@ export default {
       const isHealthy = d1Status === 'healthy' || (!env.DB && d1Status === 'unconfigured');
       const healthData = {
         status: isHealthy ? 'healthy' : 'degraded',
-        version: '1.0.4',
+        version: '1.0.8',
         timestamp: nowUtc8(),
         latency_ms: Date.now() - startTime,
+        auth_enforced: isAuthEnforced(env),
         components: {
           d1: {
             status: d1Status,
@@ -217,7 +383,12 @@ export default {
       return corsJson(healthData, isHealthy ? 200 : 503);
     }
 
+    // 5. 监控指标接口 (必须通过鉴权)
     if (url.pathname === '/metrics' || url.pathname === '/api/metrics') {
+      if (!checkAuth(request, env)) {
+        return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      }
+
       let pendingCount = 0;
       let draftCount = 0;
       let submittedCount = 0;
@@ -265,8 +436,9 @@ export default {
       });
     }
 
-    // 2. 超星 Web 前端适配接口 (零服务器边缘化签到与登录态复用)
+    // 6. 超星业务代理接口 (全部强制 checkAuth 鉴权)
     if (url.pathname === '/login' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const phone = body.phone || '';
       const password = body.password || '';
@@ -291,6 +463,7 @@ export default {
     }
 
     if (url.pathname === '/activity' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -326,6 +499,7 @@ export default {
     }
 
     if (url.pathname === '/general' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -345,6 +519,7 @@ export default {
     }
 
     if (url.pathname === '/location' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -356,9 +531,9 @@ export default {
       };
       const customLocs = [
         {
-          lat: String(body.lat || '30.884000'),
-          lon: String(body.lon || '121.896500'),
-          address: body.address || '上海海洋大学教学楼',
+          lat: String(body.lat || env.CHAOXING_SIGN_LAT || ''),
+          lon: String(body.lon || env.CHAOXING_SIGN_LON || ''),
+          address: body.address || env.CHAOXING_SIGN_ADDRESS || '校园教学楼',
         },
       ];
       const res = await performSign(
@@ -372,6 +547,7 @@ export default {
     }
 
     if (url.pathname === '/qrcode' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -383,9 +559,9 @@ export default {
       };
       const customLocs = [
         {
-          lat: String(body.lat || '30.884000'),
-          lon: String(body.lon || '121.896500'),
-          address: body.address || '上海海洋大学教学楼',
+          lat: String(body.lat || env.CHAOXING_SIGN_LAT || ''),
+          lon: String(body.lon || env.CHAOXING_SIGN_LON || ''),
+          address: body.address || env.CHAOXING_SIGN_ADDRESS || '校园教学楼',
         },
       ];
       const res = await performSign(
@@ -400,6 +576,7 @@ export default {
     }
 
     if (url.pathname === '/photo' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -422,6 +599,7 @@ export default {
     }
 
     if (url.pathname === '/uvtoken' && request.method === 'POST') {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const cookie = `_uid=${body.uid || body._uid}; UID=${body.uid || body._uid}; _d=${body._d}; vc3=${body.vc3}; uf=${body.uf}`;
       const tokenRes = await fetch('https://pan-yz.chaoxing.com/api/token/uservalid', {
@@ -432,34 +610,77 @@ export default {
     }
 
     if (url.pathname.startsWith('/monitor/status')) {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 200, msg: 'Cloudflare Edge 24/7 Heartbeat Active' });
     }
 
     if (url.pathname.startsWith('/monitor/start')) {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 200, msg: 'Started Successfully' });
     }
 
     if (url.pathname.startsWith('/monitor/stop')) {
+      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 201, msg: 'Suspended' });
     }
 
     if (url.pathname === '/check' || url.pathname === '/run') {
       if (!checkAuth(request, env)) {
-        return corsJson({ error: 'Unauthorized' }, 401);
+        return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
       const result = await handleEdgeHeartbeat(env, true);
       return corsJson(result, result.success ? 200 : 500);
     }
 
+    // 7. /api/agent/callback 专用回调通道（具备 HMAC 签名防篡改）
+    if (url.pathname === '/api/agent/callback' && request.method === 'POST') {
+      const rawBody = await request.text();
+      const shimSecret = env.AFK_SHIM_SECRET;
+
+      // 强制签名校验：若配置了 AFK_SHIM_SECRET，必须通过 HMAC-SHA256 签名校验
+      if (shimSecret) {
+        const verifyRes = await verifySignedRequest({
+          secret: shimSecret,
+          method: 'POST',
+          pathWithQuery: url.pathname + url.search,
+          body: rawBody,
+          getHeader: (name) => request.headers.get(name),
+        });
+        if (!verifyRes.ok) {
+          console.warn(`[Edge Security] /api/agent/callback 验签失败: ${verifyRes.reason}`);
+          return corsJson({ error: 'Unauthorized: Bad or expired signature' }, 401);
+        }
+      } else {
+        // 回退：若未配置 AFK_SHIM_SECRET，检查 Bearer Token / SYNC_SECRET
+        if (!checkAuth(request, env)) {
+          return corsJson({ error: 'Unauthorized: Missing or invalid token' }, 401);
+        }
+      }
+
+      let body: any = {};
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch {
+        return corsJson({ error: 'Invalid JSON body' }, 400);
+      }
+
+      if (env.SOLVER_AGENT) {
+        const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+        const result: any = await (solverStub as any).handleCallback(body);
+        return corsJson(result);
+      }
+      return corsJson({ handled: false, reason: 'SOLVER_AGENT not configured' });
+    }
+
+    // 8. 其他所有 /api/* 接口必须通过 checkAuth 鉴权
     if (url.pathname.startsWith('/api/')) {
       if (!checkAuth(request, env)) {
-        return corsJson({ error: 'Unauthorized' }, 401);
+        return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
 
       // 看板全量数据接口 (兼容 /api/dashboard 与 /api/data)
       if ((url.pathname === '/api/dashboard' || url.pathname === '/api/data') && request.method === 'GET') {
         let data = await getDashboardData(env);
-        // 若在读课程或通知箱尚未拉取过，触发即时拉取并持久化至 D1
         if (((!data.courses || data.courses.length === 0) || (!data.notices || data.notices.length === 0)) && (env.CHAOXING_PHONE || env.PHONE)) {
           const phone = env.CHAOXING_PHONE || env.PHONE || '';
           const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
@@ -496,15 +717,14 @@ export default {
           session = await login(phone, password);
           if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
         }
-        if (!session) {
-          return corsJson({ success: false, msg: '未获取到有效超星会话' }, 401);
-        }
-        const courseList = await getCourses(session);
-        const count = await saveEnrolledCourses(env, courseList);
-        return corsJson({ success: true, count: courseList.length, saved: count, courses: courseList, time: nowUtc8() });
+        if (!session) return corsJson({ error: 'No Session' }, 401);
+
+        const courses = await getCourses(session);
+        await saveEnrolledCourses(env, courses);
+        return corsJson({ courses, count: courses.length, time: nowUtc8() });
       }
 
-      // 手动刷新或抓取超星通知中心消息
+      // 手动刷新通知箱消息
       if ((url.pathname === '/api/notices/refresh' || url.pathname === '/api/notices') && (request.method === 'GET' || request.method === 'POST')) {
         const phone = env.CHAOXING_PHONE || env.PHONE || '';
         const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
@@ -513,89 +733,76 @@ export default {
           session = await login(phone, password);
           if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
         }
-        if (!session) {
-          return corsJson({ success: false, msg: '未获取到有效超星会话' }, 401);
-        }
-        const notices = await fetchNoticeList(session, 20);
-        const count = await saveNotices(env, notices);
-        return corsJson({ success: true, count, notices, time: nowUtc8() });
+        if (!session) return corsJson({ error: 'No Session' }, 401);
+
+        const list = await fetchNoticeList(session, 20);
+        const count = await saveNotices(env, list);
+        return corsJson({ notices: list, count, time: nowUtc8() });
       }
 
-      // 按需立即发送一次汇总简报通知
+      // 手动触发一次每日简报推送
       if (url.pathname === '/api/digest' && request.method === 'POST') {
         const data = await getDashboardData(env);
-        const text = await sendDigestNotification(
+        const summary = await sendDigestNotification(
           env,
           {
             ...data.stats,
             recentTasks: data.tasks,
           },
-          '即时汇总通知'
+          '手动触发任务简报'
         );
-        return corsJson({ sent: true, summary: text, time: nowUtc8() });
+        return corsJson({ success: true, summary, time: nowUtc8() });
       }
 
-      // 获取待办任务列表
+      // 获取当前 D1 队列待办
       if (url.pathname === '/api/tasks' && request.method === 'GET') {
         if (!env.DB) return corsJson({ tasks: [] });
-        const status = url.searchParams.get('status') || 'pending';
         const rows = await env.DB.prepare(
-          'SELECT * FROM pending_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT 50'
-        )
-          .bind(status)
-          .all();
-        return corsJson({ tasks: rows.results || [], time: nowUtc8() });
+          'SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 50'
+        ).all();
+        return corsJson({ tasks: rows.results || [] });
       }
 
-      // 批量上报/更新任务状态（兼容 /api/tasks/sync 与 /api/sync）
+      // 批量同步作业待办
       if ((url.pathname === '/api/tasks/sync' || url.pathname === '/api/sync') && request.method === 'POST') {
+        if (!env.DB) return corsJson({ error: 'DB not available' }, 500);
         const body: any = await request.json();
-        const items: any[] = Array.isArray(body.tasks) ? body.tasks : [];
+        const tasks: any[] = Array.isArray(body) ? body : body.tasks || [];
         let updatedCount = 0;
+        const now = nowUtc8();
 
-        for (const item of items) {
-          await upsertPendingTask(env, {
-            taskId: item.taskId,
-            platform: item.platform || 'chaoxing',
-            courseId: item.courseId || '',
-            classId: item.classId || '',
-            courseName: item.courseName || '',
-            title: item.title || '',
-            status: item.status || 'pending',
-            computeTier: item.computeTier || 'tier1-cloud-run',
-            deadline: item.deadline || '',
-            payload: item.payload,
-          });
-
-          if (env.DB && (item.status === 'draft_saved' || item.status === 'submitted' || item.resultSummary)) {
-            await env.DB.prepare(
-              'UPDATE pending_tasks SET status = ?, result_summary = ?, updated_at = ? WHERE task_id = ?'
+        for (const t of tasks) {
+          if (!t.workId && !t.taskId) continue;
+          const tid = t.taskId || `chaoxing-work-${t.workId}`;
+          await env.DB.prepare(
+            `INSERT INTO pending_tasks 
+             (task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, payload_json, updated_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET 
+               title = excluded.title,
+               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'submitted') THEN pending_tasks.status ELSE excluded.status END,
+               deadline = excluded.deadline,
+               payload_json = excluded.payload_json,
+               updated_at = excluded.updated_at`
+          )
+            .bind(
+              tid,
+              t.platform || 'chaoxing',
+              t.courseId || '',
+              t.classId || '',
+              t.courseName || '',
+              t.title || '',
+              t.status || (t.isPending ? 'pending' : 'submitted'),
+              t.computeTier || 'tier1-cloud-run',
+              t.deadline || '',
+              JSON.stringify(t),
+              now,
+              now
             )
-              .bind(item.status, item.resultSummary || '', nowUtc8(), item.taskId)
-              .run();
-          }
-
-          if (item.status === 'draft_saved' || item.status === 'submitted') {
-            const actionLabel = item.status === 'submitted' ? '已正式提交' : '已安全暂存草稿';
-            const msg = `课程：《${item.courseName}》\n作业：《${item.title}》\n状态：${actionLabel}\n详情：${item.resultSummary || '双轨模型作答完成'}`;
-            await logExecution(env, 'homework_solved', item.platform || 'chaoxing', `${actionLabel}：《${item.courseName}》- ${item.title}`);
-            await sendNotification(`afk-cloud 作业${actionLabel}`, msg, env);
-          }
+            .run();
           updatedCount++;
         }
-
         return corsJson({ synced: updatedCount, time: nowUtc8() });
-      }
-
-      // 核心回调接口：接收常驻服务器 shim 发来的 draft_saved / submitted / failed 结果
-      if (url.pathname === '/api/agent/callback' && request.method === 'POST') {
-        const body: any = await request.json();
-        if (env.SOLVER_AGENT) {
-          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
-          const result: any = await (solverStub as any).handleCallback(body);
-          return corsJson(result);
-        }
-        return corsJson({ handled: false, reason: 'SOLVER_AGENT not configured' });
       }
 
       // D7 审批门接口：人工确认草稿无误后下发正式提交
@@ -651,7 +858,6 @@ export default {
           .bind(body.status, body.resultSummary || '', nowUtc8(), body.taskId)
           .run();
 
-        // 若状态推进为 submitted 且绑定了 SOLVER_AGENT，联动下发提交
         if (body.status === 'submitted' && env.SOLVER_AGENT) {
           try {
             const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
@@ -685,7 +891,7 @@ export default {
         return corsJson({ session, time: nowUtc8() });
       }
 
-      // 上传/持久化浏览器 Profile 登录态 (storageState: Cookies + LocalStorage) 到 D1
+      // 上传/持久化浏览器 Profile 登录态到 D1
       if (url.pathname === '/api/session' && request.method === 'POST') {
         const body: any = await request.json();
         const platform = body.platform || 'web-profile:pta';
@@ -696,9 +902,8 @@ export default {
       }
     }
 
-    return new Response(renderDashboardHtml(), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    });
+    // 默认兜底：未匹配路由返回 404
+    return corsJson({ error: 'Endpoint Not Found' }, 404);
   },
 };
 
@@ -739,7 +944,6 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
     }
   }
 
-  // 持久化全量在读课程至 D1
   if (courses.length > 0) {
     await saveEnrolledCourses(env, courses);
   }
@@ -748,7 +952,6 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
   const homeworkCoursesDetected: string[] = [];
   const locations = resolveSignLocations(env);
 
-  // 重点优化：优先并发分批扫描当前在读课程（列表前 20 门，每批 5 门），将全链路耗时压缩至 4~6 秒，杜绝超时与子请求超限
   const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
   const batchSize = 5;
   for (let i = 0; i < targetCourses.length; i += batchSize) {
@@ -791,6 +994,7 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
       });
 
       if (isNew) {
+        const taskId = `chaoxing-course-hw-${pc.courseId}-${pc.classId}`;
         await logExecution(
           env,
           'homework_detected',
@@ -803,11 +1007,17 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
           `课程：《${pc.courseName}》\n检测到未交作业红点，已登记至 Cloudflare 看板队列。`,
           env
         );
+
+        // 探测到新待办作业，Cloudflare 立即主动派发给 agy 自主完成
+        if (env.AFK_SHIM_URL || env.SHIM_URL || env.SOLVER_AGENT) {
+          await dispatchSingleTask(env, taskId).catch((e) =>
+            console.warn(`[自动派发异常] ${e?.message || e}`)
+          );
+        }
       }
     }
   }
 
-  // 抓取超星通知箱消息并持久化到 D1 (涵盖班级通知、随堂测验与新作业)
   let noticesCount = 0;
   try {
     const noticeList = await fetchNoticeList(session, 20);
@@ -830,7 +1040,7 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
 }
 
 /**
- * 派发单个作业任务给 agy (支持强制重派，同步推进 D1 状态与直连 shim)
+ * 安全派发单个作业任务给 agy (强制 URL 白名单校验与 HMAC 签名)
  */
 async function dispatchSingleTask(
   env: ExtendedNotifyEnv,
@@ -864,13 +1074,24 @@ async function dispatchSingleTask(
     taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${task.course_id}&classId=${task.class_id}&cpi=&workId=${rawWorkId}`;
   }
 
+  // 安全防线 1：URL 域名白名单与 HTTPS 校验
+  if (!isAllowedTaskUrl(taskUrl, env.AFK_TASK_HOST_ALLOWLIST)) {
+    console.warn(`[dispatchSingleTask Security] taskUrl 非法或不在白名单内，拒绝派发给 agy: ${taskUrl}`);
+    return { taskId, success: false, status: 'rejected', reason: '任务 URL 非法或不在安全白名单内' };
+  }
+
   // 1. 更新 D1 状态为 dispatched
   await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
     .bind('dispatched', now, taskId)
     .run();
 
-  // 2. 优先通过 SOLVER_AGENT 派发 (强制重新派发)
+  // 2. 调度派发 (优先通过 SOLVER_AGENT DO 状态机管理；未开启 DO 时直连常驻 shim)
+  const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+  const shimSecret = env.AFK_SHIM_SECRET;
+  const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
   let dispatchedToAgent = false;
+  let dispatchedToShim = false;
+
   if (env.SOLVER_AGENT) {
     try {
       const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
@@ -887,27 +1108,35 @@ async function dispatchSingleTask(
     } catch (e: any) {
       console.warn(`[dispatchSingleTask] SOLVER_AGENT enqueue 异常: ${e?.message || e}`);
     }
-  }
-
-  // 3. 同时尝试直连常驻服务器 shim (若配置了 AFK_SHIM_URL)
-  const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
-  const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
-  let dispatchedToShim = false;
-
-  if (shimUrl) {
+  } else if (shimUrl) {
+    // 3. 未绑定 SOLVER_AGENT 时，直连常驻服务器 shim (强制 HMAC 签名或 Bearer)
     try {
+      const endpoint = new URL('/task', shimUrl.replace(/\/+$/, '') + '/');
+      const body = JSON.stringify({
+        jobId: task.task_id,
+        taskUrl,
+        platform: task.platform || 'chaoxing',
+        deadline: task.deadline,
+        mode: 'draft',
+      });
+
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (shimToken) headers['Authorization'] = `Bearer ${shimToken}`;
-      const res = await fetch(`${shimUrl.replace(/\/+$/, '')}/task`, {
+      if (shimSecret) {
+        const sigHeaders = await signRequest({
+          secret: shimSecret,
+          method: 'POST',
+          pathWithQuery: endpoint.pathname + endpoint.search,
+          body,
+        });
+        Object.assign(headers, sigHeaders);
+      } else if (shimToken) {
+        headers['Authorization'] = `Bearer ${shimToken}`;
+      }
+
+      const res = await fetch(endpoint.toString(), {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          jobId: task.task_id,
-          taskUrl,
-          platform: task.platform || 'chaoxing',
-          deadline: task.deadline,
-          mode: 'draft',
-        }),
+        body,
       });
       dispatchedToShim = res.ok;
     } catch (e: any) {
@@ -924,7 +1153,7 @@ async function dispatchSingleTask(
 
   await sendNotification(
     'afk-cloud 任务主动派发 🚀',
-    `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已主动派发至云端 agy / shim 深度推理求解。`,
+    `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
     env
   );
 
@@ -933,7 +1162,7 @@ async function dispatchSingleTask(
     success: true,
     status: 'dispatched',
     reason: dispatchedToShim
-      ? '已成功下发至服务器 shim'
+      ? '已成功签名下发至服务器 shim'
       : dispatchedToAgent
       ? '已入队 Durable Object 调度'
       : '已更新状态为已派发，等待云端 agy 拉取',
