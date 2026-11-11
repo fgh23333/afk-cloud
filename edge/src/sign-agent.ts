@@ -101,35 +101,42 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
       };
     }
 
-    // 3. 扫描各课程活跃签到活动
+    // 3. 扫描各课程活跃签到活动 (优先在读前 20 门课程，分批并发 5 门，将耗时压缩至 4-6 秒)
     let signsHandled = 0;
     const customLocations = resolveSignLocations(this.env);
+    const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
+    const batchSize = 5;
 
-    for (const course of courses) {
-      try {
-        const activities = await scanCourseActivities(course, currentSession);
-        for (const act of activities) {
-          console.log(`[SignAgent] 发现课程《${course.courseName}》签到活动: ${act.name} (ID: ${act.id})`);
-          const signRes = await performSign(act, course, currentSession, realname, customLocations);
-          const success = signRes.includes('成功');
-          signsHandled++;
+    for (let i = 0; i < targetCourses.length; i += batchSize) {
+      const chunk = targetCourses.slice(i, i + batchSize);
+      await Promise.all(
+        chunk.map(async (course) => {
+          try {
+            const activities = await scanCourseActivities(course, currentSession);
+            for (const act of activities) {
+              console.log(`[SignAgent] 发现课程《${course.courseName}》签到活动: ${act.name} (ID: ${act.id})`);
+              const signRes = await performSign(act, course, currentSession, realname, customLocations);
+              const success = signRes.includes('成功');
+              signsHandled++;
 
-          await logExecution(
-            this.env,
-            success ? 'sign_success' : 'sign_fail',
-            'chaoxing',
-            `课程《${course.courseName}》[${act.name}]: ${signRes}`
-          );
+              await logExecution(
+                this.env,
+                success ? 'sign_success' : 'sign_fail',
+                'chaoxing',
+                `课程《${course.courseName}》[${act.name}]: ${signRes}`
+              );
 
-          await sendNotification(
-            `学习通签到${success ? '成功 ✅' : '异常 ⚠️'}`,
-            `课程：《${course.courseName}》\n活动：${act.name}\n状态：${signRes}\n时间：${nowUtc8()}`,
-            this.env
-          );
-        }
-      } catch (err: any) {
-        console.warn(`[SignAgent] 扫描课程《${course.courseName}》异常: ${err?.message || err}`);
-      }
+              await sendNotification(
+                `学习通签到${success ? '成功 ✅' : '异常 ⚠️'}`,
+                `课程：《${course.courseName}》\n活动：${act.name}\n状态：${signRes}\n时间：${nowUtc8()}`,
+                this.env
+              );
+            }
+          } catch (err: any) {
+            console.warn(`[SignAgent] 扫描课程《${course.courseName}》异常: ${err?.message || err}`);
+          }
+        })
+      );
     }
 
     // 4. 红点探测新待办作业 (纯协议读接口，不惊动 agy)

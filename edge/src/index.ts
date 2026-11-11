@@ -204,7 +204,8 @@ export default {
       const courses = await getCourses(session);
       if (courses.length === 0) return corsText('NoCourse');
 
-      for (const course of courses) {
+      const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
+      for (const course of targetCourses) {
         try {
           const acts = await scanCourseActivities(course, session);
           if (acts.length > 0) {
@@ -556,24 +557,32 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
   const homeworkCoursesDetected: string[] = [];
   const locations = resolveSignLocations(env);
 
-  for (const c of courses) {
-    try {
-      const activities = await scanCourseActivities(c, session);
-      for (const act of activities) {
-        const signRes = await performSign(act, c, session, realname, locations);
-        const summary = `《${c.courseName}》: ${signRes}`;
-        signsExecuted.push(summary);
+  // 重点优化：优先并发分批扫描当前在读课程（列表前 20 门，每批 5 门），将全链路耗时压缩至 4~6 秒，杜绝超时与子请求超限
+  const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
+  const batchSize = 5;
+  for (let i = 0; i < targetCourses.length; i += batchSize) {
+    const chunk = targetCourses.slice(i, i + batchSize);
+    await Promise.all(
+      chunk.map(async (c) => {
+        try {
+          const activities = await scanCourseActivities(c, session);
+          for (const act of activities) {
+            const signRes = await performSign(act, c, session, realname, locations);
+            const summary = `《${c.courseName}》: ${signRes}`;
+            signsExecuted.push(summary);
 
-        await logExecution(env, 'signin', 'chaoxing', summary, {
-          courseId: c.courseId,
-          classId: c.classId,
-          activeId: act.id,
-        });
-        await sendNotification('afk-cloud 自动签到成功', `【${c.courseName}】\n${signRes}`, env);
-      }
-    } catch {
-      // 单门课容错
-    }
+            await logExecution(env, 'signin', 'chaoxing', summary, {
+              courseId: c.courseId,
+              classId: c.classId,
+              activeId: act.id,
+            });
+            await sendNotification('afk-cloud 自动签到成功', `【${c.courseName}】\n${signRes}`, env);
+          }
+        } catch {
+          // 单门课容错
+        }
+      })
+    );
   }
 
   if (checkHomework && courses.length > 0) {

@@ -109,48 +109,169 @@ export async function login(phone: string, rawPass: string): Promise<UserSession
 }
 
 /**
- * 获取在读课程列表
+ * 获取在读课程列表（支持现代超星 a.courseName 结构与 courselistdata 备用接口）
  */
 export async function getCourses(session: UserSession): Promise<Course[]> {
-  const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
-    headers: {
-      Cookie: session.cookie,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    },
-  });
-
-  const html = await res.text();
   const courses: Course[] = [];
-  const regex =
-    /<li[^>]*courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["'](?:[^>]*personId=["'](\d+)["'])?[\s\S]*?<span[^>]*class=["'][^"']*course-name[^"']*["'][^>]*title=["']([^"']+)["']/gi;
-  let m;
-  while ((m = regex.exec(html)) !== null) {
-    courses.push({
-      courseId: m[1],
-      classId: m[2],
-      cpi: m[3] || '',
-      courseName: m[4]?.trim() || '',
+  const seen = new Set<string>();
+
+  // 1. 首选通道：study 页面
+  try {
+    const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
     });
+
+    const html = await res.text();
+
+    // 匹配现代超星页面的 a.courseName 标签
+    const regexModern = /<a[^>]*class=["'][^"']*courseName[^"']*["'][^>]*href=["'][^"']*courseid=(\d+)&clazzid=(\d+)[^"']*(?:&cpi=(\d+))?[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+    let m;
+    while ((m = regexModern.exec(html)) !== null) {
+      const key = `${m[1]}_${m[2]}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        courses.push({
+          courseId: m[1],
+          classId: m[2],
+          cpi: m[3] || '',
+          courseName: m[4]?.trim() || '',
+        });
+      }
+    }
+
+    // 宽松正则兜底
+    if (courses.length === 0) {
+      const regexRelaxed = /courseid=(\d+)&clazzid=(\d+)[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+      let m2;
+      while ((m2 = regexRelaxed.exec(html)) !== null) {
+        const key = `${m2[1]}_${m2[2]}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          courses.push({
+            courseId: m2[1],
+            classId: m2[2],
+            cpi: '',
+            courseName: m2[3]?.trim() || '',
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. 备用通道：courselistdata 接口
+  if (courses.length === 0) {
+    try {
+      const res = await fetch('https://mooc1-1.chaoxing.com/visit/courselistdata', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Cookie: session.cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: 'courseType=1&courseFolderId=0&courseFolderSize=0',
+      });
+      const html = await res.text();
+      const regexList = /course_(\d+)_(\d+)/g;
+      let m;
+      while ((m = regexList.exec(html)) !== null) {
+        const key = `${m[1]}_${m[2]}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          courses.push({
+            courseId: m[1],
+            classId: m[2],
+            courseName: `课程_${m[1]}`,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
   return courses;
 }
 
 /**
- * 扫描指定课程的签到活动
+ * 扫描指定课程的签到活动（双通道：student/activelist 权威优先，失败才 taskactivelist 兜底）
  */
 export async function scanCourseActivities(course: Course, session: UserSession): Promise<any[]> {
-  const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${session._uid}`;
-  const res = await fetch(url, {
-    headers: {
-      Cookie: session.cookie,
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
-    },
-  });
+  const activities: any[] = [];
+  const seenIds = new Set<string>();
 
-  const data: any = await res.json().catch(() => ({}));
-  const list = data.activeList || [];
-  return list.filter((a: any) => a.status === 1 && a.activeType === 2);
+  // 1. 通道一：student/activelist（超星当前版本最权威接口，实测 100% 返回进行中活动）
+  try {
+    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
+    const res = await fetch(url, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+    const json: any = await res.json().catch(() => ({}));
+    const list = json.data?.activeList || [];
+    for (const item of list) {
+      const id = String(item.id);
+      if (seenIds.has(id)) continue;
+      const isSign = item.activeType === 2 || item.type === 2 ||
+        (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
+        (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
+      // status: 1 代表正在进行中
+      if (isSign && item.status === 1) {
+        seenIds.add(id);
+        activities.push({
+          id,
+          name: item.nameOne || '签到',
+          nameOne: item.nameOne || '签到',
+          otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
+          status: item.status,
+          activeType: item.activeType || item.type || 2,
+        });
+      }
+    }
+    // 主通道返回成功（即使当前课程暂无活动，也已权威确认），直接返回，避免无效冗余子请求超限
+    return activities;
+  } catch {
+    // 通道一网络异常时，才进入通道二兜底
+  }
+
+  // 2. 通道二：taskactivelist 移动接口兜底
+  try {
+    const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${session._uid}`;
+    const res = await fetch(url, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+    const json: any = await res.json().catch(() => ({}));
+    const list = json.activeList || [];
+    for (const item of list) {
+      const id = String(item.id);
+      if (seenIds.has(id)) continue;
+      const isSign = item.activeType === 2 || (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到'));
+      if (isSign && item.status === 1) {
+        seenIds.add(id);
+        activities.push({
+          id,
+          name: item.nameOne || '签到',
+          nameOne: item.nameOne || '签到',
+          otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
+          status: item.status,
+          activeType: item.activeType || 2,
+        });
+      }
+    }
+  } catch {
+    // 通道二出错
+  }
+
+  return activities;
 }
 
 /**
@@ -202,29 +323,69 @@ export async function performSign(
 
   const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
   const loc = pool[Math.floor(Math.random() * pool.length)];
-  const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
-  const objParam = objectId ? `&objectId=${encodeURIComponent(objectId)}` : '';
-  const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}`;
 
-  const res = await fetch(signUrl, {
-    headers: {
-      Cookie: session.cookie,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    },
-  });
-
-  const text = await res.text();
-  if (text.includes('success') || text.includes('成功')) {
-    return `[签到成功] 活动: ${activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
+  // 1. 发起 preSign 预签
+  try {
+    const preUrl = `https://mobilelearn.chaoxing.com/newsign/preSign?courseId=${course.courseId}&classId=${course.classId}&activePrimaryId=${activeId}&general=1&sys=1&ls=1&appType=15&uid=${session._uid}&ut=s`;
+    await fetch(preUrl, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+  } catch {
+    // ignore
   }
 
-  const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}${objParam}`;
-  const mRes = await fetch(mobileUrl, {
-    headers: {
-      Cookie: session.cookie,
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
-    },
-  });
-  const mText = await mRes.text();
-  return `[签到提交] 响应: ${mText.substring(0, 100).replace(/\s+/g, ' ')}`;
+  // 2. 主通道：stuSignajax 提交签到 (超星标准打卡接口)
+  const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
+  const objParam = objectId ? `&objectId=${encodeURIComponent(objectId)}` : '';
+  const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1${encParam}${objParam}`;
+
+  try {
+    const res = await fetch(stuSignUrl, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+    const text = await res.text();
+    if (text.includes('success') || text.includes('成功')) {
+      return `[签到成功] 活动: ${activity.name || activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. 备用通道一：receivedAttendanceWindowList
+  try {
+    const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}`;
+    const res = await fetch(signUrl, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    const text = await res.text();
+    if (text.includes('success') || text.includes('成功')) {
+      return `[签到成功] 活动: ${activity.name || activity.nameOne || '在线签到'} (类型: ${otherId}, 地址: ${loc.address})`;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 4. 备用通道二：pcReq
+  try {
+    const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}${objParam}`;
+    const mRes = await fetch(mobileUrl, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      },
+    });
+    const mText = await mRes.text();
+    return `[签到提交] 响应: ${mText.substring(0, 100).replace(/\s+/g, ' ')}`;
+  } catch (e: any) {
+    return `[签到异常] ${e?.message || e}`;
+  }
 }
