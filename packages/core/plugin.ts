@@ -64,6 +64,11 @@ export interface PlatformPlugin {
   solveTask?(task: HomeworkSummary, autoSubmit?: boolean, options?: SolveOptions): Promise<SolveResult>;
 
   /**
+   * 主动查询/同步作业在平台上的真实作答状态（待做 pending、草稿暂存 draft_saved、已正式提交 submitted）
+   */
+  queryTaskStatus?(task: HomeworkSummary): Promise<'pending' | 'draft_saved' | 'submitted' | 'unknown'>;
+
+  /**
    * 执行每日自动巡检或签到
    */
   inspectAndSign?(): Promise<{ executed: string[] }>;

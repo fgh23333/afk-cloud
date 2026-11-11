@@ -134,6 +134,24 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
     return allPending;
   }
 
+  public async queryTaskStatus(task: HomeworkSummary): Promise<'pending' | 'draft_saved' | 'submitted' | 'unknown'> {
+    try {
+      const cookies = await this.ensureAuth();
+      const course = { courseId: task.courseId, classId: task.classId, courseName: task.courseName || '' };
+      const list = await getCourseHomeworkList(course, cookies);
+      const found = list.find((w) => w.workId === task.workId || w.title === task.title);
+      if (!found) return 'unknown';
+
+      const st = found.statusText || '';
+      if (st.includes('暂存')) return 'draft_saved';
+      if (st.includes('已交') || st.includes('待批') || st.includes('已批')) return 'submitted';
+      if (st.includes('待做') || st.includes('未交') || st.includes('重新编辑')) return 'pending';
+      return found.isPending ? 'pending' : 'submitted';
+    } catch {
+      return 'unknown';
+    }
+  }
+
   public async downloadAllMaterials(): Promise<void> {
     const cookies = await this.ensureAuth();
     const courses = await getChaoxingCourses(cookies);
