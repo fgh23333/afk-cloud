@@ -181,16 +181,17 @@ export async function triggerCloudBurst(options: {
     return { command: cmd, output: (stdout || '') + (stderr || '') };
   }
 
-  // Tier 2: 高负载 gcloud 短时拉起新机器 + at 物理自毁保险丝
+  // Tier 2: 高负载 gcloud 短时拉起新机器 + at 物理自毁保险丝 (默认 60 分钟兜底，完工即删)
   const scriptPath = path.resolve(process.cwd(), 'infra', 'gcp', 'spawn-ephemeral-gce.sh');
-  const ttl = String(options.ttlMinutes || process.env.GCE_BURST_TTL_MINUTES || 15);
+  const ttl = String(options.ttlMinutes || process.env.GCE_BURST_TTL_MINUTES || 60);
   const machineType = options.machineType || process.env.GCE_BURST_MACHINE_TYPE || 'e2-micro';
   const cmd = `GCE_BURST_TTL_MINUTES=${ttl} GCE_BURST_MACHINE_TYPE=${machineType} GCP_ZONE=${zone} bash "${scriptPath}" "${options.taskCommand}"`;
 
   if (options.dryRun) {
-    return { command: cmd, output: `[DryRun] 临时 GCE 实例 (${machineType}, TTL=${ttl}min 自毁) 拉起指令已生成` };
+    return { command: cmd, output: `[DryRun] 临时 GCE 实例 (${machineType}, 兜底TTL=${ttl}min, 完工即销毁) 拉起指令已生成` };
   }
 
+  const timeoutMs = (parseInt(ttl, 10) * 60 + 180) * 1000;
   const { stdout, stderr } = await execFileAsync('bash', [scriptPath, options.taskCommand], {
     env: {
       ...process.env,
@@ -198,7 +199,7 @@ export async function triggerCloudBurst(options: {
       GCE_BURST_MACHINE_TYPE: machineType,
       GCP_ZONE: zone,
     },
-    timeout: 900000,
+    timeout: timeoutMs,
   });
 
   return { command: cmd, output: (stdout || '') + (stderr || '') };

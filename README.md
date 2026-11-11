@@ -1,4 +1,4 @@
-# `afk-cloud` — 高校全能个人云端自治 Agent（Personal Autonomous Cloud Agent）
+# `afk-cloud` — 个人云端自治 Agent（Personal Autonomous Agent）
 
 <p align="center">
   <img src="./dashboard-real-preview.png" alt="afk-cloud Dashboard" width="780" style="border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.3);" />
@@ -6,273 +6,211 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/Edge%20Entry-Custom%20Domain%20%2F%20workers.dev-emerald.svg" alt="Edge Entry">
+  <img src="https://img.shields.io/badge/Agent-Antigravity%20(agy)%20on%20GCP-blue.svg" alt="Agent">
+  <img src="https://img.shields.io/badge/Architecture-Core%20%2B%20Decoupled%20Plugins-indigo.svg" alt="Plugins">
   <img src="https://img.shields.io/badge/Monthly%20Cost-%240.00%20(Always%20Free)-success.svg" alt="Cost: $0.00">
-  <img src="https://img.shields.io/badge/Compute-Cloudflare%20Edge%20%2B%20GCP%20e2--micro-orange.svg" alt="Compute">
-  <img src="https://img.shields.io/badge/Model-Gemini%20Pro%20%2B%20Flash-purple.svg" alt="Models">
+  <img src="https://img.shields.io/badge/Model%20Efficiency-Gemini%20Pro%20Maximized-purple.svg" alt="Gemini Pro Maximized">
+  <img src="https://img.shields.io/badge/Edge%20Portal-Cloudflare%20Workers-orange.svg" alt="Edge">
 </p>
 
-> **核心使命**：为高校学生打造的高内聚、零闲置、以协议原生 + 真实浏览器驱动的个人云端自治 Agent。深度覆盖 **超星学习通、智慧树、PTA（拼题 A）** 等平台。
-> **双轨理念**：全面榨干 Google Gemini Pro 深度推理与 1M 超大长上下文能力；严格遵循 **草稿安全优先 (`pyFlag=1`)** 与 **“边缘牛群 + 常驻宠物”** 架构，日常无需开启本地电脑，全系统 **100% 永久免费 ($0.00/月)** 运行。
+> **核心定位**：专为个人打造的高内聚、自进化、以协议原生 + 真实浏览器驱动的 **个人云端自治智能体（Personal Autonomous Agent）** 。
+> 
+> **三大核心设计思想**：
+> 1. **Personal Agent 核心与平台解耦**：核心宿主仅在 Google Cloud 上运行统一的 **Antigravity CLI Agent (`agy`)** ，超星学习通、智慧树（知到）、PTA（拼题 A）等高校教学评测平台**全部解耦为可插拔插件（Plugins / Skills）**，按需选装、独立迭代。
+> 2. **Google AI Pro 账号效益最大化**：构建“零 Token 缓存 $\rightarrow$ Gemini 3.8 Flash 批量客观题（防烧 Quota） $\rightarrow$ Gemini Pro 榨干 1M Context 与顶级视觉推理与自愈”的三级智能漏斗，最大化发挥 Pro 认知红利。
+> 3. **长时占用深度倾斜免费算力（100% 永久免费 $0.00/月）**：杜绝付费算力空耗！长时挂机与看门狗由 **GCP Always Free `e2-micro`（宠物窝）** 24/7 常驻承载；中长时重型任务由 **Cloud Run Jobs 免费层（每月 100 小时 vCPU）** 弹性调度；极端临时机自毁时限放宽至 60 分钟且完工即删。
 
-- **线上访问入口**：部署后即可通过 Cloudflare 分配的 `https://<您的 Worker 子域名>.workers.dev`（或您在 Cloudflare 绑定的个人自定义域名）进入深色磨砂玻璃全景 Web 控制面板。
+- **个人 Web 控制台**：通过 Cloudflare 边缘分配的域名或用户绑定的个人自定义域名（如 `https://afk.<your-domain>.com`）随时随地查看全局状态与一键审批。
 
 ---
 
 ## 目录
-- [零、 费用精细核算（为什么 100% 永久免费 $0.00/月）](#零-费用精细核算为什么-100-永久免费-000月)
-- [一、 核心架构：边缘牛群 (Cattle) 与常驻宠物 (Pet)](#一-核心架构边缘牛群-cattle-与常驻宠物-pet)
-- [二、 核心功能一览](#二-核心功能一览)
-- [三、 极简实操：从 0 到 1 部署指南（仅需 CF 与 GCP 免费账号）](#三-极简实操从-0-到-1-部署指南仅需-cf-与-gcp-免费账号)
-  - [方案 A：纯边缘 0 服务器极简版（推荐，只需 Cloudflare，5 分钟完成）](#方案-a纯边缘-0-服务器极简版推荐只需-cloudflare5-分钟完成)
-  - [方案 B：全功能云端闭环版（Cloudflare 边缘 + GCP 免费常驻机，支持 AI 解题与真机刷课）](#方案-b全功能云端闭环版cloudflare-边缘--gcp-免费常驻机支持-ai-解题与真机刷课)
-- [四、 日常 CLI 指令速查表](#四-日常-cli-指令速查表)
-- [五、 安全与学术合规铁律](#五-安全与学术合规铁律)
-- [六、 开源许可证](#六-开源许可证)
+- [一、 核心哲学：Google AI Pro 账号效益最大化](#一-核心哲学google-ai-pro-账号效益最大化)
+- [二、 架构设计：Personal Agent 宿主 + 选装平台插件体系](#二-架构设计personal-agent-宿主--选装平台插件体系)
+- [三、 算力梯队：长时占用与免费算力优先（为什么 100% 免费 $0.00/月）](#三-算力梯队长时占用与免费算力优先为什么-100-免费-000月)
+- [四、 选装插件生态一览（Plugins / Skills）](#四-选装插件生态一览plugins--skills)
+- [五、 极简实操：从 0 到 1 部署指南](#五-极简实操从-0-到-1-部署指南)
+- [六、 日常 CLI 指令速查表](#六-日常-cli-指令速查表)
+- [七、 安全与学术合规铁律](#七-安全与学术合规铁律)
+- [八、 开源许可证](#八-开源许可证)
 
 ---
 
-## 零、 费用精细核算（为什么 100% 永久免费 $0.00/月）
+## 一、 核心哲学：Google AI Pro 账号效益最大化
 
-系统在架构设计之初就严格贯彻 **“免费配额金字塔”** ，杜绝任何隐性扣费：
+高校学生与开发者拥有的 **Google AI (Gemini) Pro 账号/API 配额** 极具价值。如果拿昂贵的 Pro 逐题串行求解“1+1=2”或简单单选，不仅极其低效，更会在极短时间内将高价值的每分钟 RPM/TPM 配额烧干，甚至导致复杂大题无配额可用。
 
-| 服务组件 | 官方永久免费配额 (Always Free) | 本项目实际月度预估消耗 | 额度占用率 | 费用 |
-| :--- | :--- | :--- | :---: | :---: |
-| **Cloudflare Workers** | **100,000 次请求 / 天** | 约 288 次/天（每 5 分钟定时巡检一次） | **< 0.3%** | **$0.00** |
-| **Cloudflare D1 (SQLite)** | **5,000,000 次读/天 + 100,000 次写/天**<br>存储上限 5 GB | 读 < 3,000 次/天，写 < 100 次/天<br>真实数据占用 < 5 MB | **< 0.1%** | **$0.00** |
-| **Cloudflare Durable Objects** | **1,000,000 次请求 / 月** (免费层支持 SQLite) | 巡检 + 审批唤醒约 10,000 次/月 | **~1.0%** | **$0.00** |
-| **Cloudflare Workers KV** | 100,000 次读/天 + 1,000 次写/天 | 仅作为容灾 Cookie 缓存，< 50 次/天 | **< 5.0%** | **$0.00** |
-| **Cloudflare R2 对象存储** | **10 GB 永久免费存储 + 1,000 万次读/月**<br>零出网流量费 ($0 Egress) | 浏览器快照与大文件备份 < 500 MB | **< 5.0%** | **$0.00** |
-| **GCP `e2-micro` 常驻机** | **1 台非抢占式实例 / 月**（需选美区特定可用区）<br>30 GB 永久标准磁盘 + 1 GB 出网流量 | 1 台常驻运行 `afk-shim` 与 `agy` | **100% 免费** | **$0.00** |
-| **GCP Cloud Run Jobs** | **360,000 vCPU-秒 + 180,000 GiB-秒 / 月**<br>200 万次请求 / 月 | 偶发高并发作业，每月约 1,200 vCPU-秒 | **< 0.4%** | **$0.00** |
-| **Tier 2 临时 GCE 实例** | 按需 Spot 抢占计费（**月度硬顶 $10 美元**） | 强制 **15 分钟物理自毁**，即用即销毁 | 极度安全 | **<$1.00** |
-| **LLM 求解 (Antigravity CLI / Gemini)** | 复用已有的 Google Antigravity / Gemini Pro 配额 | 经 `agy` 读题解答，零额外 API 计费 | — | **$0.00** |
-
-> [!IMPORTANT]
-> **算力成本硬顶与存储解耦准则**：
-> 1. **GCP 预算硬顶**：每月最高预算限额 **$10 美元**（Always Free 常驻机 $0.00，偶发 Spot 任务单次消耗仅数美分）。
-> 2. **GCE 即用即销毁，禁止长时间占用**：除常驻机外，所有临时机器必须在 15 分钟内自毁，任务结束立即触发销毁，严禁闲置与遗漏。
-> 3. **计算与存储彻底解耦**：计算节点纯无状态，持久化快照与课件大文件统一同步至 **Cloudflare R2**（10GB 免费）或 **Google Drive**（支持 OAuth2 认证，不占云主机磁盘）。
-
-> [!TIP]
-> **GCP 避免扣费避坑指南**：
-> Google Cloud 的 `e2-micro` 免费实例必须选择以下三个美国区域之一（**默认推荐美西俄勒冈**）：
-> 1. **`us-west1` (美西俄勒冈 Oregon，默认推荐)**
-> 2. **`us-central1` (爱荷华 Iowa)**
-> 3. **`us-east1` (南卡罗来纳 South Carolina)**
-> 并在创建磁盘时选择 **“标准永久磁盘 (Standard Persistent Disk)”** ，容量不超过 **30 GB** ，即可享受永久 0 元账单。
-
----
-
-## 一、 核心架构：边缘牛群 (Cattle) 与常驻宠物 (Pet)
+为此，系统严格贯彻 **三级智能漏斗（Tiered Intelligence Funnel）** ，实现 **“小题不费配额，大题榨干极限”** ：
 
 ```
-┌─ Cloudflare Edge（牛群：无黏性状态，高可用轻量托管）───────────────────────┐
-│                                                                        │
-│  边缘 Worker (https://<您的 Worker 域名或自定义域名>)                     │
-│    ├─ SignAgent (DO)    24/7 秒级心跳巡检、全类型签到、作业红点探测          │
-│    ├─ SolverAgent (DO)  任务排队、去重、记账、可选手机推送、审批门拦截     │
-│    ├─ Cloudflare D1     SQLite 持久化（课程、签到流水、题库缓存、Web Profiles）│
-│    └─ Web 看板          深色毛玻璃交互界面，真实数据展示与一键审批              │
-│                                                                        │
-└──────────┬─────────────────────────────────────────▲───────────────────┘
-           │ ① POST /task (派发题目链接与指令)         │ ④ 回调 /api/agent/callback
-           │    通过 Cloudflare Tunnel（零端口暴露）   │    （更新任务状态与草稿内容）
-           ▼                                         │
-┌─ GCP Always Free 宿主机（宠物窝：e2-micro，常驻但极低功耗）───────────────┐
-│                                                                        │
-│  afk-shim 守护进程 (Port: 8788, Bearer 鉴权, 单进程串行执行锁)            │
-│    ├─ 本地真实 Chromium (CDP localhost:9222，真机渲染防风控)             │
-│    ├─ Antigravity CLI (agy)                                            │
-│    │    ├─ Gemini Flash: 批量客观题高速 JSON 批处理                      │
-│    │    └─ Gemini Pro: 1M 课件上下文 RAG + 多模态图表解析 + 算法沙箱自愈  │
-│    └─ 草稿安全暂存: 页面填写答案并暂存 (pyFlag=1)，绝不擅自越权正式提交     │
-│                                                                        │
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Level 0: 零 Token 题库缓存层 (D1 SHA-256)             │
+│   • sha256(题干 + 规范化选项) 毫秒级查库                                 │
+│   • 历年真题/已答题目命中即返，0 Token 消耗，0 Quota 占用               │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ 未命中
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│              Level 1: Gemini 3.8 Flash 极速批处理 (Pro 配额护盾)          │
+│   • 针对单选、多选、判断题与例行扫描，严禁逐题串行调用！                  │
+│   • 整卷客观题打包为单次 JSON Batch Prompt，由 Flash 秒级并发返回       │
+│   • 极低消耗，响应极速，为核心大题构筑坚不可摧的配额防护盾               │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ 主观题 / 复杂大题 / 编程题
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│              Level 2: Gemini Pro 顶级认知爆发 (榨干 1M Context 效益)      │
+│   • 1M+ Token 课件原汁原味 RAG: 全学期 20~50 份 PPT/PDF 教材全文注入， │
+│     彻底摆脱传统向量粗暴切块的语义丢失与幻觉，精准索引老师讲义原话      │
+│   • 多模态空间/图表推理: 电路图、空间几何、函数曲线原图直送视觉通道     │
+│   • PTA 算法编程沙箱自愈: 本地 Linux 编译单测，WA/TLE/CE 闭环反思自愈   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **本地电脑是否可以关机？**
-  - **完全可以！** 日常 24/7 常驻全部托管在 Cloudflare Edge；重型读题与浏览器答题托管在 GCP `e2-micro` 云主机。本地电脑无需开机。
+---
+
+## 二、 架构设计：Personal Agent 宿主 + 选装平台插件体系
+
+系统采用彻底解耦的 **“微内核 + 插件（Microkernel + Plugins）”** 架构：
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│              Cloudflare Edge (轻量无服务器控制面 & Web 看板)                │
+│   • D1 数据库 (课程表/题库缓存/待办队列)                                    │
+│   • 24/7 事件心跳捕获、手机多通道通知 (可选)、作业一键审批门 (D7 准则)     │
+└─────────────────────────────────────▲─────────────────────────────────────┘
+                                      │ Cloudflare Tunnel (安全内网穿透)
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│     Google Cloud 常驻宿主机 (Personal Agent: Antigravity CLI 'agy')        │
+│                                                                           │
+│  [宿主内核与运行环境]                                                       │
+│    • afk-shim 守护进程 (串行排队锁 / Bearer 鉴权)                           │
+│    • 真实 Chromium 实例 (CDP localhost:9222，真机渲染防风控)               │
+│    • Linux 本地编译运行沙箱 (C/C++/Python/Node 单元测试与自愈)             │
+│                                                                           │
+│  [选装插件库 (Platform Plugins / Skills)]                                 │
+│    ├─ plugin-chaoxing  (超星学习通：DES登录/多类型签到/课件RAG/草稿暂存)    │
+│    ├─ plugin-zhihuishu (智慧树知到：官方Web学习端看门狗/防切屏/弹窗答题)  │
+│    ├─ plugin-pta       (拼题A：题目抓取/本地沙箱测试/Gemini Pro 自愈重构)  │
+│    └─ plugin-*         (未来可极速插拔扩展 Canvas、Blackboard 等平台)      │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+- **统一插件契约规范**：每个教学平台统一实现 [`packages/core/plugin.ts`](./packages/core/plugin.ts) 的 `PlatformPlugin` 契约，暴露 `detectTasks`、`solveTask`、`syncMaterials` 与 `submitDraft` 标准生命周期。
+- **按需选装**：这学期只学超星课程，就只加载 `plugin-chaoxing`；下学期有算法课，就随时开启 `plugin-pta`，核心 Agent 保持终身轻量、干净、稳定。
 
 ---
 
-## 二、 核心功能一览
+## 三、 算力梯队：长时占用与免费算力优先（为什么 100% 免费 $0.00/月）
 
-### 1. 超星学习通（全自动 24/7 守护）
-- **协议原生轻量拉取（Protocol-First）**：
-  - 课程扫描、作业题目与选项抽取、课件资料下载（PPT/PDF/Word）与 RAG 文本构建、以及签到打卡 **100% 走原生轻量 HTTP 接口**（内存开销 < 30MB），秒级完成，日常完全无需启动沉重浏览器，极度节省云主机资源；仅当执行防作弊视频观看时才按需调用 Chromium。
-- **秒级多类型签到**：
-  - **普通签到 / 签到码**：自动捕获并秒级响应。
-  - **拍照签到**：自动调用云盘 API 上传 1×1 极简透明底图，获取真实 `objectId` 后完成提交。
-  - **手势签到**：自动匹配多位手势轨迹。
-  - **位置 / 定位签到**：支持配置精准经纬度与学校地址进行虚拟打卡。
-  - **二维码签到**：支持解析 `enc` 参数完成自动化秒级确认。
-- **作业探测与红点巡检**：
-  - 自动调用 `workTestPendingNew` 接口，定期比对在读课程作业列表。
-- **AI 双轨解题与草稿先行**：
-  - **D1 题库 SHA-256 零 Token 缓存命中**：优先匹配历史题库。
-  - **Gemini Flash 客观题批量求解**：单选题、多选题、判断题打包批处理，极速高效。
-  - **Gemini Pro 深度推理**：主观大题、编程题、复杂图表题精准分析。
-  - **安全草稿暂存 (`pyFlag=1`)**：默认只存草稿，在 Web 看板一键人工复核提交（若选配推送通道亦会收到手机提醒）。
+针对日常长时挂机、视频观看进度保活与课件分析等**长时占用资源的场景，严禁租用昂贵算力空耗！**
 
-### 2. 智慧树 (知到) & PTA (拼题 A)
-- **“知到”（智慧树）官方 Web 端与自动化看门狗**：
-  - **完备的官方 Web 端支持**：许多人误以为“知到”仅有 App，实际上智慧树拥有官方 Web 学习端（`https://studyh5.zhihuishu.com/videoStudy.html`）。
-  - **拒绝伪造 HTTP 进度包**：智慧树对播放心跳与行为时间差严格对账，伪造包极易触发审计封禁。
-  - **挂载真实浏览器看门狗 (`ZHIHUISHU_INJECT_SCRIPT`)**：自动重写 `document.hidden` 与 `visibilityState` 阻止切屏失焦暂停；强制静音与 1.25x 安全合规倍速；自动识别并关闭视频中途弹窗测试题（`.popboxes_div`）；检测播放进度 $\ge 95\%$ 自动点击下一节。
-- **Web Profile 本地持久化与 D1 备份**：Cookie 与 LocalStorage 跨机器无缝免登录同步。
-- **PTA 算法题沙箱自愈**：本地沙箱编译与单测验证，若遭遇 WA/CE/TLE，由 Gemini Pro 自动反思修复并二次验证。
+系统采用分层算力调度，将 **免费配额榨取到极致**：
 
-### 3. 多通道即时通知（完全可选增强项）
-- **100% 可选 / 非必需**：系统所有签到、未交作业与解题流水都会实时记录在 Cloudflare D1 并在 Web 看板展示。即使不配置任何推送渠道，系统依然 24/7 完整运行。
-- **支持渠道**：仅当您希望在手机通知栏接收即时弹窗时才需配置：
-  - **Bark (iOS)**：苹果官方 APNs 秒级即时弹窗
-  - **Server酱 / PushPlus**：微信模板消息推送
-  - **群机器人**：飞书 / 钉钉 / 企业微信 Webhook
+| 算力等级 | 适用场景与任务类型 | 采用的基础设施与配额 | 月度开销 |
+| :--- | :--- | :--- | :---: |
+| **Tier 0<br>边缘常驻** | 24/7 心跳巡检、全类型签到秒级捕获、新作业红点探测、SHA-256 零 Token 查库、Web 看板呈现 | **Cloudflare Workers 免费层**（10万次/天）<br>**Cloudflare D1**（500万次读+10万次写/天） | **$0.00** |
+| **Tier 1<br>长时挂机首选** | **长时占用场景首选（宠物窝）**：智慧树长时视频看门狗、学习通章节进度保活、本地 Chromium 渲染、`agy` 核心调度 | **Google Cloud Always Free `e2-micro` 常驻机**<br>（1 台 24/7 永不关机，30GB 标准磁盘，0 元月租） | **$0.00** |
+| **Tier 1<br>中长时弹性算力** | **批量重型算力**：大批量课件材料下载与 RAG 向量化、突发并发题目推理（单次支持连续运行长达 60 分钟） | **Google Cloud Run Jobs 免费层**<br>（每月 **360,000 vCPU-秒** $\approx$ **100 小时 1 vCPU** 免费算力，跑完毫秒级关机，0 闲置费） | **$0.00** |
+| **Tier 2<br>极端应急算力** | 极端大并发、超大内存或独占硬件时的短时爆发应急 | **gcloud 临时 Spot GCE 实例**<br>• 完工通过 bash `trap cleanup EXIT` **立即提前销毁并释放**<br>• 默认放宽至 **60 分钟物理自毁兜底熔断**（防死锁悬挂）<br>• 每月预算硬顶 $10 美元红线 | **<$1.00** |
+| **数据持久层** | 课件大文件、浏览器登录 Profile 快照、执行快照外置备份 | **Cloudflare R2**（每月 10GB 免费存储，0 出网费）<br>**Google Drive**（OAuth2 认证免存储费） | **$0.00** |
 
 ---
 
-## 三、 极简实操：从 0 到 1 部署指南（仅需 CF 与 GCP 免费账号）
+## 四、 选装插件生态一览（Plugins / Skills）
 
-### 方案 A：纯边缘 0 服务器极简版（推荐，只需 Cloudflare，5 分钟完成）
+### 1. `plugin-chaoxing`（超星学习通全能插件）
+- **协议原生轻量（Protocol-First）**：作业扫描、题目抽取、课件资料下载（PPT/PDF/Word）与签到打卡 **100% 走原生轻量 HTTP**（内存占用 < 30MB），秒级完成，日常完全无需启动沉重浏览器。
+- **全类型秒级签到**：
+  - 普通签到 / 签到码：自动捕获并秒级响应。
+  - 拍照签到：自动上传 1×1 极简透明底图，获取真实 `objectId` 后完成提交。
+  - 手势签到：自动识别手势特征并生成轨迹提交。
+  - 位置 / 定位签到：支持配置精准经纬度与学校地址进行虚拟打卡。
+  - 二维码签到：支持解析 `enc` 签名完成秒级验证。
+- **安全草稿先行 (`pyFlag=1`)**：AI 解题结果默认只存为草稿，在 Web 看板一键人工复核提交（若选配推送通道亦会收到手机提醒）。
+- **智能免 403 作答直达**：在看板点击【🔗 打开作答界面】，自动经由官方通知卡片通道进入，带齐 Session 与签名，彻底杜绝 403 跨站防盗链阻断。
+
+### 2. `plugin-zhihuishu`（智慧树知到官方 Web 端插件）
+- **官方 Web 端真机操作**：基于智慧树官方 Web 学习端（`https://studyh5.zhihuishu.com/videoStudy.html`）。
+- **拒绝伪造 HTTP 进度包**：智慧树对播放心跳与行为时间差严格对账，伪造发包极易被封号。
+- **真实浏览器看门狗注入**：自动重写 `document.hidden` 与 `visibilityState` 阻止切屏失焦暂停；强制静音与 1.25x 安全合规倍速；自动识别并关闭视频中途弹窗测试题；检测播放进度 $\ge 95\%$ 自动点击下一节。
+
+### 3. `plugin-pta`（拼题 A 算法与编程题插件）
+- **题目抓取与代码沙箱化**：自动提取编程题输入输出样例与判题限制（内存/时间）。
+- **Gemini Pro 自愈闭环**：在本地 Linux 沙箱（`gcc`/`g++`/`python3`/`node`）编译运行单测；遭遇 WA/TLE/CE 时，由 Gemini Pro 自主反思并修复代码，迭代直到全绿。
+
+---
+
+## 五、 极简实操：从 0 到 1 部署指南
+
+### 方案 A：纯边缘 0 服务器极简版（只需 Cloudflare，5 分钟完成）
 
 > 适合只需要：**24/7 自动全类型签到、作业红点探测、以及随时随地查看全景 Web 监控看板**的同学。无需任何服务器！
 
-#### 1. 准备工作
-- 注册一个免费的 [Cloudflare 账号](https://dash.cloudflare.com/)。
-- 本地安装 Node.js (>= 18) 与 pnpm (`npm install -g pnpm`)。
-
-#### 2. 一键配置与部署
 ```bash
 # 1. 克隆代码库
 git clone https://github.com/fgh23333/afk-cloud.git
 cd afk-cloud
 pnpm install
 
-# 2. 登录 Cloudflare 账号（会自动拉起浏览器授权）
+# 2. 登录 Cloudflare（自动拉起浏览器授权）
 npx wrangler login
 
-# 3. 复制环境变量模板并填写凭据
+# 3. 复制环境变量模板并填写账号
 cp .env.example .env
-```
+# 编辑 .env 填入超星账号密码
 
-用任意编辑器打开 `.env`，填入学习通账号：
-```env
-# 学习通账号与凭据（必须配置）
-CHAOXING_PHONE=13800000000
-CHAOXING_PASSWORD=您的登录密码
-CHAOXING_REALNAME=您的姓名
-```
-
-> [!NOTE]
-> **关于手机推送通知（100% 可选 / 非必须）**：
-> 系统所有 24/7 签到流水与作业状态均实时落盘在 Cloudflare D1 并在 Web 看板展示，**无需任何推送 Key 即可完整运行**。
-> 仅当您希望在手机通知栏接收即时弹窗（如“签到成功”、“作业草稿已生成待审核”）时，才需在 `.env` 中选填任一通道（如 iOS 的 `BARK_KEY` 或微信的 `SERVERCHAN_KEY` / `PUSHPLUS_TOKEN`），不需要直接留空即可。
-
-#### 4. 执行一键自动化边缘编排
-```bash
+# 4. 执行一键自动化边缘编排
 pnpm afk setup-cf
 ```
 
-> **自动化脚本完成的全部工作**：
-> 1. 在 Cloudflare 上自动创建 D1 数据库 `afk-cloud-db`；
-> 2. 自动在 D1 中执行全套表结构迁移（课程表、签到流水、题库缓存、Web Profile）；
-> 3. 自动创建 KV 容灾命名空间；
-> 4. 将手机号密码等敏感信息通过 `wrangler secret` 加密写入 Worker；
-> 5. 自动渲染 `edge/wrangler.jsonc` 并发布 Worker。
-
-部署完成后终端将输出访问网址：
-`https://chaoxing-dashboard-worker.<您的CF子域>.workers.dev`
-
-打开该网址，即可看到实时更新的个人专属暗黑毛玻璃看板！
+部署完成后终端将输出访问网址：`https://afk.<您的CF自定义域或workers.dev>`，打开即可使用！
 
 ---
 
-### 方案 B：全功能云端闭环版（Cloudflare 边缘 + GCP 免费常驻机，支持 AI 解题与真机刷课）
+### 方案 B：Personal Agent 云端闭环版（Cloudflare 边缘 + Google Cloud 常驻机）
 
-> 在【方案 A】的基础上，通过一台 Google Cloud 永久免费的 `e2-micro` 云主机，让 Agent 具备真正的 Gemini 深度读题、草稿暂存与真实 Chromium 操作能力。
+> 推荐方案：让 Agent 具备真正的 **Gemini Pro 深度读题、草稿暂存与真实 Chromium 操作能力**。
 
-> [!TIP]
-> **交给 Agent 全自动配置（推荐）**：
-> 如果当前终端已登录 `gcloud`，你可以直接对 `agy` 说：`"帮我自动配置并初始化 GCP 免费云主机"`，`agy` 将自动调用 `.agents/skills/gcp-auto-provision` 完成建机与环境编排！
+#### 第一步：在 Google Cloud 创建永久免费 `e2-micro` 常驻机（宠物窝）
 
-#### 第一步：在 Google Cloud 创建永久免费 `e2-micro` 云主机
-
-**方式 1（一行命令全自动创建，首选推荐）**：
 ```bash
-# 自动校验可用区与免费磁盘规格，幂等拉起 Always Free 实例
+# 方式 1：通过 CLI 一行命令全自动幂等创建（首选推荐）
 pnpm afk setup-vm
-# 或直接执行: bash infra/gcp/provision-free-vm.sh
+# 或直接运行: bash infra/gcp/provision-free-vm.sh
 ```
 
-**方式 2（在 GCP 控制台手动创建）**：
-1. 登录 [Google Cloud Console](https://console.cloud.google.com/) $\rightarrow$ **Compute Engine $\rightarrow$ 虚拟机实例 $\rightarrow$ 创建实例**：
-   - **名称**：`afk-node`
-   - **区域 (Region)**：推荐选择 **`us-west1` (美西俄勒冈，默认)**，亦可选 `us-central1` (爱荷华) 或 `us-east1` (南卡罗来纳)。
-   - **机器类型**：选择 **`E2` 系列 $\rightarrow$ `e2-micro` (2 vCPU, 1 GB 内存)**。
-   - **引导磁盘**：操作系统选择 **Ubuntu 22.04 LTS**，磁盘类型选择 **标准永久磁盘 (Standard Persistent Disk)**，大小设为 **30 GB**。
-2. 点击 **创建**。
+*(亦可在 GCP 控制台手动创建：区域选择 `us-west1`，机型 `e2-micro`，标准持久磁盘 30 GB，享受永久 0 元月租)*。
 
-#### 第二步：云端机器一键环境编排（含 gcloud CLI、Node 20、Chromium 与守护进程）
+#### 第二步：云端宿主机一键环境编排
 
-在云端宿主机上也 **必须安装 `gcloud` CLI** ，以便常驻的 Agent 能自由调度 Cloud Run 与临时应急算力。
-
-连接云主机并执行一行全自动初始化脚本：
 ```bash
 # 通过 gcloud ssh 一键远程触发全自动初始化：
 gcloud compute ssh afk-node --zone=us-west1-a --command="curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash"
-
-# 或在 GCP 控制台打开网页 SSH 终端后直接粘贴运行：
-curl -fsSL https://raw.githubusercontent.com/fgh23333/afk-cloud/main/infra/gcp/bootstrap-gcp-node.sh | bash
 ```
 
-> **该脚本自动完成的全部准备工作**：
-> 1. 安装 Node.js 20 LTS 与 pnpm；
-> 2. **自动安装 Google Cloud SDK (`gcloud` CLI)** 与认证工具环；
-> 3. 安装真实无头 Chromium 浏览器与相关图形渲染底层依赖；
-> 4. 安装 Cloudflare Tunnel 客户端 (`cloudflared`)；
-> 5. 克隆/更新项目代码，执行依赖安装与冒烟自检测试；
-> 6. 注册并启动 systemd `afk-shim.service` 守护进程（开机自启）。
+> **该脚本自动完成全部准备工作**：安装 Node 20 LTS、pnpm、`gcloud` CLI 工具链、无头 Chromium、Cloudflare Tunnel 客户端，并配置 `afk-shim.service` 开机自启。
 
-#### 第三步：使用 Cloudflare Tunnel 打通边缘 Worker 与云主机
-
-无需公网 IP，无需防火墙开放任何端口，通过 Cloudflare Tunnel 将 GCP 宿主机与 Cloudflare Edge 安全连通：
+#### 第三步：建立 Cloudflare Tunnel 双向加密穿透
 
 ```bash
-# 在云主机上启动穿透隧道（零配置快速开箱即用）：
+# 在云主机上启动免开放端口的安全隧道：
 cloudflared tunnel --url http://127.0.0.1:8788
-```
-*(终端将打印类似 `https://xxxx.trycloudflare.com` 的安全域名)*
 
-在本地终端（或云主机）将 Tunnel 域名与通信密钥写入 Worker：
-```bash
-cd afk-cloud
-
-# 注入隧道地址
+# 在本地终端将隧道地址写入边缘 Worker：
 npx wrangler secret put AFK_SHIM_URL
-# 输入您的 Tunnel 地址，例如: https://xxxx.trycloudflare.com
-
-# 注入通信密钥
-npx wrangler secret put AFK_SHIM_TOKEN
-# 输入云端 .env 中的 SHIM_TOKEN
+# 输入您的隧道地址，例如: https://xxxx.trycloudflare.com
 ```
 
-> [!NOTE]
-> **关于云端机器的 Cloudflare OAuth2 登录机制**：
-> 若您在云端 Linux 主机上需要运行 `npx wrangler login`，因为服务器没有桌面浏览器，Wrangler 会自动在终端输出一条 OAuth2 授权链接（如 `https://dash.cloudflare.com/oauth2/auth?...`）。您只需在本地电脑浏览器打开该链接点击“授权”，即可无缝将登录凭证下发至云端机器！同理，若使用命名隧道 `cloudflared tunnel login`，也是通过终端给出的 OAuth2 链接在本地浏览器一键完成证书下载。
-
-> [!TIP]
-> **模型防烧 Quota 提示（强烈推荐切到 Gemini 3.8 Flash）**：
-> 在 `.env` 中设置 `AFK_FLASH_MODEL=gemini-3.8-flash`（默认）。90% 的客观题批量求解、例行扫描均由 **Gemini 3.8 Flash** 处理，响应极速且配额消耗极低，避免短时间内过快烧干高价值的 Gemini Pro 额度。仅难题与代码沙箱才按需升级至 Gemini Pro。
-
-**大功告成！** 全套闭环系统已就绪：
-- 边缘 Worker 发现新作业后，自动通过加密隧道派发给 GCP 宿主机；
-- GCP 上的 Agent 调用真实 Chromium 打开题目，利用 Gemini 3.8 Flash / Pro 分析解题，并在网页上暂存为草稿 (`pyFlag=1`)；
-- 作业草稿安全暂存完毕，用户在 Web 看板一键核验并确认提交（若配置了手机通知亦会同步收到即时弹窗）。
+**全套闭环就绪！**
+- 边缘 Worker 发现新作业后，通过加密隧道派发给 GCP 宿主机上的 `agy`；
+- `agy` 按三级智能漏斗优先查库 $\rightarrow$ Flash 批量解客观题 $\rightarrow$ Pro 深度推理大题，并在平台上安全暂存为草稿 (`pyFlag=1`)；
+- 用户在 Web 看板一键核验并点击提交。
 
 ---
 
-## 四、 日常 CLI 指令速查表
+## 六、 日常 CLI 指令速查表
 
 在本地开发机或 GCP 终端中，可通过 `pnpm afk <command>` 便捷操控整个 Agent 系统：
 
@@ -283,15 +221,17 @@ npx wrangler secret put AFK_SHIM_TOKEN
 | `pnpm afk setup-vm` | **GCP 主机拉起**：自动在美区一键拉起 Always Free 永久免费 `e2-micro` 云主机 |
 | `pnpm afk setup-all` | **双端编排**：一键完成 Cloudflare Edge 与 GCP Cloud Run / IAM 安全配置 |
 | `pnpm afk scan` | **课程与作业扫描**：列出全部在读课程、未交作业详情、截止时间与课件统计 |
-| `pnpm afk materials` | **课件材料下载**：下载课程全部 PPT/PDF/Word 文件并提取文本索引，供 Gemini Pro 检索 |
+| `pnpm afk materials` | **课件材料下载**：下载课程全部 PPT/PDF/Word 文件，供 Gemini Pro 构建 1M 上下文 RAG |
 | `pnpm afk solve` | **双轨作业求解（草稿先行）**：优先题库缓存 $\rightarrow$ Flash 批量客观题 $\rightarrow$ Pro 主观题，暂存草稿并出具报告 |
 | `pnpm afk solve --auto-submit` | **作业求解（正式提交）**：作答完毕后直接正式提交 (`pyFlag=3`) |
+| `pnpm afk burst --mode cloud-run` | **调用 Cloud Run 免费算力**：单次任务消耗每月 100 小时免费容器配额 |
+| `pnpm afk burst --mode gce --ttl 60` | **拉起临时 GCE 算力**：默认 60 分钟兜底熔断，任务执行完立即自毁释放 |
 | `pnpm afk digest` | **即时简报**：手动触发 Cloudflare Edge 推送全平台任务与签到完成状态摘要 |
 | `pnpm shim` | **启动宿主机 Shim 守护**：提供带 Bearer 鉴权与单进程排队锁的 HTTP 控制平面 |
 
 ---
 
-## 五、 安全与学术合规铁律
+## 七、 安全与学术合规铁律
 
 1. **绝对零凭据入库**：代码库与 Git 提交历史中严禁出现真实手机号、明文密码、个人姓名或学号。所有敏感信息严格经由 `.env` 或 `wrangler secret` 加密注入。
 2. **安全草稿优先 (`pyFlag=1`)**：默认模式下，AI 解题结果一律作为草稿暂存，杜绝越权错交与答题失误风险；正式提交必须通过看板由人工审批确认。
@@ -301,6 +241,6 @@ npx wrangler secret put AFK_SHIM_TOKEN
 
 ---
 
-## 六、 开源许可证
+## 八、 开源许可证
 
 本项目基于 [MIT License](./LICENSE) 开源。仅供学习与自动化运维技术研究使用，请自觉遵守所在高校的学风与考试纪律。

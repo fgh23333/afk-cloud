@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
 # Tier 2: 高负载 gcloud 临时 GCE 极速拉起与物理 TTL 自毁脚本 (严格防悬挂计费)
-# 成本控制原则：
-#   1. 每月最高预算限额 $10 美元，计算实例即用即销毁，禁止长时间占用！
-#   2. 启动前自动对账并回收任何历史遗留的 runner-temp-* 悬挂机型
-#   3. 强制使用 Spot 抢占式实例 + 最大 15 分钟运行时限
-#   4. 启动即刻注册 at 物理自毁保险丝 + bash EXIT trap 双重物理抹除
+# 成本控制与长时算力原则：
+#   1. 长时挂机（如视频看门狗、保活、日常调度）一律优先走 GCP Always Free e2-micro 常驻机与 Cloud Run 免费层
+#   2. 临时 GCE 仅作为极端大计算量备用（Spot 抢占式，完工即刻自我销毁，按秒释放）
+#   3. 启动前自动对账并回收任何历史遗留的 runner-temp-* 悬挂机型
+#   4. 默认安全兜底自毁时限 60 分钟（可配置，防止卡死导致计费悬挂）
 #   5. 状态快照外置至 Cloudflare R2 / D1，计算节点纯无状态
 # ============================================================================
 set -euo pipefail
@@ -15,7 +15,7 @@ INSTANCE_NAME="runner-temp-$(date +%s)"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project)}"
 ZONE="${GCP_ZONE:-us-west1-a}"
 MACHINE_TYPE="${GCE_BURST_MACHINE_TYPE:-e2-micro}"
-TTL_MINUTES="${GCE_BURST_TTL_MINUTES:-15}"
+TTL_MINUTES="${GCE_BURST_TTL_MINUTES:-60}"
 USE_SPOT="${GCE_BURST_USE_SPOT:-true}"
 SA_NAME="${GCP_SERVICE_ACCOUNT:-sa-antigravity-worker}"
 SA_EMAIL="${SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
@@ -88,4 +88,4 @@ if [ -n '${REPO_URL}' ]; then
 fi
 "
 
-echo "✅ 临时实例 ${INSTANCE_NAME} 已就绪，将在执行完毕后立即自毁（最长运行 ${TTL_MINUTES} 分钟，禁止长时间占用）。"
+echo "✅ 临时实例 ${INSTANCE_NAME} 已就绪：完工后自动通过 EXIT trap 立即提前自毁；若遇死锁则在 ${TTL_MINUTES} 分钟后由 at 熔断兜底。"
