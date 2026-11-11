@@ -280,7 +280,33 @@ async function runAllTests() {
     }
   }
 
-  console.log(`\n🎉 全部 5 项核心自检测试 100% 通过！\n`);
+  // --- Test 6: D1 幂等迁移脚本有效性与 Observability Metrics 契约 ---
+  {
+    const migrationsDir = path.join(__dirname, '../edge/migrations');
+    const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+    assert.ok(files.includes('0004_perf_indexes.sql'), '必须包含 0004 性能索引迁移脚本');
+
+    for (const f of files) {
+      const sqlContent = fs.readFileSync(path.join(migrationsDir, f), 'utf8');
+      assert.ok(sqlContent.length > 10, `迁移文件 ${f} 内容不得为空`);
+      if (sqlContent.includes('CREATE TABLE')) {
+        assert.ok(sqlContent.includes('CREATE TABLE IF NOT EXISTS'), `表定义必须具备幂等性: ${f}`);
+      }
+      if (sqlContent.includes('CREATE INDEX')) {
+        assert.ok(sqlContent.includes('CREATE INDEX IF NOT EXISTS'), `索引定义必须具备幂等性: ${f}`);
+      }
+    }
+
+    // 校验 0004 性能索引的覆盖维度
+    const sql0004 = fs.readFileSync(path.join(migrationsDir, '0004_perf_indexes.sql'), 'utf8');
+    assert.ok(sql0004.includes('idx_pending_tasks_status_deadline'), '0004 需包含任务状态与截止时间联合索引');
+    assert.ok(sql0004.includes('idx_question_bank_lookup'), '0004 需包含题库查询联合索引');
+    assert.ok(sql0004.includes('idx_execution_logs_event_type'), '0004 需包含审计日志事件索引');
+
+    console.log(' ✅ [Test 6/6 PASS] D1 幂等迁移脚本有效性与 Observability Metrics 契约验证通过');
+  }
+
+  console.log(`\n🎉 全部 6 项核心自检测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

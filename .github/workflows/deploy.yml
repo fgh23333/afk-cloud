@@ -1,0 +1,99 @@
+name: afk-cloud Continuous Delivery & Rollback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'edge/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy-edge:
+    name: Cloudflare Worker Deploy & Automated Health Rollback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Pre-deployment Typecheck
+        run: pnpm typecheck
+
+      - name: Check Cloudflare Credentials
+        id: cf_check
+        run: |
+          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_token=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ 未检测到 CLOUDFLARE_API_TOKEN，跳过生产部署步骤 (Dry-run)"
+          fi
+
+      - name: Deploy to Cloudflare Workers
+        if: steps.cf_check.outputs.has_token == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: 'edge'
+          command: deploy
+
+      - name: Apply Remote D1 Migrations
+        if: steps.cf_check.outputs.has_token == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: 'edge'
+          command: d1 migrations apply DB --remote
+
+      - name: Post-Deployment Observability Probe & Rollback Guard
+        if: steps.cf_check.outputs.has_token == 'true'
+        run: |
+          PROBE_URL="${{ secrets.AFK_ENDPOINT_URL || 'https://afk.idiotshoumy.com' }}/health"
+          echo "📡 正在对上线服务执行端到端健康可观测性探测: $PROBE_URL"
+          
+          MAX_RETRIES=5
+          SUCCESS=0
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "第 $i 次探测中..."
+            HTTP_CODE=$(curl -s -o /tmp/health_resp.json -w "%{http_code}" "$PROBE_URL" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              STATUS=$(cat /tmp/health_resp.json | grep -o '"status":"[^"]*"' | cut -d':' -f2 | tr -d '"')
+              if [ "$STATUS" = "healthy" ]; then
+                echo "✅ 边缘服务健康检查完全通过 (HTTP 200, status: healthy)"
+                cat /tmp/health_resp.json
+                SUCCESS=1
+                break
+              fi
+            fi
+            sleep 5
+          done
+
+          if [ $SUCCESS -ne 1 ]; then
+            echo "❌ [ALERT] 新版本上线后健康探测连续失败，触发故障自动熔断回滚！"
+            exit 1
+          fi
+
+      - name: Trigger Automated Rollback on Failure
+        if: failure() && steps.cf_check.outputs.has_token == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: 'edge'
+          command: rollback
