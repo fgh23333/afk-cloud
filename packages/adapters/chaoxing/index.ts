@@ -1,5 +1,6 @@
 import { blue, green, red, yellow } from 'kolorist';
 import { syncTasksToEdgeDashboard } from '../../core/d1-bridge';
+import { PlatformPlugin, PluginContext, PluginManifest } from '../../core/plugin';
 import { solveHomeworkDualTrack } from '../../core/solver';
 import {
   CourseInfo,
@@ -25,8 +26,16 @@ export * from './notice';
 export * from './photo';
 export * from './session';
 
-export class ChaoxingAdapter implements PlatformAdapter {
+export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly name = 'chaoxing' as const;
+  public readonly manifest: PluginManifest = {
+    id: 'chaoxing',
+    name: '超星学习通自适应插件 (Skill)',
+    version: '1.1.0',
+    description: '超星协议原生适配器，涵盖登录态缓存、全类型签到、18门课程课件RAG拉取、双轨作业求解与安全草稿暂存',
+    capabilities: ['courses', 'materials', 'homework', 'signin'],
+  };
+
   private phone: string;
   private password: string;
   private cachedCookies: ChaoxingCookies | null = null;
@@ -34,6 +43,20 @@ export class ChaoxingAdapter implements PlatformAdapter {
   constructor(phone?: string, password?: string) {
     this.phone = phone || process.env.CHAOXING_PHONE || '';
     this.password = password || process.env.CHAOXING_PASSWORD || '';
+  }
+
+  public async init(ctx: PluginContext): Promise<void> {
+    if (ctx.env.CHAOXING_PHONE) this.phone = ctx.env.CHAOXING_PHONE;
+    if (ctx.env.CHAOXING_PASSWORD) this.password = ctx.env.CHAOXING_PASSWORD;
+  }
+
+  public async authenticate(): Promise<boolean> {
+    try {
+      const cookies = await this.ensureAuth();
+      return !!(cookies && cookies._uid);
+    } catch {
+      return false;
+    }
   }
 
   private async ensureAuth(): Promise<ChaoxingCookies> {

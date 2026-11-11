@@ -19,6 +19,7 @@ import {
   lookupQuestionCache,
   nowUtc8,
   saveCachedSession,
+  saveEnrolledCourses,
   saveNotices,
   upsertPendingTask,
   upsertQuestionCache,
@@ -361,8 +362,8 @@ export default {
       // 看板全量数据接口 (兼容 /api/dashboard 与 /api/data)
       if ((url.pathname === '/api/dashboard' || url.pathname === '/api/data') && request.method === 'GET') {
         let data = await getDashboardData(env);
-        // 若通知箱尚未拉取过，触发即时拉取并持久化
-        if ((!data.notices || data.notices.length === 0) && (env.CHAOXING_PHONE || env.PHONE)) {
+        // 若在读课程或通知箱尚未拉取过，触发即时拉取并持久化至 D1
+        if (((!data.courses || data.courses.length === 0) || (!data.notices || data.notices.length === 0)) && (env.CHAOXING_PHONE || env.PHONE)) {
           const phone = env.CHAOXING_PHONE || env.PHONE || '';
           const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
           let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
@@ -371,14 +372,39 @@ export default {
             if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
           }
           if (session) {
-            const list = await fetchNoticeList(session, 20);
-            if (list.length > 0) {
-              await saveNotices(env, list);
-              data = await getDashboardData(env);
+            if (!data.courses || data.courses.length === 0) {
+              const courseList = await getCourses(session);
+              if (courseList.length > 0) {
+                await saveEnrolledCourses(env, courseList);
+              }
             }
+            if (!data.notices || data.notices.length === 0) {
+              const list = await fetchNoticeList(session, 20);
+              if (list.length > 0) {
+                await saveNotices(env, list);
+              }
+            }
+            data = await getDashboardData(env);
           }
         }
         return corsJson(data);
+      }
+
+      // 手动刷新或抓取全量在读课程
+      if ((url.pathname === '/api/courses/refresh' || url.pathname === '/api/courses') && (request.method === 'GET' || request.method === 'POST')) {
+        const phone = env.CHAOXING_PHONE || env.PHONE || '';
+        const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+        let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
+        if (!session && password) {
+          session = await login(phone, password);
+          if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+        }
+        if (!session) {
+          return corsJson({ success: false, msg: '未获取到有效超星会话' }, 401);
+        }
+        const courseList = await getCourses(session);
+        const count = await saveEnrolledCourses(env, courseList);
+        return corsJson({ success: true, count: courseList.length, saved: count, courses: courseList, time: nowUtc8() });
       }
 
       // 手动刷新或抓取超星通知中心消息
@@ -614,6 +640,11 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
       await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
       courses = await getCourses(session);
     }
+  }
+
+  // 持久化全量在读课程至 D1
+  if (courses.length > 0) {
+    await saveEnrolledCourses(env, courses);
   }
 
   const signsExecuted: string[] = [];

@@ -7,6 +7,7 @@ import {
   readLocalStorageState,
   writeLocalStorageState,
 } from '../../core/browser-profile';
+import { PlatformPlugin, PluginContext, PluginManifest } from '../../core/plugin';
 import { solveHomeworkDualTrack } from '../../core/solver';
 import {
   CourseInfo,
@@ -102,13 +103,27 @@ export const ZHIHUISHU_INJECT_SCRIPT = `
  *    直接由 Antigravity (`chrome-devtools` MCP) 或 Playwright 进行 DOM 快照提取与表单回填。
  * 3. 双轨模型决策：DOM 提取出的客观题走 Gemini Flash 批量 JSON 秒答，编程题/主观题走 Gemini Pro + 本地沙箱评测自愈。
  */
-export class WebBrowserAdapter implements PlatformAdapter {
+export class WebBrowserAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly name: PlatformName;
   public readonly preset: WebPlatformPreset;
+  public readonly manifest: PluginManifest;
 
   constructor(platform: PlatformName = 'pta') {
     this.name = platform;
     this.preset = WEB_PLATFORM_PRESETS[platform] || WEB_PLATFORM_PRESETS.pta;
+    this.manifest = {
+      id: platform,
+      name: `${this.preset.displayName} 真实浏览器自治插件 (Skill)`,
+      version: '1.0.0',
+      description: '通过真实 Chromium CDP 与持久化 Profile 操控 Web 平台，支持视频合规守护与 DOM 表单智能作答',
+      capabilities: ['browser-cdp', 'homework'],
+    };
+  }
+
+  public async init(_ctx: PluginContext): Promise<void> {}
+
+  public async authenticate(): Promise<boolean> {
+    return true;
   }
 
   /**

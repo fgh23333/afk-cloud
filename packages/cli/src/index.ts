@@ -280,6 +280,29 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'plugins':
+    case 'skills': {
+      const { PluginRegistry } = await import('../../core/plugin');
+      const { ChaoxingAdapter } = await import('../../adapters/chaoxing');
+      const { PtaAdapter } = await import('../../adapters/pta');
+      const { WebBrowserAdapter } = await import('../../adapters/web-agent');
+
+      const registry = PluginRegistry.getInstance();
+      registry.register(new ChaoxingAdapter());
+      registry.register(new PtaAdapter());
+      registry.register(new WebBrowserAdapter('zhihuishu'));
+
+      console.log(cyan(`\n======================================================`));
+      console.log(cyan(` 🧩 afk-cloud / agy 插件化与 Skills 技能体系`));
+      console.log(cyan(`======================================================`));
+      for (const m of registry.list()) {
+        console.log(green(` ● [${m.id}] ${m.name} (v${m.version})`));
+        console.log(`   说明: ${m.description}`);
+        console.log(`   能力: ${m.capabilities.join(', ')}\n`);
+      }
+      break;
+    }
+
     case 'status':
     default: {
       await runStatus();

@@ -114,30 +114,77 @@ export async function chaoxingLogin(phone: string, rawPassword: string): Promise
 }
 
 /**
- * 获取全部在读课程列表
+ * 获取全部在读课程列表（优先走无需浏览器跳转的 courselistdata 接口）
  */
 export async function getChaoxingCourses(cookies: ChaoxingCookies): Promise<CourseInfo[]> {
-  const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
-    headers: {
-      Cookie: cookies.cookieStr,
-      'User-Agent': BROWSER_UA,
-    },
-  });
-
-  const html = await res.text();
   const courses: CourseInfo[] = [];
-  const regex =
-    /<li[^>]*courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["'](?:[^>]*personId=["'](\d+)["'])?[\s\S]*?<span[^>]*class=["'][^"']*course-name[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+  const seen = new Set<string>();
 
-  let m;
-  while ((m = regex.exec(html)) !== null) {
-    courses.push({
-      courseId: m[1],
-      classId: m[2],
-      cpi: m[3] || '',
-      courseName: m[4]?.trim() || `Course_${m[1]}`,
+  // 1. 首选通道：courselistdata POST
+  try {
+    const res = await fetch('https://mooc1-1.chaoxing.com/visit/courselistdata', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        Cookie: cookies.cookieStr,
+        'User-Agent': BROWSER_UA,
+      },
+      body: 'courseType=1&courseFolderId=0&courseFolderSize=1',
     });
+
+    const html = await res.text();
+    const regex =
+      /<li[^>]*courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["'](?:[^>]*personId=["'](\d+)["'])?[\s\S]*?<span[^>]*class=["'][^"']*course-name[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(html)) !== null) {
+      const key = `${m[1]}_${m[2]}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        courses.push({
+          courseId: m[1],
+          classId: m[2],
+          cpi: m[3] || '',
+          courseName: m[4]?.trim() || `Course_${m[1]}`,
+        });
+      }
+    }
+  } catch {
+    // ignore
   }
+
+  // 2. 备选通道：study 页面
+  if (courses.length === 0) {
+    try {
+      const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
+        headers: {
+          Cookie: cookies.cookieStr,
+          'User-Agent': BROWSER_UA,
+        },
+      });
+
+      const html = await res.text();
+      const regex =
+        /<li[^>]*courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["'](?:[^>]*personId=["'](\d+)["'])?[\s\S]*?<span[^>]*class=["'][^"']*course-name[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+
+      let m;
+      while ((m = regex.exec(html)) !== null) {
+        const key = `${m[1]}_${m[2]}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          courses.push({
+            courseId: m[1],
+            classId: m[2],
+            cpi: m[3] || '',
+            courseName: m[4]?.trim() || `Course_${m[1]}`,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return courses;
 }
 

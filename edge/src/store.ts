@@ -422,3 +422,60 @@ export async function getNoticesFromD1(env: EdgeEnv, limit = 30): Promise<Array<
     return [];
   }
 }
+
+export interface EnrolledCourseRecord {
+  courseId: string;
+  classId: string;
+  platform?: string;
+  courseName: string;
+  cpi?: string;
+  teacherName?: string;
+}
+
+/**
+ * 批量持久化用户在读课程全量列表到 D1
+ */
+export async function saveEnrolledCourses(
+  env: EdgeEnv,
+  courses: EnrolledCourseRecord[]
+): Promise<number> {
+  if (!env.DB || courses.length === 0) return 0;
+  const ts = nowUtc8();
+  let saved = 0;
+  for (const c of courses) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO enrolled_courses (course_id, class_id, platform, course_name, cpi, teacher_name, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(platform, course_id, class_id) DO UPDATE SET
+           course_name = excluded.course_name,
+           cpi = excluded.cpi,
+           teacher_name = COALESCE(excluded.teacher_name, enrolled_courses.teacher_name),
+           updated_at = excluded.updated_at`
+      )
+        .bind(c.courseId, c.classId, c.platform || 'chaoxing', c.courseName, c.cpi || '', c.teacherName || '', ts)
+        .run();
+      saved++;
+    } catch {
+      // ignore
+    }
+  }
+  return saved;
+}
+
+/**
+ * 从 D1 查询已持久化的在读课程列表
+ */
+export async function getEnrolledCoursesFromD1(
+  env: EdgeEnv
+): Promise<Array<{ courseId: string; classId: string; courseName: string; cpi?: string; teacherName?: string }>> {
+  if (!env.DB) return [];
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT course_id as courseId, class_id as classId, course_name as courseName, cpi, teacher_name as teacherName FROM enrolled_courses ORDER BY updated_at DESC'
+    ).all<any>();
+    return rows.results || [];
+  } catch {
+    return [];
+  }
+}

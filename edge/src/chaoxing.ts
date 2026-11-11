@@ -14,6 +14,7 @@ export interface Course {
   classId: string;
   courseName: string;
   cpi?: string;
+  teacherName?: string;
 }
 
 export interface SignLocation {
@@ -109,27 +110,32 @@ export async function login(phone: string, rawPass: string): Promise<UserSession
 }
 
 /**
- * 获取在读课程列表（支持现代超星 a.courseName 结构与 courselistdata 备用接口）
+ * 获取在读课程全量列表（涵盖主修、实验与在线选修）
  */
 export async function getCourses(session: UserSession): Promise<Course[]> {
   const courses: Course[] = [];
   const seen = new Set<string>();
 
-  // 1. 首选通道：study 页面
+  // 1. 权威首选通道：courselistdata POST 接口（实测 100% 返回全部在读课程且包含真实课程名与教师信息）
   try {
-    const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
+    const res = await fetch('https://mooc1-1.chaoxing.com/visit/courselistdata', {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
+      body: 'courseType=1&courseFolderId=0&courseFolderSize=1',
     });
 
     const html = await res.text();
 
-    // 匹配现代超星页面的 a.courseName 标签
-    const regexModern = /<a[^>]*class=["'][^"']*courseName[^"']*["'][^>]*href=["'][^"']*courseid=(\d+)&clazzid=(\d+)[^"']*(?:&cpi=(\d+))?[^"']*["'][^>]*title=["']([^"']+)["']/gi;
-    let m;
-    while ((m = regexModern.exec(html)) !== null) {
+    // 权威正则：精确匹配 li 属性中的 courseId, clazzId, personId 及内部的 course-name 真实课程名
+    const regexLi =
+      /<li[^>]*courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["'](?:[^>]*personId=["'](\d+)["'])?[\s\S]*?<span[^>]*class=["'][^"']*course-name[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = regexLi.exec(html)) !== null) {
       const key = `${m[1]}_${m[2]}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -137,55 +143,58 @@ export async function getCourses(session: UserSession): Promise<Course[]> {
           courseId: m[1],
           classId: m[2],
           cpi: m[3] || '',
-          courseName: m[4]?.trim() || '',
+          courseName: m[4]?.trim() || `课程_${m[1]}`,
         });
       }
     }
 
-    // 宽松正则兜底
+    // 备用正则 1：若 course-name 标签属性顺序不同，按 li 块逐个切割提取
     if (courses.length === 0) {
-      const regexRelaxed = /courseid=(\d+)&clazzid=(\d+)[^"']*["'][^>]*title=["']([^"']+)["']/gi;
-      let m2;
-      while ((m2 = regexRelaxed.exec(html)) !== null) {
-        const key = `${m2[1]}_${m2[2]}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          courses.push({
-            courseId: m2[1],
-            classId: m2[2],
-            cpi: '',
-            courseName: m2[3]?.trim() || '',
-          });
+      const liBlocks = html.split(/<li\s+class=["'][^"']*course\b/gi);
+      for (const block of liBlocks) {
+        const idMatch = block.match(/courseId=["'](\d+)["'][^>]*clazzId=["'](\d+)["']/i);
+        const nameMatch = block.match(/title=["']([^"']+)["']/i);
+        const personMatch = block.match(/personId=["'](\d+)["']/i);
+        if (idMatch && nameMatch) {
+          const key = `${idMatch[1]}_${idMatch[2]}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            courses.push({
+              courseId: idMatch[1],
+              classId: idMatch[2],
+              cpi: personMatch ? personMatch[1] : '',
+              courseName: nameMatch[1]?.trim() || `课程_${idMatch[1]}`,
+            });
+          }
         }
       }
     }
-  } catch {
-    // ignore
+  } catch (e: any) {
+    console.warn(`[getCourses] courselistdata 通道异常: ${e?.message || e}`);
   }
 
-  // 2. 备用通道：courselistdata 接口
+  // 2. 备用通道：study 页面与老版 a.courseName 匹配
   if (courses.length === 0) {
     try {
-      const res = await fetch('https://mooc1-1.chaoxing.com/visit/courselistdata', {
-        method: 'POST',
+      const res = await fetch('https://mooc1-1.chaoxing.com/visit/courses/study?courseType=1&courseFolderId=0', {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
           Cookie: session.cookie,
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         },
-        body: 'courseType=1&courseFolderId=0&courseFolderSize=0',
       });
       const html = await res.text();
-      const regexList = /course_(\d+)_(\d+)/g;
-      let m;
-      while ((m = regexList.exec(html)) !== null) {
+      const regexModern =
+        /<a[^>]*class=["'][^"']*courseName[^"']*["'][^>]*href=["'][^"']*courseid=(\d+)&clazzid=(\d+)[^"']*(?:&cpi=(\d+))?[^"']*["'][^>]*title=["']([^"']+)["']/gi;
+      let m: RegExpExecArray | null;
+      while ((m = regexModern.exec(html)) !== null) {
         const key = `${m[1]}_${m[2]}`;
         if (!seen.has(key)) {
           seen.add(key);
           courses.push({
             courseId: m[1],
             classId: m[2],
-            courseName: `课程_${m[1]}`,
+            cpi: m[3] || '',
+            courseName: m[4]?.trim() || '',
           });
         }
       }

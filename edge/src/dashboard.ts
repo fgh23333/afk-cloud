@@ -72,6 +72,8 @@ export interface DashboardData {
     courseName: string;
     courseId: string;
     classId: string;
+    cpi?: string;
+    teacherName?: string;
   }>;
   logs: Array<{
     id: number;
@@ -113,13 +115,14 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   if (!env.DB) return empty;
 
   try {
-    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes] = await env.DB.batch([
+    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes, enrolledCoursesRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
       env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
       env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type = 'signin'"),
       env.DB.prepare('SELECT id_code, title, creater_name, send_time, content, tag, source_type, raw_json FROM notices ORDER BY send_time DESC LIMIT 30'),
+      env.DB.prepare('SELECT course_id, class_id, course_name, cpi, teacher_name FROM enrolled_courses ORDER BY course_name ASC'),
     ]);
 
     const tasks = (tasksRes.results || []) as DashboardData['tasks'];
@@ -144,7 +147,10 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     let failedCount = 0;
 
     const homeworks: NonNullable<DashboardData['homeworks']> = [];
-    const courseMap = new Map<string, { courseName: string; courseId: string; classId: string }>();
+    const courseMap = new Map<
+      string,
+      { courseName: string; courseId: string; classId: string; cpi?: string; teacherName?: string }
+    >();
 
     for (const t of tasks) {
       let statusLabel = '未派发';
@@ -186,6 +192,19 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           courseName: t.course_name,
           courseId: t.course_id,
           classId: t.class_id,
+        });
+      }
+    }
+
+    const enrolledCourses = (enrolledCoursesRes?.results || []) as Array<any>;
+    for (const ec of enrolledCourses) {
+      if (ec.course_id) {
+        courseMap.set(ec.course_id, {
+          courseName: ec.course_name,
+          courseId: ec.course_id,
+          classId: ec.class_id,
+          cpi: ec.cpi || '',
+          teacherName: ec.teacher_name || '',
         });
       }
     }
@@ -423,6 +442,7 @@ export function renderDashboardHtml(): string {
         </button>
         <button onclick="switchTab('courses')" id="tabBtn-courses" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
           <span>📚 在读课程概况</span>
+          <span id="badge-courses" class="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">0</span>
         </button>
         <button onclick="switchTab('settings')" id="tabBtn-settings" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
           <span>🔔 通知通道与架构</span>
@@ -481,6 +501,12 @@ export function renderDashboardHtml(): string {
 
       <!-- Tab 4: 课程列表 -->
       <section id="tab-courses" class="space-y-3 hidden">
+        <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+          <span class="text-slate-300">共检索到 <span id="totalCourseCount" class="font-bold text-white">0</span> 门在读课程（已同步持久化至 D1 数据库）</span>
+          <button onclick="refreshCourses()" id="syncCoursesBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1">
+            <span>🔄 刷新超星课程</span>
+          </button>
+        </div>
         <div id="courseList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载课程...</div>
         </div>
@@ -604,6 +630,12 @@ export function renderDashboardHtml(): string {
 
       document.getElementById('badge-homework').innerText = pendingCount;
       document.getElementById('badge-exams').innerText = activeExams.length;
+
+      const courseCount = (state.courses || []).length;
+      const badgeCourses = document.getElementById('badge-courses');
+      if (badgeCourses) badgeCourses.innerText = courseCount;
+      const totalCourseEl = document.getElementById('totalCourseCount');
+      if (totalCourseEl) totalCourseEl.innerText = courseCount;
 
       renderHomework();
       renderExams();
@@ -766,17 +798,23 @@ export function renderDashboardHtml(): string {
       const container = document.getElementById('courseList');
       const courses = state.courses || [];
       if (courses.length === 0) {
-        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">已加载全部在读课程，数据同步中...</div>';
+        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">暂无在读课程记录，点击上方“刷新超星课程”按钮即可自动拉取！</div>';
         return;
       }
 
       container.innerHTML = courses.map(c => \`
-        <div class="glass-card rounded-xl p-3.5 flex items-center justify-between text-xs">
-          <div>
-            <div class="font-bold text-white">\${c.courseName}</div>
-            <div class="text-[11px] text-slate-400 mt-0.5">ID: \${c.courseId} · 班级: \${c.classId || '-'}</div>
+        <div class="glass-card rounded-xl p-3.5 flex flex-col justify-between text-xs space-y-2.5 border border-slate-800 hover:border-slate-700 transition">
+          <div class="space-y-1">
+            <div class="font-bold text-white text-sm line-clamp-1" title="\${c.courseName}">\${c.courseName}</div>
+            <div class="text-[11px] text-slate-400 font-mono">ID: \${c.courseId} · 班级: \${c.classId || '-'}</div>
+            \${c.teacherName ? \`<div class="text-[11px] text-slate-400">授课教师: <span class="text-slate-300">\${c.teacherName}</span></div>\` : ''}
           </div>
-          <span class="text-[11px] text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-500/10">● 正常监听</span>
+          <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+            <span class="text-[10px] text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-500/10">● 活跃监听中</span>
+            <a href="https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=\${c.courseId}&clazzid=\${c.classId}&vc=1&cpi=\${c.cpi || ''}" target="_blank" class="text-[11px] text-sky-400 hover:underline">
+              进入课程 &rarr;
+            </a>
+          </div>
         </div>
       \`).join('');
     }
@@ -923,6 +961,31 @@ export function renderDashboardHtml(): string {
         }
       } catch (e) {
         showToast('网络请求异常', false);
+      }
+    }
+
+    async function refreshCourses() {
+      const btn = document.getElementById('syncCoursesBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '同步中...';
+      }
+      try {
+        const res = await fetch('/api/courses/refresh', { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          showToast(\`成功同步 \${json.count} 门在读课程！\`);
+          await refreshData();
+        } else {
+          showToast('课程同步失败：' + (json.msg || '网络异常'), false);
+        }
+      } catch (e) {
+        showToast('课程同步请求异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🔄 刷新超星课程';
+        }
       }
     }
 

@@ -1,3 +1,4 @@
+import { PlatformPlugin, PluginContext, PluginManifest } from '../../core/plugin';
 import { solveHomeworkDualTrack } from '../../core/solver';
 import {
   CourseInfo,
@@ -9,11 +10,24 @@ import {
 } from '../../core/types';
 
 /**
- * PTA (程序设计类实验辅助教学平台 pintia.cn) 适配器
+ * PTA (程序设计类实验辅助教学平台 pintia.cn) 适配器插件 (Skill)
  * 支持编程题提取、Gemini Pro 代码生成、本地/Cloud Run 沙箱样例自测与多轮自愈
  */
-export class PtaAdapter implements PlatformAdapter {
+export class PtaAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly name = 'pta' as const;
+  public readonly manifest: PluginManifest = {
+    id: 'pta',
+    name: 'PTA 拼题 A 算法评测自愈插件 (Skill)',
+    version: '1.0.0',
+    description: '拼题 A 编程题智能求解插件，驱动 Gemini Pro 生成算法代码并在沙箱中自检反思自愈',
+    capabilities: ['homework', 'sandbox'],
+  };
+
+  public async init(_ctx: PluginContext): Promise<void> {}
+
+  public async authenticate(): Promise<boolean> {
+    return true;
+  }
 
   public async scanCourses(): Promise<CourseInfo[]> {
     return [];
