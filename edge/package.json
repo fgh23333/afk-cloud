@@ -1,6 +1,6 @@
 {
   "name": "@afk-cloud/edge",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Tier 0 Cloudflare Workers + D1 Edge Heartbeat, Sign-in & Persistent Memory Layer",
   "main": "src/index.ts",

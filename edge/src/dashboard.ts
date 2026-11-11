@@ -6,6 +6,7 @@ export interface DashboardData {
   daemonStatus?: string;
   stats: {
     pendingCount: number;
+    dispatchedCount?: number;
     draftCount: number;
     submittedCount: number;
     failedCount: number;
@@ -39,6 +40,7 @@ export interface DashboardData {
     endDate: string;
     isPending: boolean;
     status: string;
+    statusLabel?: string;
     platform: string;
     computeTier: string;
     resultSummary: string;
@@ -91,6 +93,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     daemonStatus: 'ONLINE',
     stats: {
       pendingCount: 0,
+      dispatchedCount: 0,
       draftCount: 0,
       submittedCount: 0,
       failedCount: 0,
@@ -135,6 +138,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     const signinCount = Number((signinRes.results?.[0] as any)?.cnt || 0);
 
     let pendingCount = 0;
+    let dispatchedCount = 0;
     let draftCount = 0;
     let submittedCount = 0;
     let failedCount = 0;
@@ -143,11 +147,25 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     const courseMap = new Map<string, { courseName: string; courseId: string; classId: string }>();
 
     for (const t of tasks) {
-      const isPending = t.status === 'pending' || t.status === 'processing';
-      if (isPending) pendingCount++;
-      else if (t.status === 'draft_saved') draftCount++;
-      else if (t.status === 'submitted') submittedCount++;
-      else if (t.status === 'failed') failedCount++;
+      let statusLabel = '未派发';
+      if (t.status === 'dispatched' || t.status === 'processing') {
+        dispatchedCount++;
+        statusLabel = '已派发';
+      } else if (t.status === 'draft_saved' || t.status === 'awaiting_approval') {
+        draftCount++;
+        statusLabel = '做完暂存';
+      } else if (t.status === 'submitted') {
+        submittedCount++;
+        statusLabel = '已提交';
+      } else if (t.status === 'failed') {
+        failedCount++;
+        statusLabel = '求解失败';
+      } else {
+        pendingCount++;
+        statusLabel = '未派发';
+      }
+
+      const isPending = t.status === 'pending';
 
       homeworks.push({
         taskId: t.task_id,
@@ -156,6 +174,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         endDate: t.deadline || '无截止限制',
         isPending,
         status: t.status,
+        statusLabel,
         platform: t.platform || 'chaoxing',
         computeTier: t.compute_tier || 'tier1-cloud-run',
         resultSummary: t.result_summary || '',
@@ -235,6 +254,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       daemonStatus: 'ONLINE',
       stats: {
         pendingCount,
+        dispatchedCount,
         draftCount,
         submittedCount,
         failedCount,
@@ -244,7 +264,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       sessions,
       tasks,
       homeworks,
-      exams: [],
+      exams,
       notices,
       signinHistory,
       courses: Array.from(courseMap.values()),
@@ -350,14 +370,14 @@ export function renderDashboardHtml(): string {
       <!-- 待做作业统计 -->
       <div class="glass-card rounded-2xl p-4 flex flex-col justify-between">
         <div class="flex items-center justify-between text-xs text-slate-400">
-          <span>待办作业/实验</span>
+          <span>待办作业与状态</span>
           <span class="text-amber-400">📝</span>
         </div>
         <div class="mt-2 text-xl lg:text-2xl font-bold text-amber-400 flex items-baseline gap-2">
           <span id="pendingHomeworkCount">0</span>
-          <span class="text-xs font-normal text-slate-400">份待完成</span>
+          <span class="text-xs font-normal text-slate-400">份未派发</span>
         </div>
-        <div class="mt-2 text-[11px] text-slate-400" id="solvedHomeworkCount">已 AI 暂存/提交: 0 份</div>
+        <div class="mt-2 text-[11px] text-slate-400 truncate" id="solvedHomeworkCount">0 已派发 · 0 做完暂存 · 0 已提交</div>
       </div>
 
       <!-- 考试与多平台任务 -->
@@ -411,6 +431,22 @@ export function renderDashboardHtml(): string {
 
       <!-- Tab 1: 作业任务 -->
       <section id="tab-homework" class="space-y-3">
+        <!-- 过滤器与批量派发操作栏 -->
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+          <div class="flex items-center gap-1.5 overflow-x-auto py-0.5">
+            <button onclick="setHomeworkFilter('all')" id="filter-all" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-800 text-white font-medium border border-slate-700 transition">全部 (<span id="cnt-all">0</span>)</button>
+            <button onclick="setHomeworkFilter('pending')" id="filter-pending" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 hover:bg-slate-800 border border-transparent transition">⏳ 未派发 (<span id="cnt-pending">0</span>)</button>
+            <button onclick="setHomeworkFilter('dispatched')" id="filter-dispatched" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-sky-400 hover:bg-slate-800 border border-transparent transition">🚀 已派发 (<span id="cnt-dispatched">0</span>)</button>
+            <button onclick="setHomeworkFilter('draft_saved')" id="filter-draft_saved" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-transparent transition">🛡️ 做完暂存 (<span id="cnt-draft">0</span>)</button>
+            <button onclick="setHomeworkFilter('submitted')" id="filter-submitted" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">✅ 已提交 (<span id="cnt-submitted">0</span>)</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="dispatchAllPendingTasks()" id="dispatchAllBtn" class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs shadow-md shadow-brand-900/30 transition active:scale-95">
+              <span>🚀 一键派发未派发作业</span>
+            </button>
+          </div>
+        </div>
+
         <div id="homeworkList" class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载作业与实验任务...</div>
         </div>
@@ -520,16 +556,46 @@ export function renderDashboardHtml(): string {
       setTimeout(() => box.classList.add('hidden'), 4000);
     }
 
+    let currentHomeworkFilter = 'all';
+
+    function setHomeworkFilter(filter) {
+      currentHomeworkFilter = filter;
+      document.querySelectorAll('.hw-filter-btn').forEach(btn => {
+        btn.classList.remove('bg-slate-800', 'text-white', 'border-slate-700');
+        btn.classList.add('bg-slate-900', 'border-transparent');
+      });
+      const activeBtn = document.getElementById('filter-' + filter);
+      if (activeBtn) {
+        activeBtn.classList.add('bg-slate-800', 'text-white', 'border-slate-700');
+        activeBtn.classList.remove('bg-slate-900', 'border-transparent');
+      }
+      renderHomework();
+    }
+
     function renderUI() {
       if (!state) return;
 
       // 顶部指标
       document.getElementById('lastHeartbeat').innerText = '最后同步: ' + (state.lastSync || state.time || '刚刚');
-      const pendingCount = (state.homeworks || []).filter(h => h.isPending).length;
-      const solvedCount = (state.homeworks || []).filter(h => !h.isPending).length;
+      const hwList = state.homeworks || [];
+      const pendingCount = hwList.filter(h => h.status === 'pending').length;
+      const dispatchedCount = hwList.filter(h => h.status === 'dispatched' || h.status === 'processing').length;
+      const draftCount = hwList.filter(h => h.status === 'draft_saved' || h.status === 'awaiting_approval').length;
+      const submittedCount = hwList.filter(h => h.status === 'submitted').length;
 
       document.getElementById('pendingHomeworkCount').innerText = pendingCount;
-      document.getElementById('solvedHomeworkCount').innerText = '已 AI 暂存/提交: ' + solvedCount + ' 份';
+      document.getElementById('solvedHomeworkCount').innerText = \`\${dispatchedCount} 已派发 · \${draftCount} 做完暂存 · \${submittedCount} 已提交\`;
+
+      const cntAll = document.getElementById('cnt-all');
+      if (cntAll) cntAll.innerText = hwList.length;
+      const cntPending = document.getElementById('cnt-pending');
+      if (cntPending) cntPending.innerText = pendingCount;
+      const cntDispatched = document.getElementById('cnt-dispatched');
+      if (cntDispatched) cntDispatched.innerText = dispatchedCount;
+      const cntDraft = document.getElementById('cnt-draft');
+      if (cntDraft) cntDraft.innerText = draftCount;
+      const cntSubmitted = document.getElementById('cnt-submitted');
+      if (cntSubmitted) cntSubmitted.innerText = submittedCount;
 
       const activeExams = (state.exams || []).filter(e => !e.isExpired);
       document.getElementById('activeExamsCount').innerText = activeExams.length;
@@ -547,50 +613,83 @@ export function renderDashboardHtml(): string {
 
     function renderHomework() {
       const container = document.getElementById('homeworkList');
-      const list = state.homeworks || [];
+      const allList = state.homeworks || [];
+      const list = allList.filter(hw => {
+        if (currentHomeworkFilter === 'all') return true;
+        if (currentHomeworkFilter === 'pending') return hw.status === 'pending';
+        if (currentHomeworkFilter === 'dispatched') return hw.status === 'dispatched' || hw.status === 'processing';
+        if (currentHomeworkFilter === 'draft_saved') return hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
+        if (currentHomeworkFilter === 'submitted') return hw.status === 'submitted';
+        return true;
+      });
+
       if (list.length === 0) {
-        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">暂无待做作业，所有任务均已完成暂存/提交！🎉</div>';
+        container.innerHTML = '<div class="col-span-full py-12 text-center text-slate-500 text-sm">该分类下暂无作业任务</div>';
         return;
       }
 
       container.innerHTML = list.map(hw => {
-        const isDraft = hw.status === 'draft_saved';
+        const isDraft = hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
         const isSubmitted = hw.status === 'submitted';
-        const isPending = hw.isPending && !isDraft && !isSubmitted;
+        const isDispatched = hw.status === 'dispatched' || hw.status === 'processing';
+        const isFailed = hw.status === 'failed';
+        const isPending = !isDraft && !isSubmitted && !isDispatched && !isFailed;
 
-        let badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">待做作业</span>';
+        let badge = '';
+        let statusDesc = '';
         if (isDraft) {
-          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">草稿已暂存</span>';
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">🛡️ 做完暂存 · 待审批</span>';
+          statusDesc = '双轨模型已完成解答，草稿已暂存平台，等待人工审批正式提交';
+        } else if (isDispatched) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-blue-500/20 text-blue-300 border-blue-500/30">🚀 已派发给 agy</span>';
+          statusDesc = '任务已下发至云端 Antigravity Agent / 本地 shim 正在深度推理求解中';
         } else if (isSubmitted) {
-          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">已正式提交</span>';
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">✅ 已正式提交</span>';
+          statusDesc = '已完成审批并正式提交至超星学习通平台';
+        } else if (isFailed) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-rose-500/20 text-rose-300 border-rose-500/30">⚠️ 求解失败</span>';
+          statusDesc = '上次求解遇到异常，支持重新派发给 agy';
+        } else {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">⏳ 未派发</span>';
+          statusDesc = '新探测作业，尚未派发给 agy Agent 执行作答';
         }
 
         const platformLabel = hw.platform ? hw.platform.toUpperCase() : 'CHAOXING';
         const platformBadge = \`<span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">\${platformLabel}</span>\`;
 
         return \`
-          <div class="glass-card rounded-2xl p-4 space-y-2.5 transition hover:border-slate-700">
-            <div class="flex items-start justify-between gap-2">
-              <div class="flex items-center gap-1.5">
-                \${badge}
-                \${platformBadge}
+          <div class="glass-card rounded-2xl p-4 space-y-3 transition hover:border-slate-700 flex flex-col justify-between">
+            <div class="space-y-2">
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  \${badge}
+                  \${platformBadge}
+                </div>
+                <span class="text-[11px] text-slate-400 truncate max-w-[140px]">\${hw.courseName || '课程'}</span>
               </div>
-              <span class="text-[11px] text-slate-400 truncate max-w-[150px]">\${hw.courseName || '课程'}</span>
+              <h3 class="text-sm font-bold text-white tracking-tight">\${hw.title}</h3>
+              <div class="text-xs text-slate-400 space-y-1">
+                <p>📅 截止时间: <span class="text-slate-300 font-mono">\${hw.endDate || '无截止限制'}</span></p>
+                <p class="text-[11px] text-slate-400">💡 状态说明: \${statusDesc}</p>
+                \${hw.resultSummary ? \`<p class="text-[11px] text-sky-300/90 truncate">📝 详情: \${hw.resultSummary}</p>\` : ''}
+              </div>
             </div>
-            <h3 class="text-sm font-bold text-white tracking-tight">\${hw.title}</h3>
-            <div class="text-xs text-slate-400 space-y-0.5">
-              <p>📅 截止时间: \${hw.endDate || '无截止限制'}</p>
-              <p>🤖 作答模式: \${hw.aiSolved ? '已由 agy Agent 深度推理作答' : '自动监控求解中'}</p>
-              \${hw.resultSummary ? \`<p class="text-[11px] text-sky-300/80 truncate">📝 详情: \${hw.resultSummary}</p>\` : ''}
-            </div>
-            \${isDraft ? \`
-              <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                <span class="text-[11px] text-amber-300/90">🛡️ 草稿检查点已保存</span>
-                <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30">
-                  审批提交 &rarr;
+
+            <div class="pt-2.5 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
+              <div class="text-[11px] text-slate-500">
+                \${isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
+              </div>
+              <div class="flex items-center gap-2">
+                <button onclick="dispatchTask('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1">
+                  <span>\${isPending ? '🚀 派发给 agy' : '🔄 重新派发 agy'}</span>
                 </button>
+                \${isDraft ? \`
+                  <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1">
+                    <span>✅ 审批提交 &rarr;</span>
+                  </button>
+                \` : ''}
               </div>
-            \` : ''}
+            </div>
           </div>
         \`;
       }).join('');
@@ -744,6 +843,62 @@ export function renderDashboardHtml(): string {
       } finally {
         btn.disabled = false;
         btn.innerText = '📨 推送简报';
+      }
+    }
+
+    async function dispatchTask(taskId) {
+      if (!confirm('确定将该作业主动派发给云端 agy / 本地 shim 求解吗？')) return;
+      try {
+        showToast('正在主动派发任务给 agy...', true);
+        const res = await fetch(\`/api/tasks/\${taskId}/dispatch\`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const json = await res.json();
+        if (json.success) {
+          showToast('作业已成功派发给 agy 深度推理求解！🚀');
+          await refreshData();
+        } else {
+          showToast('派发失败：' + (json.reason || '网络错误'), false);
+        }
+      } catch (e) {
+        showToast('派发请求异常', false);
+      }
+    }
+
+    async function dispatchAllPendingTasks() {
+      const pendingTasks = (state.homeworks || []).filter(h => h.status === 'pending');
+      if (pendingTasks.length === 0) {
+        showToast('当前没有未派发的作业任务');
+        return;
+      }
+      if (!confirm(\`确定一键将全部 \${pendingTasks.length} 份未派发作业派发给 agy 吗？\`)) return;
+
+      const btn = document.getElementById('dispatchAllBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '派发中...';
+      }
+      try {
+        const res = await fetch('/api/tasks/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskIds: pendingTasks.map(t => t.taskId) })
+        });
+        const json = await res.json();
+        if (json.success) {
+          showToast(\`已成功派发 \${json.dispatchedCount} 份作业给 agy！🚀\`);
+          await refreshData();
+        } else {
+          showToast('批量派发失败', false);
+        }
+      } catch (e) {
+        showToast('批量派发网络异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🚀 一键派发未派发作业';
+        }
       }
     }
 

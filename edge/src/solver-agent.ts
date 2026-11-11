@@ -61,11 +61,12 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     deadline?: string;
     courseName?: string;
     title?: string;
+    force?: boolean;
   }): Promise<{ accepted: boolean; jobId: string; status: string; reason?: string }> {
     const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', task.jobId);
     const existing = [...cursor];
 
-    if (existing.length > 0) {
+    if (existing.length > 0 && !task.force) {
       const row = existing[0] as any;
       if (['dispatched', 'draft_saved', 'awaiting_approval', 'submitted', 'submitting'].includes(row.status)) {
         return {

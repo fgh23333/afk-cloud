@@ -491,6 +491,33 @@ export default {
         return corsJson({ success: false, reason: 'SOLVER_AGENT not available or missing jobId' });
       }
 
+      // 任务主动重新派发接口：支持单任务或批量派发给 agy (常驻服务器 shim / Cloud Run)
+      if (
+        (url.pathname.match(/^\/api\/tasks\/([^\/]+)\/dispatch$/) || url.pathname === '/api/tasks/dispatch') &&
+        request.method === 'POST'
+      ) {
+        const match = url.pathname.match(/^\/api\/tasks\/([^\/]+)\/dispatch$/);
+        const body: any = await request.json().catch(() => ({}));
+        const taskIds: string[] = match
+          ? [match[1]]
+          : (Array.isArray(body.taskIds) ? body.taskIds : [body.taskId || body.jobId]).filter(Boolean);
+
+        const results: Array<{ taskId: string; success: boolean; status: string; reason?: string }> = [];
+        for (const tid of taskIds) {
+          const res = await dispatchSingleTask(env, tid);
+          results.push(res);
+        }
+
+        const dispatchedCount = results.filter((r) => r.success).length;
+        return corsJson({
+          success: dispatchedCount > 0,
+          total: results.length,
+          dispatchedCount,
+          results,
+          time: nowUtc8(),
+        });
+      }
+
       // 更新单个任务状态
       if (url.pathname === '/api/tasks/status' && request.method === 'POST') {
         if (!env.DB) return corsJson({ updated: false });
@@ -671,5 +698,116 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
     signsExecuted,
     homeworkCoursesDetected,
     noticesCount,
+  };
+}
+
+/**
+ * 派发单个作业任务给 agy (支持强制重派，同步推进 D1 状态与直连 shim)
+ */
+async function dispatchSingleTask(
+  env: ExtendedNotifyEnv,
+  taskId: string
+): Promise<{ taskId: string; success: boolean; status: string; reason?: string }> {
+  if (!env.DB) {
+    return { taskId, success: false, status: 'error', reason: 'D1 数据库未连接' };
+  }
+
+  const now = nowUtc8();
+  const task = await env.DB.prepare('SELECT * FROM pending_tasks WHERE task_id = ?')
+    .bind(taskId)
+    .first<any>();
+
+  if (!task) {
+    return { taskId, success: false, status: 'not_found', reason: '任务不存在' };
+  }
+
+  let taskUrl = '';
+  if (task.payload_json) {
+    try {
+      const parsed = JSON.parse(task.payload_json);
+      taskUrl = parsed.url || '';
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!taskUrl) {
+    const rawWorkId = task.task_id.replace(/^chaoxing-(?:notice-)?work-/, '').split('-')[0];
+    taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${task.course_id}&classId=${task.class_id}&cpi=&workId=${rawWorkId}`;
+  }
+
+  // 1. 更新 D1 状态为 dispatched
+  await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
+    .bind('dispatched', now, taskId)
+    .run();
+
+  // 2. 优先通过 SOLVER_AGENT 派发 (强制重新派发)
+  let dispatchedToAgent = false;
+  if (env.SOLVER_AGENT) {
+    try {
+      const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+      const res: any = await (solverStub as any).enqueue({
+        jobId: task.task_id,
+        platform: task.platform || 'chaoxing',
+        taskUrl,
+        deadline: task.deadline,
+        courseName: task.course_name,
+        title: task.title,
+        force: true,
+      });
+      dispatchedToAgent = !!res?.accepted;
+    } catch (e: any) {
+      console.warn(`[dispatchSingleTask] SOLVER_AGENT enqueue 异常: ${e?.message || e}`);
+    }
+  }
+
+  // 3. 同时尝试直连常驻服务器 shim (若配置了 AFK_SHIM_URL)
+  const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+  const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
+  let dispatchedToShim = false;
+
+  if (shimUrl) {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (shimToken) headers['Authorization'] = `Bearer ${shimToken}`;
+      const res = await fetch(`${shimUrl.replace(/\/+$/, '')}/task`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jobId: task.task_id,
+          taskUrl,
+          platform: task.platform || 'chaoxing',
+          deadline: task.deadline,
+          mode: 'draft',
+        }),
+      });
+      dispatchedToShim = res.ok;
+    } catch (e: any) {
+      console.warn(`[dispatchSingleTask] 直接通知 shim 异常: ${e?.message || e}`);
+    }
+  }
+
+  await logExecution(
+    env,
+    'task_dispatched',
+    task.platform || 'chaoxing',
+    `【主动派发给 agy】课程《${task.course_name}》- ${task.title}`
+  );
+
+  await sendNotification(
+    'afk-cloud 任务主动派发 🚀',
+    `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已主动派发至云端 agy / shim 深度推理求解。`,
+    env
+  );
+
+  return {
+    taskId,
+    success: true,
+    status: 'dispatched',
+    reason: dispatchedToShim
+      ? '已成功下发至服务器 shim'
+      : dispatchedToAgent
+      ? '已入队 Durable Object 调度'
+      : '已更新状态为已派发，等待云端 agy 拉取',
   };
 }
