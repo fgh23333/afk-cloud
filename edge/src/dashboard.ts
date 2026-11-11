@@ -32,11 +32,14 @@ export interface DashboardData {
     deadline: string;
     result_summary: string;
     updated_at: string;
+    payload_json?: string;
   }>;
   homeworks?: Array<{
     taskId: string;
     title: string;
     courseName: string;
+    courseId?: string;
+    classId?: string;
     endDate: string;
     isPending: boolean;
     status: string;
@@ -45,6 +48,10 @@ export interface DashboardData {
     computeTier: string;
     resultSummary: string;
     aiSolved: boolean;
+    url?: string;
+    directUrl?: string;
+    noticeUrl?: string;
+    courseUrl?: string;
   }>;
   exams?: Array<{
     examId?: string;
@@ -173,10 +180,44 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
 
       const isPending = t.status === 'pending';
 
+      let directUrl = '';
+      let noticeUrl = '';
+
+      if (t.payload_json) {
+        try {
+          const parsed = JSON.parse(t.payload_json);
+          if (parsed.url) directUrl = parsed.url;
+          if (parsed.idCode) {
+            noticeUrl = `https://notice.chaoxing.com/pc/notice/${parsed.idCode}/detail`;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // 兜底提取 workId (如 chaoxing-notice-work-58213243-154423000)
+      const workIdMatch = t.task_id.match(/chaoxing-(?:notice-)?work-(\d+)/);
+      const rawWorkId = workIdMatch ? workIdMatch[1] : '';
+      if (!directUrl && rawWorkId && t.course_id && t.class_id) {
+        directUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${t.course_id}&classId=${t.class_id}&cpi=&workId=${rawWorkId}`;
+      }
+
+      const courseUrl = t.course_id && t.class_id
+        ? `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${t.course_id}&clazzid=${t.class_id}&vc=1`
+        : '';
+
+      // 核心免 403 路由铁律：
+      // 1. 若有 noticeUrl，优先指向官方通知卡片入口。用户在浏览器点击即可带齐合法签名和 Cookie 答题，绝对不会触发 403 跨域盗链防护。
+      // 2. 若无通知入口，回退到 directUrl (intoexamorwork / dowork 链接)。
+      // 3. 若无直接作业链接，回退到超星课程学生空间 courseUrl。
+      const primaryUrl = noticeUrl || directUrl || courseUrl;
+
       homeworks.push({
         taskId: t.task_id,
         title: t.title,
         courseName: t.course_name || '未命名课程',
+        courseId: t.course_id,
+        classId: t.class_id,
         endDate: t.deadline || '无截止限制',
         isPending,
         status: t.status,
@@ -185,6 +226,10 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         computeTier: t.compute_tier || 'tier1-cloud-run',
         resultSummary: t.result_summary || '',
         aiSolved: t.status === 'draft_saved' || t.status === 'submitted',
+        url: primaryUrl,
+        directUrl,
+        noticeUrl,
+        courseUrl,
       });
 
       if (t.course_id && t.course_name && !courseMap.has(t.course_id)) {
@@ -689,6 +734,14 @@ export function renderDashboardHtml(): string {
         const platformLabel = hw.platform ? hw.platform.toUpperCase() : 'CHAOXING';
         const platformBadge = \`<span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">\${platformLabel}</span>\`;
 
+        const courseLink = hw.courseUrl
+          ? '<a href="' + hw.courseUrl + '" target="_blank" rel="noopener noreferrer" class="text-[11px] text-sky-400/90 hover:text-sky-300 hover:underline truncate max-w-[150px] inline-flex items-center gap-0.5" title="点击直达课程空间">' + (hw.courseName || '课程') + ' ↗</a>'
+          : '<span class="text-[11px] text-slate-400 truncate max-w-[150px]">' + (hw.courseName || '课程') + '</span>';
+
+        const answerBtn = hw.url
+          ? '<a href="' + hw.url + '" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition active:scale-95 shadow-md shadow-sky-900/30 flex items-center gap-1" title="' + (hw.noticeUrl ? '在超星官方平台打开作业通知卡片作答（免403防阻断）' : '在超星平台打开作答界面') + '"><span>🔗 打开作答界面 &rarr;</span></a>'
+          : '';
+
         return \`
           <div class="glass-card rounded-2xl p-4 space-y-3 transition hover:border-slate-700 flex flex-col justify-between">
             <div class="space-y-2">
@@ -697,7 +750,7 @@ export function renderDashboardHtml(): string {
                   \${badge}
                   \${platformBadge}
                 </div>
-                <span class="text-[11px] text-slate-400 truncate max-w-[140px]">\${hw.courseName || '课程'}</span>
+                \${courseLink}
               </div>
               <h3 class="text-sm font-bold text-white tracking-tight">\${hw.title}</h3>
               <div class="text-xs text-slate-400 space-y-1">
@@ -711,12 +764,13 @@ export function renderDashboardHtml(): string {
               <div class="text-[11px] text-slate-500">
                 \${isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
               </div>
-              <div class="flex items-center gap-2">
-                <button onclick="dispatchTask('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                \${answerBtn}
+                <button onclick="dispatchTask('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
                   <span>\${isPending ? '🚀 派发给 agy' : '🔄 重新派发 agy'}</span>
                 </button>
                 \${isDraft ? \`
-                  <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1">
+                  <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1" title="确认并正式提交作业草稿">
                     <span>✅ 审批提交 &rarr;</span>
                   </button>
                 \` : ''}
@@ -752,7 +806,7 @@ export function renderDashboardHtml(): string {
               </div>
               <h3 class="text-sm font-bold text-white mt-2">\${e.title}</h3>
               <p class="text-xs text-slate-300 mt-1">时段: \${e.startTime || '无'} 至 \${e.endTime || '无'}</p>
-              \${e.url ? \`<a href="\${e.url}" target="_blank" class="inline-block mt-2 text-xs text-sky-400 hover:underline">🔗 跳转作答界面 &rarr;</a>\` : ''}
+              \${(e.url || e.examId) ? ('<a href="' + (e.url || ('https://mooc1-api.chaoxing.com/examApi/intoexamorwork?taskrefId=' + e.examId + '&workOrExam=exam')) + '" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 mt-2 text-xs font-semibold text-sky-400 hover:text-sky-300 hover:underline">🔗 跳转考试/测验作答界面 &rarr;</a>') : ''}
             </div>
           \`;
         }).join('');
