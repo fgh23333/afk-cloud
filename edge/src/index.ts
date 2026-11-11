@@ -1,6 +1,7 @@
 import { routeAgentRequest } from 'agents';
 import {
   checkHomeworkPendingCourses,
+  fetchNoticeList,
   getCourses,
   login,
   performSign,
@@ -18,6 +19,7 @@ import {
   lookupQuestionCache,
   nowUtc8,
   saveCachedSession,
+  saveNotices,
   upsertPendingTask,
   upsertQuestionCache,
 } from './store';
@@ -358,8 +360,42 @@ export default {
 
       // 看板全量数据接口 (兼容 /api/dashboard 与 /api/data)
       if ((url.pathname === '/api/dashboard' || url.pathname === '/api/data') && request.method === 'GET') {
-        const data = await getDashboardData(env);
+        let data = await getDashboardData(env);
+        // 若通知箱尚未拉取过，触发即时拉取并持久化
+        if ((!data.notices || data.notices.length === 0) && (env.CHAOXING_PHONE || env.PHONE)) {
+          const phone = env.CHAOXING_PHONE || env.PHONE || '';
+          const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+          let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
+          if (!session && password) {
+            session = await login(phone, password);
+            if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+          }
+          if (session) {
+            const list = await fetchNoticeList(session, 20);
+            if (list.length > 0) {
+              await saveNotices(env, list);
+              data = await getDashboardData(env);
+            }
+          }
+        }
         return corsJson(data);
+      }
+
+      // 手动刷新或抓取超星通知中心消息
+      if ((url.pathname === '/api/notices/refresh' || url.pathname === '/api/notices') && (request.method === 'GET' || request.method === 'POST')) {
+        const phone = env.CHAOXING_PHONE || env.PHONE || '';
+        const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+        let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
+        if (!session && password) {
+          session = await login(phone, password);
+          if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+        }
+        if (!session) {
+          return corsJson({ success: false, msg: '未获取到有效超星会话' }, 401);
+        }
+        const notices = await fetchNoticeList(session, 20);
+        const count = await saveNotices(env, notices);
+        return corsJson({ success: true, count, notices, time: nowUtc8() });
       }
 
       // 按需立即发送一次汇总简报通知
@@ -616,6 +652,17 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
     }
   }
 
+  // 抓取超星通知箱消息并持久化到 D1 (涵盖班级通知、随堂测验与新作业)
+  let noticesCount = 0;
+  try {
+    const noticeList = await fetchNoticeList(session, 20);
+    if (noticeList.length > 0) {
+      noticesCount = await saveNotices(env, noticeList);
+    }
+  } catch (err: any) {
+    console.warn(`[handleEdgeHeartbeat] 抓取通知列表异常: ${err?.message || err}`);
+  }
+
   return {
     success: true,
     time: nowUtc8(),
@@ -623,5 +670,6 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
     coursesCount: courses.length,
     signsExecuted,
     homeworkCoursesDetected,
+    noticesCount,
   };
 }

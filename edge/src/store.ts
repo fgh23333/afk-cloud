@@ -293,3 +293,132 @@ export async function logExecution(
     // ignore
   }
 }
+
+/**
+ * 保存超星通知列表至 D1 (联动自动登记作业与测验到待办任务 pending_tasks)
+ */
+export async function saveNotices(
+  env: EdgeEnv,
+  notices: Array<{
+    idCode: string;
+    title: string;
+    createrName: string;
+    sendTime: string;
+    content: string;
+    tag?: string;
+    sourceType?: number;
+    rawJson?: string;
+    examInfo?: {
+      examId: string;
+      title: string;
+      courseId: string;
+      courseName: string;
+      classId: string;
+      url: string;
+      startTime: string;
+      endTime: string;
+      isExpired: boolean;
+    };
+    workInfo?: {
+      workId: string;
+      title: string;
+      courseId: string;
+      courseName: string;
+      classId: string;
+      url: string;
+      startTime: string;
+      endTime: string;
+    };
+  }>
+): Promise<number> {
+  if (!env.DB || notices.length === 0) return 0;
+  const ts = nowUtc8();
+  let savedCount = 0;
+
+  for (const n of notices) {
+    if (!n.idCode) continue;
+    try {
+      await env.DB.prepare(
+        `INSERT INTO notices (
+           id_code, title, creater_name, send_time, content, tag, source_type, raw_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id_code) DO UPDATE SET
+           title = excluded.title,
+           content = excluded.content,
+           raw_json = excluded.raw_json,
+           updated_at = excluded.updated_at`
+      )
+        .bind(
+          n.idCode,
+          n.title,
+          n.createrName,
+          n.sendTime,
+          n.content,
+          n.tag || '',
+          n.sourceType || 0,
+          n.rawJson || JSON.stringify(n),
+          ts
+        )
+        .run();
+      savedCount++;
+
+      // 如果通知内包含作业，联动写入待办作业队列 pending_tasks
+      if (n.workInfo && n.workInfo.courseId && n.workInfo.classId) {
+        await upsertPendingTask(env, {
+          taskId: `chaoxing-notice-work-${n.workInfo.workId}-${n.workInfo.classId}`,
+          platform: 'chaoxing',
+          courseId: n.workInfo.courseId,
+          classId: n.workInfo.classId,
+          courseName: n.workInfo.courseName,
+          title: n.workInfo.title,
+          deadline: n.workInfo.endTime || '',
+          payload: {
+            url: n.workInfo.url,
+            idCode: n.idCode,
+            type: 'homework_notice',
+          },
+        });
+      }
+
+      // 如果通知内包含未截止考试/测验，联动写入 pending_tasks 方便监控与作答
+      if (n.examInfo && n.examInfo.courseId && n.examInfo.classId && !n.examInfo.isExpired) {
+        await upsertPendingTask(env, {
+          taskId: `chaoxing-notice-exam-${n.examInfo.examId}-${n.examInfo.classId}`,
+          platform: 'chaoxing',
+          courseId: n.examInfo.courseId,
+          classId: n.examInfo.classId,
+          courseName: n.examInfo.courseName,
+          title: `[测验] ${n.examInfo.title}`,
+          deadline: n.examInfo.endTime || '',
+          payload: {
+            url: n.examInfo.url,
+            idCode: n.idCode,
+            type: 'exam_notice',
+            startTime: n.examInfo.startTime,
+          },
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return savedCount;
+}
+
+/**
+ * 从 D1 查询最近通知
+ */
+export async function getNoticesFromD1(env: EdgeEnv, limit = 30): Promise<Array<any>> {
+  if (!env.DB) return [];
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT id_code, title, creater_name, send_time, content, tag, source_type, raw_json FROM notices ORDER BY send_time DESC LIMIT ?'
+    )
+      .bind(limit)
+      .all<any>();
+    return rows.results || [];
+  } catch {
+    return [];
+  }
+}

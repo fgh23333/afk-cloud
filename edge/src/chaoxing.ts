@@ -389,3 +389,191 @@ export async function performSign(
     return `[签到异常] ${e?.message || e}`;
   }
 }
+
+export interface ChaoxingNoticeItem {
+  idCode: string;
+  title: string;
+  createrName: string;
+  sendTime: string;
+  content: string;
+  tag?: string;
+  sourceType?: number;
+  rawJson?: string;
+  examInfo?: {
+    examId: string;
+    title: string;
+    courseId: string;
+    courseName: string;
+    classId: string;
+    url: string;
+    startTime: string;
+    endTime: string;
+    isExpired: boolean;
+  };
+  workInfo?: {
+    workId: string;
+    title: string;
+    courseId: string;
+    courseName: string;
+    classId: string;
+    url: string;
+    startTime: string;
+    endTime: string;
+  };
+}
+
+/**
+ * 抓取超星通知中心消息列表（包含全量班级通知、随堂考试/测验、新作业发布通知）
+ */
+export async function fetchNoticeList(session: UserSession, limit = 20): Promise<ChaoxingNoticeItem[]> {
+  const url = 'https://notice.chaoxing.com/pc/notice/getNoticeList';
+  const body = new URLSearchParams({
+    type: '2', // 我接收的通知
+    notice_type: '',
+    lastValue: '',
+    sort: '0',
+    folderUUID: '',
+    kw: '',
+    startTime: '',
+    endTime: '',
+    gKw: '',
+    gName: '',
+    year: '',
+    tag: '',
+    fidsCode: '',
+    queryFolderNoticePrevYear: '',
+    filterSenderPuids: '',
+    filterTags: '',
+  });
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Referer: 'https://notice.chaoxing.com/pc/notice/myNotice',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    });
+
+    if (!res.ok) return [];
+
+    const data: any = await res.json().catch(() => ({}));
+    const rawList: any[] = data.notices?.list || [];
+    const notices: ChaoxingNoticeItem[] = [];
+
+    for (const n of rawList.slice(0, limit)) {
+      let examInfo: ChaoxingNoticeItem['examInfo'] | undefined = undefined;
+      let workInfo: ChaoxingNoticeItem['workInfo'] | undefined = undefined;
+
+      // 解析附件中的随堂考试或作业
+      if (n.attachment) {
+        try {
+          const attachList = JSON.parse(n.attachment);
+          const att = attachList.find(
+            (a: any) =>
+              a.att_web &&
+              (a.att_web.examOrWork === 'exam' || a.att_web.examOrWork === 'work')
+          );
+          if (att && att.att_web) {
+            const w = att.att_web;
+            let startTime = '';
+            let endTime = '';
+            let courseName = '';
+
+            if (n.extendParam && n.extendParam.cparams) {
+              try {
+                const cparams =
+                  typeof n.extendParam.cparams === 'string'
+                    ? JSON.parse(n.extendParam.cparams)
+                    : n.extendParam.cparams;
+                const cnt = cparams.funConfig?.content || {};
+                if (cnt.startTime) {
+                  startTime = new Date(Number(cnt.startTime)).toLocaleString('zh-CN', {
+                    timeZone: 'Asia/Shanghai',
+                  });
+                }
+                if (cnt.endTime) {
+                  endTime = new Date(Number(cnt.endTime)).toLocaleString('zh-CN', {
+                    timeZone: 'Asia/Shanghai',
+                  });
+                }
+                courseName = cnt.courseName || '';
+              } catch {
+                // ignore
+              }
+            }
+
+            let isExpired = false;
+            if (endTime) {
+              const endMs = new Date(endTime).getTime();
+              if (!isNaN(endMs) && endMs < Date.now()) {
+                isExpired = true;
+              }
+            }
+
+            const itemTitle = w.title || n.title || '在线评测';
+            const courseIdStr = String(w.courseId || '');
+            const classIdStr = String(w.clazzId || '');
+            const targetUrl = w.url || '';
+
+            if (w.examOrWork === 'exam') {
+              examInfo = {
+                examId: String(w.examOrWorkId || att.examOrTextId || ''),
+                title: itemTitle,
+                courseId: courseIdStr,
+                courseName: courseName || `课程_${courseIdStr}`,
+                classId: classIdStr,
+                url: targetUrl,
+                startTime: startTime || '近期',
+                endTime: endTime || '无截止时间',
+                isExpired,
+              };
+            } else if (w.examOrWork === 'work') {
+              workInfo = {
+                workId: String(w.examOrWorkId || att.examOrTextId || ''),
+                title: itemTitle,
+                courseId: courseIdStr,
+                courseName: courseName || `课程_${courseIdStr}`,
+                classId: classIdStr,
+                url: targetUrl,
+                startTime: startTime || '近期',
+                endTime: endTime || '无截止时间',
+              };
+            }
+          }
+        } catch {
+          // ignore JSON parse error
+        }
+      }
+
+      const idCode = String(n.idCode || n.id || '');
+      const sendTime =
+        n.sendTime ||
+        (n.insertTime
+          ? new Date(Number(n.insertTime)).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+          : '近期');
+
+      const noticeItem: ChaoxingNoticeItem = {
+        idCode,
+        title: n.title || '无标题通知',
+        createrName: n.createrName || '通知助手',
+        sendTime,
+        content: n.content ? String(n.content).replace(/[\r\n]+/g, ' ').trim() : '',
+        tag: n.tag || '',
+        sourceType: n.sourceType || 0,
+        examInfo,
+        workInfo,
+      };
+      noticeItem.rawJson = JSON.stringify(noticeItem);
+      notices.push(noticeItem);
+    }
+
+    return notices;
+  } catch {
+    return [];
+  }
+}

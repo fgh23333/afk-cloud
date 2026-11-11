@@ -45,6 +45,7 @@ export interface DashboardData {
     aiSolved: boolean;
   }>;
   exams?: Array<{
+    examId?: string;
     title: string;
     courseName: string;
     startTime: string;
@@ -109,16 +110,18 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   if (!env.DB) return empty;
 
   try {
-    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes] = await env.DB.batch([
+    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
       env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
       env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type = 'signin'"),
+      env.DB.prepare('SELECT id_code, title, creater_name, send_time, content, tag, source_type, raw_json FROM notices ORDER BY send_time DESC LIMIT 30'),
     ]);
 
     const tasks = (tasksRes.results || []) as DashboardData['tasks'];
     const logs = (logsRes.results || []) as DashboardData['logs'];
+    const rawNotices = (noticesRes?.results || []) as Array<any>;
     const now = Date.now();
     const sessions = ((sessionsRes.results || []) as Array<any>).map((s) => ({
       platform: s.platform,
@@ -170,6 +173,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
 
     const signinHistory: NonNullable<DashboardData['signinHistory']> = [];
     const notices: NonNullable<DashboardData['notices']> = [];
+    const exams: NonNullable<DashboardData['exams']> = [];
 
     for (const log of logs) {
       if (log.event_type === 'signin') {
@@ -180,13 +184,48 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           address: log.summary.includes('(') ? log.summary.slice(log.summary.indexOf('(') + 1, -1) : '-',
           result: log.summary.includes('成功') ? '签到成功' : '已提交',
         });
-      } else if (log.event_type === 'homework_detected' || log.event_type === 'homework_solved') {
-        notices.push({
-          title: log.summary,
-          createrName: 'AFK 云端守护',
-          sendTime: log.created_at,
-          content: log.summary,
-        });
+      }
+    }
+
+    for (const n of rawNotices) {
+      notices.push({
+        title: n.title,
+        createrName: n.creater_name,
+        sendTime: n.send_time,
+        content: n.content,
+      });
+
+      if (n.raw_json) {
+        try {
+          const parsed = JSON.parse(n.raw_json);
+          if (parsed.examInfo) {
+            exams.push({
+              examId: parsed.examInfo.examId,
+              title: parsed.examInfo.title,
+              courseName: parsed.examInfo.courseName,
+              startTime: parsed.examInfo.startTime,
+              endTime: parsed.examInfo.endTime,
+              isExpired: !!parsed.examInfo.isExpired,
+              url: parsed.examInfo.url,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // 若通知箱为空，使用日志降级兜底展示
+    if (notices.length === 0) {
+      for (const log of logs) {
+        if (log.event_type === 'homework_detected' || log.event_type === 'homework_solved') {
+          notices.push({
+            title: log.summary,
+            createrName: 'AFK 云端守护',
+            sendTime: log.created_at,
+            content: log.summary,
+          });
+        }
       }
     }
 

@@ -1,6 +1,7 @@
 import { Agent, callable } from 'agents';
 import {
   checkHomeworkPendingCourses,
+  fetchNoticeList,
   getCourses,
   login,
   performSign,
@@ -9,7 +10,7 @@ import {
   UserSession,
 } from './chaoxing';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
-import { getCachedSession, logExecution, nowUtc8, saveCachedSession } from './store';
+import { getCachedSession, logExecution, nowUtc8, saveCachedSession, saveNotices } from './store';
 
 export interface SignState {
   lastCheckedAt?: string;
@@ -35,6 +36,7 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
     msg: string;
     signsFound: number;
     homeworkFound: number;
+    noticesFound?: number;
     time: string;
   }> {
     const phone = this.env.CHAOXING_PHONE || this.env.PHONE || '';
@@ -176,6 +178,17 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
       console.warn(`[SignAgent] 作业红点探测异常: ${err?.message || err}`);
     }
 
+    // 5. 抓取超星通知箱消息并持久化到 D1 (涵盖班级通知、随堂测验与新作业)
+    let noticesFound = 0;
+    try {
+      const noticeList = await fetchNoticeList(currentSession, 20);
+      if (noticeList.length > 0) {
+        noticesFound = await saveNotices(this.env, noticeList);
+      }
+    } catch (err: any) {
+      console.warn(`[SignAgent] 通知箱抓取异常: ${err?.message || err}`);
+    }
+
     this.setState({
       lastCheckedAt: nowUtc8(),
       lastSignAt: signsHandled > 0 ? nowUtc8() : this.state.lastSignAt,
@@ -184,9 +197,10 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
 
     return {
       success: true,
-      msg: `巡检完成: 处理签到 ${signsHandled} 次, 登记作业 ${homeworkCount} 份`,
+      msg: `巡检完成: 处理签到 ${signsHandled} 次, 登记作业 ${homeworkCount} 份, 同步通知 ${noticesFound} 条`,
       signsFound: signsHandled,
       homeworkFound: homeworkCount,
+      noticesFound,
       time: nowUtc8(),
     };
   }
