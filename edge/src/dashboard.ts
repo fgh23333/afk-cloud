@@ -733,8 +733,8 @@ export function renderDashboardHtml(): string {
       if (!timeStr) return null;
       const s = String(timeStr).trim();
       if (!s || s === '无截止时间' || s === '无' || s === '近期' || s === '无截止限制') return null;
-      if (/^\d{10,13}$/.test(s)) return Number(s.padEnd(13, '0'));
-      const match = s.match(/(?:(\d{4})[-/年])?(\d{1,2})[-/月](\d{1,2})[日号]?\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+      if (/^[0-9]{10,13}$/.test(s)) return Number(s.padEnd(13, '0'));
+      const match = s.match(/(?:([0-9]{4})[-/年])?([0-9]{1,2})[-/月]([0-9]{1,2})[日号]?[ \t]+([0-9]{1,2}):([0-9]{1,2})(?::([0-9]{1,2}))?/);
       if (match) {
         const y = match[1] ? Number(match[1]) : new Date().getFullYear();
         const m = Number(match[2]);
@@ -745,7 +745,7 @@ export function renderDashboardHtml(): string {
         const pad = function(n) { return String(n).padStart(2, '0'); };
         return Date.parse(y + '-' + pad(m) + '-' + pad(d) + 'T' + pad(hh) + ':' + pad(mm) + ':' + pad(ss) + '+08:00');
       }
-      const norm = s.replace(/年|月/g, '-').replace(/日|号/g, '').replace(/\//g, '-').trim();
+      const norm = s.replace(/年|月/g, '-').replace(/日|号/g, '').split('/').join('-').trim();
       const ms = Date.parse(norm);
       return isNaN(ms) ? Date.parse(norm + ' GMT+0800') : ms;
     }
