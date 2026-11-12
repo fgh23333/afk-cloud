@@ -1,4 +1,5 @@
 import { ChaoxingCookies } from './session';
+import { MOBILE_UA } from './signin';
 
 function buildCookieString(cookies: Record<string, any>): string {
   return Object.entries(cookies)
@@ -89,7 +90,7 @@ export async function submitPhotoSign(options: {
   const res = await fetch(url, {
     headers: {
       Cookie: buildCookieString(cookies),
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+      'User-Agent': MOBILE_UA,
     },
   });
 

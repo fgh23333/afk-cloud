@@ -24,6 +24,9 @@ export interface SignLocation {
 }
 
 // 默认上海海洋大学预设经纬度坐标池（开箱即用方便同校同学，亦可通过环境变量 CHAOXING_SIGN_LON / LAT / ADDRESS 覆盖）
+export const CHAOXING_MOBILE_UA =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 ChaoXingStudy/ChaoXingStudy_3_5.3.4_ios_phone_202011241926_118 (@Kalimdor)_13264426514748197793';
+
 export const DEFAULT_SIGN_LOCATIONS: SignLocation[] = [
   { lon: '121.898500', lat: '30.883500', address: '上海市浦东新区沪城环路999号上海海洋大学信息学院' },
   { lon: '121.904800', lat: '30.889200', address: '上海市浦东新区沪城环路999号上海海洋大学信息学院' },
@@ -207,77 +210,93 @@ export async function getCourses(session: UserSession): Promise<Course[]> {
 }
 
 /**
- * 扫描指定课程的签到活动（双通道：student/activelist 权威优先，失败才 taskactivelist 兜底）
+ * 扫描指定课程的签到活动（双通道：taskactivelist 移动接口抗封抗风控优先，student/activelist 兜底）
  */
 export async function scanCourseActivities(course: Course, session: UserSession): Promise<any[]> {
   const activities: any[] = [];
   const seenIds = new Set<string>();
 
-  // 1. 通道一：student/activelist（超星当前版本最权威接口，实测 100% 返回进行中活动）
-  try {
-    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
-    const res = await fetch(url, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
-      },
-    });
-    const json: any = await res.json().catch(() => ({}));
-    const list = json.data?.activeList || [];
-    for (const item of list) {
-      const id = String(item.id);
-      if (seenIds.has(id)) continue;
-      const isSign = item.activeType === 2 || item.type === 2 ||
-        (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
-        (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
-      // status: 1 代表正在进行中
-      if (isSign && item.status === 1) {
-        seenIds.add(id);
-        activities.push({
-          id,
-          name: item.nameOne || '签到',
-          nameOne: item.nameOne || '签到',
-          otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
-          status: item.status,
-          activeType: item.activeType || item.type || 2,
-        });
-      }
-    }
-    // 主通道返回成功（即使当前课程暂无活动，也已权威确认），直接返回，避免无效冗余子请求超限
-    return activities;
-  } catch {
-    // 通道一网络异常时，才进入通道二兜底
-  }
-
-  // 2. 通道二：taskactivelist 移动接口兜底
+  // 1. 首选通道：taskactivelist 移动端原生接口（抗封控能力极强，完全规避“请勿频繁操作”，需携带完整 ChaoXingStudy 客户端标识）
   try {
     const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${session._uid}`;
     const res = await fetch(url, {
       headers: {
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'User-Agent': CHAOXING_MOBILE_UA,
       },
     });
     const json: any = await res.json().catch(() => ({}));
-    const list = json.activeList || [];
-    for (const item of list) {
-      const id = String(item.id);
-      if (seenIds.has(id)) continue;
-      const isSign = item.activeType === 2 || (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到'));
-      if (isSign && item.status === 1) {
-        seenIds.add(id);
-        activities.push({
-          id,
-          name: item.nameOne || '签到',
-          nameOne: item.nameOne || '签到',
-          otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
-          status: item.status,
-          activeType: item.activeType || 2,
-        });
+    if (json?.result === 1 && Array.isArray(json?.activeList)) {
+      for (const item of json.activeList) {
+        const id = String(item.id);
+        if (seenIds.has(id)) continue;
+        const isSign =
+          item.activeType === 2 ||
+          item.type === 2 ||
+          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
+          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
+        if (isSign && item.status === 1) {
+          seenIds.add(id);
+          activities.push({
+            id,
+            name: item.nameOne || '签到',
+            nameOne: item.nameOne || '签到',
+            otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
+            status: item.status,
+            activeType: item.activeType || 2,
+            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : 0,
+          });
+        }
       }
+      return activities;
     }
-  } catch {
-    // 通道二出错
+    if (json?.errorMsg) {
+      console.warn(`[scanCourseActivities] taskactivelist 响应提示: ${json.errorMsg} (课程: ${course.courseName})`);
+    }
+  } catch (err: any) {
+    console.warn(`[scanCourseActivities] taskactivelist 异常: ${err?.message || err}，尝试降级通道`);
+  }
+
+  // 2. 备选通道：student/activelist 接口兜底
+  try {
+    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
+    const res = await fetch(url, {
+      headers: {
+        Cookie: session.cookie,
+        'User-Agent': CHAOXING_MOBILE_UA,
+      },
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (json?.result === 1 && Array.isArray(json?.data?.activeList)) {
+      for (const item of json.data.activeList) {
+        const id = String(item.id);
+        if (seenIds.has(id)) continue;
+        const isSign =
+          item.activeType === 2 ||
+          item.type === 2 ||
+          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
+          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
+        // status: 1 代表正在进行中
+        if (isSign && item.status === 1) {
+          seenIds.add(id);
+          activities.push({
+            id,
+            name: item.nameOne || '签到',
+            nameOne: item.nameOne || '签到',
+            otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
+            status: item.status,
+            activeType: item.activeType || item.type || 2,
+            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : 0,
+          });
+        }
+      }
+      return activities;
+    }
+    if (json?.errorMsg) {
+      console.warn(`[scanCourseActivities] student/activelist 提示: ${json.errorMsg} (课程: ${course.courseName})`);
+    }
+  } catch (err: any) {
+    console.warn(`[scanCourseActivities] student/activelist 异常: ${err?.message || err}`);
   }
 
   return activities;
@@ -323,7 +342,7 @@ export async function getPPTActiveInfo(activeId: string, session: UserSession): 
     const res = await fetch(`https://mobilelearn.chaoxing.com/v2/apis/active/getPPTActiveInfo?activeId=${activeId}`, {
       headers: {
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'User-Agent': CHAOXING_MOBILE_UA,
       },
     });
     const json: any = await res.json().catch(() => ({}));
@@ -415,7 +434,7 @@ export async function performSign(
     await fetch(preUrl, {
       headers: {
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'User-Agent': CHAOXING_MOBILE_UA,
       },
     });
   } catch {
@@ -436,7 +455,7 @@ export async function performSign(
         const res = await fetch(stuSignUrl, {
           headers: {
             Cookie: session.cookie,
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+            'User-Agent': CHAOXING_MOBILE_UA,
           },
         });
         const text = await res.text();
@@ -471,7 +490,7 @@ export async function performSign(
     const res = await fetch(stuSignUrl, {
       headers: {
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'User-Agent': CHAOXING_MOBILE_UA,
       },
     });
     const text = await res.text();
@@ -506,7 +525,7 @@ export async function performSign(
     const mRes = await fetch(mobileUrl, {
       headers: {
         Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'User-Agent': CHAOXING_MOBILE_UA,
       },
     });
     const mText = await mRes.text();
