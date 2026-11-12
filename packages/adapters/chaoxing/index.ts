@@ -27,6 +27,7 @@ export * from './notice';
 export * from './photo';
 export * from './session';
 export * from './signin';
+export * from './webim';
 
 export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly name = 'chaoxing' as const;

@@ -204,3 +204,45 @@ export async function triggerCloudBurst(options: {
 
   return { command: cmd, output: (stdout || '') + (stderr || '') };
 }
+
+/**
+ * 将高负载计算或超量任务转发至 Cloud Run Service 备用无服务器沙箱 (支持 HMAC 签名)
+ */
+export async function forwardTaskToCloudRun(options: {
+  cloudRunUrl: string;
+  secret: string;
+  task: {
+    jobId: string;
+    platform: string;
+    taskUrl: string;
+    mode?: 'draft' | 'submit';
+    deadline?: string;
+  };
+  timeoutMs?: number;
+}): Promise<{ success: boolean; status: number; data: any }> {
+  const { signRequest } = await import('./request-signing');
+  const url = `${options.cloudRunUrl.replace(/\/+$/, '')}/task`;
+  const body = JSON.stringify(options.task);
+  const signatureHeaders = await signRequest({
+    secret: options.secret,
+    method: 'POST',
+    pathWithQuery: '/task',
+    body,
+  });
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...signatureHeaders,
+    },
+    signal: AbortSignal.timeout(options.timeoutMs || 30000),
+  });
+
+  const json: any = await res.json().catch(() => ({}));
+  return {
+    success: res.ok,
+    status: res.status,
+    data: json,
+  };
+}

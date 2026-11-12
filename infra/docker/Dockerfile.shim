@@ -1,0 +1,32 @@
+FROM node:20-slim
+
+# 安装系统级编译工具链与 Python3 (供代码评测沙箱运行)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    g++ \
+    gcc \
+    python3 \
+    tzdata \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV TZ=Asia/Shanghai
+ENV SHIM_HOST=0.0.0.0
+ENV PORT=8080
+
+WORKDIR /app
+
+COPY package.json pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
+COPY packages ./packages
+
+# 安装核心依赖
+RUN corepack enable && pnpm install --prod=false
+
+# 暴露 Cloud Run 默认容器端口
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["npx", "tsx", "packages/shim/src/index.ts"]
