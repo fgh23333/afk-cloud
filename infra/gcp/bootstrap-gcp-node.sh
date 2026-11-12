@@ -23,6 +23,30 @@ sudo sysctl -w vm.vfs_cache_pressure=50
 echo -e "vm.swappiness=10\nvm.vfs_cache_pressure=50" | sudo tee /etc/sysctl.d/99-afk-tuning.conf
 sudo sysctl -p /etc/sysctl.d/99-afk-tuning.conf
 
+# 1.6 网络保活 (TCP Keepalive) 与 SSH 极速免卡顿调优 (彻底根治 NAT 超时断连与 DNS 逆向解析慢)
+echo "🌐 正在配置网络保活与 SSH 极速响应..."
+cat << 'EOF' | sudo tee /etc/sysctl.d/99-network-keepalive.conf
+net.ipv4.tcp_keepalive_time = 30
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 5
+EOF
+sudo sysctl -p /etc/sysctl.d/99-network-keepalive.conf
+
+cat << 'EOF' | sudo tee /etc/ssh/sshd_config.d/99-fast-keepalive.conf
+ClientAliveInterval 15
+ClientAliveCountMax 4
+TCPKeepAlive yes
+UseDNS no
+GSSAPIAuthentication no
+EOF
+if sudo sshd -t; then
+  sudo systemctl reload ssh || true
+fi
+
+# 开启 systemd 用户会话保活 (Linger)，防止 SSH 退出后后台守护被杀
+sudo loginctl enable-linger "${USER}" 2>/dev/null || true
+sudo loginctl enable-linger root 2>/dev/null || true
+
 # 关停小内存机型不适用的重型监控套件
 if systemctl is-active --quiet google-cloud-ops-agent 2>/dev/null; then
   echo "🛑 正在停用高内存消耗的 google-cloud-ops-agent..."
@@ -133,6 +157,35 @@ EOF"
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now afk-shim
+
+# 8.5 注册并常驻守护 Antigravity CLI Remote Control 远程控制服务
+if [ -f /root/.local/bin/agy ] || [ -f "${HOME}/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
+  AGY_EXEC=$(command -v agy || ([ -f /root/.local/bin/agy ] && echo "/root/.local/bin/agy") || echo "${HOME}/.local/bin/agy")
+  echo "🤖 正在注册并守护 Antigravity Remote Control 常驻服务..."
+  sudo bash -c "cat << 'EOF' > /etc/systemd/system/antigravity-remote-control.service
+[Unit]
+Description=Antigravity CLI Remote Control Daemon
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment=NODE_OPTIONS=--max-old-space-size=384
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.local/bin
+ExecStart=${AGY_EXEC} remote-control serve
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now antigravity-remote-control.service || true
+fi
 
 # 9. 状态自检与 Cloudflare OAuth2 说明
 echo "======================================================"

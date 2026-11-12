@@ -81,3 +81,33 @@ Google Cloud 免费层 `e2-micro` 只有 1GB 物理内存与 0.25 核心基准 C
 4. **进程组彻底杀灭与孤儿防泄漏**：
    - 严禁多实例挂起孤儿 `agy` 会话。
    - 关闭 Chromium 时使用 `process.kill(-pid, 'SIGKILL')` 杀死整个进程树，避免孤儿渲染进程持续霸占内存。
+
+---
+
+## 7. 网络保活 (Keepalive) 与 SSH 极速登录规范 (防掉线与无感直连)
+
+针对国内直连 Google Cloud 跨境网络容易受 NAT 超时丢包与 DNS 逆向解析卡顿的问题，必须配置以下三级网络护盾：
+
+1. **内核级 TCP Keepalive 秒级心跳**：
+   - Linux 默认 `tcp_keepalive_time=7200`（2 小时），国内路由器或 GFW 在连接闲置 60~120 秒后会清除 NAT 会话状态表，导致 `agy remote-control` 的 WebRTC 信令断连。
+   - 必须配置：
+     ```ini
+     net.ipv4.tcp_keepalive_time = 30
+     net.ipv4.tcp_keepalive_intvl = 10
+     net.ipv4.tcp_keepalive_probes = 5
+     ```
+   - 固化于 `/etc/sysctl.d/99-network-keepalive.conf`，每 30 秒自动发送探针保持路由表活跃，彻底解决 Remote Control 掉线问题。
+2. **SSH 秒级无感直连与会话保活**：
+   - 默认 `sshd` 会执行反向 DNS 查询（`UseDNS yes`），国内访问经常触发 5~10 秒 DNS 超时假死；闲置超过 1 分钟容易 Broken Pipe。
+   - 在 `/etc/ssh/sshd_config.d/99-fast-keepalive.conf` 固化：
+     ```ini
+     ClientAliveInterval 15
+     ClientAliveCountMax 4
+     TCPKeepAlive yes
+     UseDNS no
+     GSSAPIAuthentication no
+     ```
+3. **Remote Control 必须由 systemd 纳管**：
+   - 严禁以普通后台进程挂载（会因缺少会话或 session 退出而失效）。
+   - 开启用户会话持久化：`sudo loginctl enable-linger <user>`。
+   - 统一由 `/etc/systemd/system/antigravity-remote-control.service` 管理，配置 `Restart=always`，确保异常秒级拉起、开机自启。
