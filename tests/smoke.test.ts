@@ -372,7 +372,30 @@ async function runAllTests() {
     console.log(' ✅ [Test 6/6 PASS] Edge Fail-Closed 访问控制、Cookie/Bearer 鉴权与 D1 迁移规范验证通过');
   }
 
-  console.log(`\n🎉 全部 6 项核心自检与安全链路测试 100% 通过！\n`);
+  // --- Test 7: 超星移动端防风控请求头与 UA 契约验证 ---
+  {
+    const { CHAOXING_MOBILE_UA } = await import('../edge/src/chaoxing');
+    const { MOBILE_UA } = await import('../packages/adapters/chaoxing/signin');
+
+    assert.ok(
+      CHAOXING_MOBILE_UA.includes('ChaoXingStudy'),
+      'Edge 端移动 UA 必须包含 ChaoXingStudy 原生客户端标识以绕过 anti-bot 拦截'
+    );
+    assert.ok(
+      MOBILE_UA.includes('ChaoXingStudy'),
+      'Adapter 端移动 UA 必须包含 ChaoXingStudy 原生客户端标识'
+    );
+
+    const chaoxingEdgeCode = fs.readFileSync(path.join(__dirname, '../edge/src/chaoxing.ts'), 'utf8');
+    assert.ok(
+      !chaoxingEdgeCode.includes("'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)'"),
+      'Edge 移动端调用严禁使用不带 ChaoXingStudy 的裸 iPhone UA'
+    );
+
+    console.log(' ✅ [Test 7/7 PASS] 超星移动端防风控请求头与 UA 契约验证通过');
+  }
+
+  console.log(`\n🎉 全部 7 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

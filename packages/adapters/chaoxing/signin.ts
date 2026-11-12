@@ -31,11 +31,11 @@ export interface ChaoxingActivity {
   ifphoto?: number;
 }
 
-const MOBILE_UA =
+export const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 ChaoXingStudy/ChaoXingStudy_3_5.3.4_ios_phone_202011241926_118 (@Kalimdor)_13264426514748197793';
 
 /**
- * 扫描单门课程的有效签到活动 (双通道：student/activelist 优先，taskactivelist 兜底)
+ * 扫描单门课程的有效签到活动 (双通道：taskactivelist 移动接口抗封控优先，student/activelist 兜底)
  */
 export async function scanCourseActivities(
   course: CourseInfo,
@@ -44,43 +44,7 @@ export async function scanCourseActivities(
   const activities: ChaoxingActivity[] = [];
   const seenIds = new Set<string>();
 
-  // 1. 通道一：student/activelist 接口
-  try {
-    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
-    const res = await fetch(url, {
-      headers: {
-        Cookie: cookies.cookieStr,
-        'User-Agent': MOBILE_UA,
-      },
-    });
-    const json: any = await res.json().catch(() => ({}));
-    const list = json.data?.activeList || [];
-    for (const item of list) {
-      const id = String(item.id);
-      if (seenIds.has(id)) continue;
-      const isSign =
-        item.activeType === 2 ||
-        item.type === 2 ||
-        (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
-        (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
-      if (isSign && item.status === 1) {
-        seenIds.add(id);
-        activities.push({
-          id,
-          name: item.nameOne || '签到',
-          courseId: course.courseId,
-          classId: course.classId,
-          otherId: item.otherId !== undefined ? Number(item.otherId) : undefined,
-          ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : undefined,
-        });
-      }
-    }
-    return activities;
-  } catch {
-    // 降级使用备用接口
-  }
-
-  // 2. 通道二：taskactivelist 移动接口
+  // 1. 首选通道：taskactivelist 移动接口 (抗封控能力强，不会触发“请勿频繁操作”)
   try {
     const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${cookies._uid}`;
     const res = await fetch(url, {
@@ -90,23 +54,65 @@ export async function scanCourseActivities(
       },
     });
     const json: any = await res.json().catch(() => ({}));
-    const list = json.activeList || [];
-    for (const item of list) {
-      const id = String(item.id);
-      if (seenIds.has(id)) continue;
-      const isSign =
-        item.activeType === 2 || (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到'));
-      if (isSign && item.status === 1) {
-        seenIds.add(id);
-        activities.push({
-          id,
-          name: item.nameOne || '签到',
-          courseId: course.courseId,
-          classId: course.classId,
-          otherId: item.otherId !== undefined ? Number(item.otherId) : undefined,
-          ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : undefined,
-        });
+    if (json?.result === 1 && Array.isArray(json?.activeList)) {
+      for (const item of json.activeList) {
+        const id = String(item.id);
+        if (seenIds.has(id)) continue;
+        const isSign =
+          item.activeType === 2 ||
+          item.type === 2 ||
+          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
+          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
+        if (isSign && item.status === 1) {
+          seenIds.add(id);
+          activities.push({
+            id,
+            name: item.nameOne || '签到',
+            courseId: course.courseId,
+            classId: course.classId,
+            otherId: item.otherId !== undefined ? Number(item.otherId) : undefined,
+            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : undefined,
+          });
+        }
       }
+      return activities;
+    }
+  } catch {
+    // 降级使用备用接口
+  }
+
+  // 2. 备选通道：student/activelist 接口
+  try {
+    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
+    const res = await fetch(url, {
+      headers: {
+        Cookie: cookies.cookieStr,
+        'User-Agent': MOBILE_UA,
+      },
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (json?.result === 1 && Array.isArray(json?.data?.activeList)) {
+      for (const item of json.data.activeList) {
+        const id = String(item.id);
+        if (seenIds.has(id)) continue;
+        const isSign =
+          item.activeType === 2 ||
+          item.type === 2 ||
+          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
+          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
+        if (isSign && item.status === 1) {
+          seenIds.add(id);
+          activities.push({
+            id,
+            name: item.nameOne || '签到',
+            courseId: course.courseId,
+            classId: course.classId,
+            otherId: item.otherId !== undefined ? Number(item.otherId) : undefined,
+            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : undefined,
+          });
+        }
+      }
+      return activities;
     }
   } catch {
     // ignore
