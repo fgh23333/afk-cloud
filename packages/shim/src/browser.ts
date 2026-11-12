@@ -88,8 +88,12 @@ export async function stopManagedBrowser(): Promise<{ status: string }> {
     if (process.platform === 'win32' && proc.pid) {
       const { exec } = await import('child_process');
       exec(`taskkill /pid ${proc.pid} /T /F`, () => {});
-    } else {
-      proc.kill('SIGTERM');
+    } else if (proc.pid) {
+      try {
+        process.kill(-proc.pid, 'SIGKILL');
+      } catch {
+        proc.kill('SIGKILL');
+      }
     }
   } catch (err: any) {
     console.warn(`[Browser Manager] 终止浏览器进程异常: ${err?.message || err}`);

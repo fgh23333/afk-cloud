@@ -16,6 +16,24 @@ export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y
 sudo apt-get install -y curl wget git build-essential apt-transport-https ca-certificates gnupg
 
+# 1.5 系统精简与 e2-micro (1GB RAM) 内存/Swap 调优（防止 IO 颠簸导致系统卡死）
+echo "🧠 正在优化内核参数与内存换页配置..."
+sudo sysctl -w vm.swappiness=10
+sudo sysctl -w vm.vfs_cache_pressure=50
+echo -e "vm.swappiness=10\nvm.vfs_cache_pressure=50" | sudo tee /etc/sysctl.d/99-afk-tuning.conf
+sudo sysctl -p /etc/sysctl.d/99-afk-tuning.conf
+
+# 关停小内存机型不适用的重型监控套件
+if systemctl is-active --quiet google-cloud-ops-agent 2>/dev/null; then
+  echo "🛑 正在停用高内存消耗的 google-cloud-ops-agent..."
+  sudo systemctl stop google-cloud-ops-agent || true
+  sudo systemctl disable google-cloud-ops-agent || true
+fi
+if systemctl is-active --quiet exim4 2>/dev/null; then
+  sudo systemctl stop exim4 || true
+  sudo systemctl disable exim4 || true
+fi
+
 # 2. 安装 Node.js 20 LTS 与 pnpm
 if ! command -v node >/dev/null 2>&1; then
   echo "📦 正在安装 Node.js 20 LTS..."
@@ -100,6 +118,7 @@ User=${USER}
 WorkingDirectory=${WORKSPACE_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=8788
+Environment=NODE_OPTIONS=--max-old-space-size=384
 EnvironmentFile=${WORKSPACE_DIR}/.env
 ExecStart=$(command -v pnpm) shim
 Restart=always

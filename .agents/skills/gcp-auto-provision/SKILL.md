@@ -62,3 +62,22 @@ gcloud compute ssh afk-node --zone=us-west1-a --command="curl -fsSL https://raw.
 在云端无桌面的 Linux 服务器上配置 Cloudflare 边缘与 Tunnel 时，采用 OAuth2 网页重定向与轮询机制完成授权：
 - **Wrangler 边缘授权**：在云端机器执行 `npx wrangler login`，终端将直接打印形如 `https://dash.cloudflare.com/oauth2/auth?...` 的 OAuth2 授权 URL。用户只需在本地电脑浏览器中打开该 URL 并点击“允许”，凭据即自动下发至云主机的 `~/.config/.wrangler/`。
 - **Cloudflare Tunnel 授权**：执行 `cloudflared tunnel login` 时，同样会生成 OAuth2 网页链接，在本地浏览器选择账号域名后即可自动下载 `cert.pem`。若使用临时测试隧道（`cloudflared tunnel --url ...`），则无需登录即可直接生成穿透域名。
+
+---
+
+## 6. e2-micro 极低内存 (1GB) 性能调优与防卡死规范
+
+Google Cloud 免费层 `e2-micro` 只有 1GB 物理内存与 0.25 核心基准 CPU，极易因频繁 Swap 换页引起磁盘 IO 堵塞（Load Average 飙升至 10+ 严重卡死）。必须严格遵守以下优化基线：
+
+1. **内核换页与缓存激进化调优**：
+   - 必须配置 `vm.swappiness=10`（避免过度使用慢速持久磁盘的 Swapfile）。
+   - 必须配置 `vm.vfs_cache_pressure=50`（保护目录与 inode 缓存）。
+   - 固化于 `/etc/sysctl.d/99-afk-tuning.conf`。
+2. **严禁在 1GB 机器上运行 Google Cloud Ops Agent**：
+   - `google-cloud-ops-agent`（包含 OpenTelemetry Collector 与 Fluent-Bit）每秒进行高频日志追踪与磁盘写入，常态消耗 100MB+ 内存并耗尽 Standard PD 的 IOPS 额度。
+   - 部署脚本中必须显式停用并禁用：`sudo systemctl stop google-cloud-ops-agent && sudo systemctl disable google-cloud-ops-agent`。
+3. **Node.js 内存硬顶限制**：
+   - 为后台守护进程与 agy 注入环境变量：`NODE_OPTIONS="--max-old-space-size=384"`，驱动 V8 引擎积极触发垃圾回收。
+4. **进程组彻底杀灭与孤儿防泄漏**：
+   - 严禁多实例挂起孤儿 `agy` 会话。
+   - 关闭 Chromium 时使用 `process.kill(-pid, 'SIGKILL')` 杀死整个进程树，避免孤儿渲染进程持续霸占内存。

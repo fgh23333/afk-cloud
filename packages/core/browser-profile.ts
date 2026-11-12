@@ -230,7 +230,18 @@ export function launchHeadlessBrowserWithProfile(options: {
     '--disable-blink-features=AutomationControlled',
     '--disable-dev-shm-usage',
     '--no-sandbox',
-    '--window-size=1440,900',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--renderer-process-limit=1',
+    '--js-flags=--max-old-space-size=128',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-translate',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--window-size=1280,720',
   ];
 
   if (isHeadless) {

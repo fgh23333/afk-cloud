@@ -223,11 +223,11 @@ async function processDraftTask(job: TaskJob): Promise<void> {
     return;
   }
 
-  // 1. 若为 Web 平台，先确认浏览器就绪
-  if (['chaoxing', 'pta', 'zhihuishu'].includes(job.platform.toLowerCase())) {
+  // 1. 若为 Web 平台 (PTA / 智慧树等需要真机渲染的平台)，先确认浏览器就绪 (超星走纯 HTTP 原生，不拉起重型浏览器)
+  if (['pta', 'zhihuishu'].includes(job.platform.toLowerCase())) {
     try {
-      await startManagedBrowser(job.platform, 30);
-      touchBrowser(30);
+      await startManagedBrowser(job.platform, 10);
+      touchBrowser(10);
     } catch (e: any) {
       console.warn(`[Shim Runner] 浏览器启动提示: ${e?.message || e}`);
     }
