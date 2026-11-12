@@ -2,7 +2,7 @@ import http, { IncomingMessage, ServerResponse } from 'http';
 import { verifySignedRequest } from '../../core/request-signing';
 import { formatUtc8Now } from '../../core/types';
 import { getManagedBrowserStatus, startManagedBrowser, stopManagedBrowser } from './browser';
-import { enqueueJob, getJob, listJobs, pendingQueueLength } from './runner';
+import { enqueueJob, getJob, listJobs, pendingQueueLength, releaseLock, startAgyWatchdog } from './runner';
 import {
   assertShimStartupSecurity,
   loadShimSecurityConfig,
@@ -233,11 +233,24 @@ if (require.main === module) {
     process.exit(1);
   }
   server.listen(cfg.port, cfg.host, () => {
+    // 启动宿主机 60s 看门狗巡检与孤儿进程回收器
+    startAgyWatchdog();
+
+    process.on('SIGTERM', () => {
+      releaseLock();
+      process.exit(0);
+    });
+    process.on('SIGINT', () => {
+      releaseLock();
+      process.exit(0);
+    });
+
     console.log(`\n======================================================`);
     console.log(` 🐾 afk-cloud Server Shim (Pet Node) 已就绪`);
     console.log(` 🚀 监听地址: http://${cfg.host}:${cfg.port}`);
     console.log(` 🔐 请求鉴权: ${cfg.insecureDev ? '⚠️ 本地调试免签名' : 'HMAC-SHA256 签名 + 时间窗 + Nonce 防重放'}`);
     console.log(` 🌐 任务域名白名单: ${cfg.taskHostAllowlist.join(', ')}`);
+    console.log(` 🛡️ 单例保护: 硬件互斥锁与 60s 看门狗回收器已激活`);
     console.log(`======================================================\n`);
   });
 }

@@ -9,10 +9,12 @@ export { computeQuestionHash, isAllowedTaskUrl };
 
 export interface SolverState {
   initialized: boolean;
+  activeJobId?: string | null;
+  activeJobStartedAt?: string | null;
 }
 
 export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
-  initialState = { initialized: false };
+  initialState = { initialized: false, activeJobId: null, activeJobStartedAt: null };
 
   onStart(): void {
     // 1. 初始化 Durable Object 独享 SQLite 数据库表 (cf-agent-architecture.md 规范)
@@ -37,11 +39,109 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         updated_at TEXT
       );
     `);
-    this.setState({ initialized: true });
+
+    // 恢复活跃任务状态
+    const activeCursor = this.ctx.storage.sql.exec(
+      "SELECT job_id, updated_at FROM tasks WHERE status IN ('dispatched', 'submitting') ORDER BY updated_at DESC LIMIT 1"
+    );
+    const activeRows = [...activeCursor] as any[];
+    const activeJobId = activeRows.length > 0 ? activeRows[0].job_id : null;
+    const activeJobStartedAt = activeRows.length > 0 ? activeRows[0].updated_at : null;
+
+    this.setState({ initialized: true, activeJobId, activeJobStartedAt });
   }
 
   /**
-   * 任务入队：去重、SQLite 登记、D1 镜像同步与派发服务器 shim
+   * 查询当前 Durable Object 内部全局队列与单例状态
+   */
+  @callable()
+  async getQueueStatus(): Promise<{
+    activeJobId: string | null;
+    activeJobStartedAt: string | null;
+    pendingCount: number;
+    totalTasks: number;
+  }> {
+    const curPending = this.ctx.storage.sql.exec("SELECT count(*) as cnt FROM tasks WHERE status = 'pending'");
+    const curTotal = this.ctx.storage.sql.exec('SELECT count(*) as cnt FROM tasks');
+    const pendingCount = ([...curPending][0] as any)?.cnt || 0;
+    const totalTasks = ([...curTotal][0] as any)?.cnt || 0;
+
+    return {
+      activeJobId: this.state.activeJobId || null,
+      activeJobStartedAt: this.state.activeJobStartedAt || null,
+      pendingCount,
+      totalTasks,
+    };
+  }
+
+  /**
+   * 单例驱动队列调度：
+   *  - 若当前有正在执行的任务且未超时 (<15m)，保持等待并返回 busy
+   *  - 若无活跃任务或已超时熔断，自动出队最早入队的 pending 任务下发执行
+   */
+  @callable()
+  async tryDispatchNext(): Promise<{ dispatched: boolean; jobId?: string; reason?: string }> {
+    const now = nowUtc8();
+
+    // 1. 检查当前活跃任务锁
+    if (this.state.activeJobId) {
+      const cur = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', this.state.activeJobId);
+      const rows = [...cur] as any[];
+      if (rows.length > 0) {
+        const activeTask = rows[0];
+        if (['dispatched', 'submitting'].includes(activeTask.status)) {
+          // 检查是否超时 (> 15 分钟)
+          const startedTime = new Date(activeTask.updated_at).getTime();
+          const elapsedMs = Date.now() - (isNaN(startedTime) ? Date.now() : startedTime);
+          if (elapsedMs < 15 * 60 * 1000) {
+            return {
+              dispatched: false,
+              jobId: this.state.activeJobId,
+              reason: `当前已有任务 [${this.state.activeJobId}] 正在执行 (已耗时 ${Math.round(elapsedMs / 1000)}s)，单例保护已启动，后续任务已排队`,
+            };
+          }
+
+          // 超时熔断
+          console.warn(`[SolverAgent 熔断] 任务 [${this.state.activeJobId}] 运行超过 15 分钟未响应，强制判定超时并释放单例锁`);
+          this.ctx.storage.sql.exec(
+            "UPDATE tasks SET status = 'failed', summary = '执行超时 (>15分钟)，边缘控制器已自动熔断回收', updated_at = ? WHERE job_id = ?",
+            now,
+            this.state.activeJobId
+          );
+          if (this.env.DB) {
+            await this.env.DB.prepare(
+              "UPDATE pending_tasks SET status = 'failed', result_summary = '执行超时 (>15分钟)，边缘控制器已自动熔断回收', updated_at = ? WHERE task_id = ?"
+            )
+              .bind(now, this.state.activeJobId)
+              .run()
+              .catch(() => {});
+          }
+        }
+      }
+      // 释放锁
+      this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+    }
+
+    // 2. 从独享 SQLite 队列中取出最早的 pending 任务
+    const cursor = this.ctx.storage.sql.exec(
+      "SELECT * FROM tasks WHERE status = 'pending' ORDER BY updated_at ASC LIMIT 1"
+    );
+    const pendingRows = [...cursor] as any[];
+    if (pendingRows.length === 0) {
+      return { dispatched: false, reason: '队列中无等待执行的任务' };
+    }
+
+    const nextJob = pendingRows[0];
+    const ok = await this.dispatchTask(nextJob.job_id);
+    if (ok) {
+      this.setState({ ...this.state, activeJobId: nextJob.job_id, activeJobStartedAt: now });
+      return { dispatched: true, jobId: nextJob.job_id };
+    }
+    return { dispatched: false, jobId: nextJob.job_id, reason: '派发请求失败' };
+  }
+
+  /**
+   * 任务入队：去重、SQLite 登记、D1 镜像同步与单例队列调度
    */
   @callable()
   async enqueue(task: {
@@ -80,7 +180,7 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       now
     );
 
-    // 同步到 D1 待办表供前端看板高频读
+    // 同步到 D1 待办表供前端看板高频读 (初始记为 pending)
     await upsertPendingTask(this.env, {
       taskId: task.jobId,
       platform: task.platform || 'chaoxing',
@@ -93,12 +193,15 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       deadline: task.deadline || '',
     });
 
-    // 立即执行派发
-    const dispatchRes = await this.dispatchTask(task.jobId);
+    // 尝试驱动调度消费
+    const dispatchRes = await this.tryDispatchNext();
+    const isThisJobDispatched = dispatchRes.dispatched && dispatchRes.jobId === task.jobId;
+
     return {
       accepted: true,
       jobId: task.jobId,
-      status: dispatchRes ? 'dispatched' : 'pending',
+      status: isThisJobDispatched ? 'dispatched' : 'pending',
+      reason: isThisJobDispatched ? undefined : (dispatchRes.reason || '已安全排入队列，等待当前任务完成'),
     };
   }
 
@@ -262,6 +365,11 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
           `任务：${payload.jobId}\n状态：已保存草稿 (包含 ${payload.qa?.length || 0} 题)\n详情：${summary}\n👉 请登录看板核验并点击【审批提交】。`,
           this.env
         );
+        // 草稿暂存完成，释放当前执行槽位，出队调度下一个 pending 作业
+        if (this.state.activeJobId === payload.jobId) {
+          this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+        }
+        await this.tryDispatchNext();
       }
     } else if (payload.phase === 'submitted') {
       await sendNotification(
@@ -269,12 +377,22 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         `任务：${payload.jobId}\n状态：已正式提交\n详情：${summary}`,
         this.env
       );
+      // 提交完成，释放槽位并出队下一个
+      if (this.state.activeJobId === payload.jobId) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+      await this.tryDispatchNext();
     } else if (payload.phase === 'failed') {
       await sendNotification(
         'afk-cloud 作业作答异常报警',
         `任务：${payload.jobId}\n状态：执行失败\n原因：${payload.error || summary}`,
         this.env
       );
+      // 失败熔断，释放槽位并调度下一个
+      if (this.state.activeJobId === payload.jobId) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+      await this.tryDispatchNext();
     }
 
     return { handled: true, status: nextStatus };
@@ -297,6 +415,9 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     }
 
     const ok = await this.submitTask(jobId);
+    if (ok) {
+      this.setState({ ...this.state, activeJobId: jobId, activeJobStartedAt: nowUtc8() });
+    }
     return {
       success: ok,
       jobId,
@@ -424,5 +545,8 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         // ignore network jitter
       }
     }
+
+    // 2. 检查是否有空闲单例槽位，自动驱动队列出队
+    await this.tryDispatchNext();
   }
 }

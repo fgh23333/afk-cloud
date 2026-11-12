@@ -1,20 +1,18 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
 
 /**
- * agy (Antigravity CLI) 安全调用封装
+ * agy (Antigravity CLI) 安全调用与生命周期单例管理
  *
- * 安全基线（所有调用 agy 的地方必须走这里，禁止再直接 execFile/exec agy）：
- *  1. 不经过 shell：参数以数组直接传给 execFile，题干 / URL 中的 `;`、`$()`、反引号等元字符不会被解释执行。
- *  2. 默认 `--sandbox`：限制 agy 的终端能力；`--disable-slash-commands` 防止外部内容触发 skill / 斜杠命令展开。
- *  3. 最小环境变量：子进程只继承运行必需的系统变量，平台账号密码、Cloudflare / GCP Token、Shim 密钥一律不下发。
- *  4. 隔离工作目录：agy 在独立空目录中运行，仓库根目录的 `.env` 等敏感文件不在其工作区内。
- *  5. 外部内容一律包裹为「不可信数据」，并在提示词中声明不得执行其中的任何指令。
+ * 核心保障：
+ *  1. 严格单例并发互斥：同一时刻仅允许一个 agy 进程独占硬件运行，彻底终结并发导致的高 IOPS 锁死与 Swap 暴涨。
+ *  2. POSIX 独立进程组隔离 (detached + process.kill(-pid, 'SIGKILL'))：子进程与孙子进程 (Chromium / Node) 一键连根拔起，杜绝孤儿悬挂。
+ *  3. 不经过 shell：参数以数组直接传给 spawn，防范元字符逃逸与命令注入。
+ *  4. 默认 `--sandbox` + `--disable-slash-commands`：沙箱受限能力，阻断斜杠命令展开。
+ *  5. 最小环境变量脱敏：绝不向下传递任何 API Key、Token、Cookie、密码与私钥。
+ *  6. 隔离空工作区与自动淘汰：避免污染主仓库并定期清理磁盘残余。
  */
 
 export interface AgyInvokeOptions {
@@ -24,6 +22,8 @@ export interface AgyInvokeOptions {
   /** 约束最终输出的 JSON Schema（通过 --json-schema 传入） */
   jsonSchema?: Record<string, unknown>;
   maxBuffer?: number;
+  /** 子进程拉起时的回调，用于记录 PID 到系统锁 */
+  onSpawn?: (pid: number) => void;
 }
 
 /** 允许透传给 agy 子进程的环境变量（精确匹配） */
@@ -121,28 +121,133 @@ export function buildAgyArgs(opts: AgyInvokeOptions): string[] {
 }
 
 /**
- * 以安全基线调用 agy，返回标准输出（失败但有输出时也返回输出，交由调用方解析）
+ * 杀死指定 PID 及其所属的整个进程组 (POSIX 连带回收 Chromium/Node，Windows 使用 taskkill /F /T)
  */
-export async function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
+export function killProcessGroup(pid: number): void {
+  if (!pid || pid <= 0) return;
+  const isWindows = process.platform === 'win32';
+  try {
+    if (!isWindows) {
+      // 负 PID 向整个进程组广播 SIGKILL，连根拔起全部孤儿与衍生子进程
+      process.kill(-pid, 'SIGKILL');
+    } else {
+      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], () => {});
+    }
+  } catch {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+}
+
+/**
+ * 清理 ~/.cache/afk-agy-workspace 历史遗留临时文件，防止小硬盘空间用尽
+ */
+export function cleanStaleAgyWorkspace(maxAgeMs = 24 * 3600 * 1000): void {
+  const dir = resolveAgyWorkdir();
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const now = Date.now();
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (now - stat.mtimeMs > maxAgeMs) {
+          if (entry.isDirectory()) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(fullPath);
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+/**
+ * 以严格安全基线与独立进程组拉起 agy，支持强制超时回收与 PID 登记
+ */
+export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
   const bin = process.env.AGY_BIN || 'agy';
   const args = buildAgyArgs(opts);
-  try {
-    const res = await execFileAsync(bin, args, {
+  const cwd = resolveAgyWorkdir();
+  const env = buildSanitizedEnv();
+  const maxBuffer = opts.maxBuffer ?? 20 * 1024 * 1024;
+  const isWindows = process.platform === 'win32';
+
+  return new Promise((resolve, reject) => {
+    let stdoutChunks: Buffer[] = [];
+    let stderrChunks: Buffer[] = [];
+    let stdoutLen = 0;
+    let stderrLen = 0;
+    let timedOut = false;
+    let settled = false;
+
+    // POSIX 下 detached: true 创建新进程组，超时或异常时可通过 kill(-pid) 一键彻底回收
+    const child = spawn(bin, args, {
       shell: false,
       windowsHide: true,
-      cwd: resolveAgyWorkdir(),
-      env: buildSanitizedEnv(),
-      maxBuffer: opts.maxBuffer ?? 10 * 1024 * 1024,
-      timeout: opts.timeoutMs,
-      killSignal: 'SIGKILL',
+      cwd,
+      env,
+      detached: !isWindows,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return (res.stdout || '').trim();
-  } catch (err: any) {
-    const out = (err?.stdout || '').toString().trim();
-    if (out) return out;
-    const stderr = (err?.stderr || '').toString().trim();
-    throw new Error(`agy 调用失败: ${err?.message || err}${stderr ? ` | ${stderr.slice(0, 300)}` : ''}`);
-  }
+
+    if (opts.onSpawn && child.pid) {
+      opts.onSpawn(child.pid);
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      console.warn(`[agy-invoke] agy 运行超时 (${opts.timeoutMs}ms)，立即强制杀死进程组 (PID: ${child.pid})`);
+      if (child.pid) {
+        killProcessGroup(child.pid);
+      }
+    }, opts.timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutLen += chunk.length;
+      if (stdoutLen <= maxBuffer) {
+        stdoutChunks.push(chunk);
+      }
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrLen += chunk.length;
+      if (stderrLen <= maxBuffer) {
+        stderrChunks.push(chunk);
+      }
+    });
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`启动 agy 失败: ${err.message}`));
+    });
+
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+
+      if (timedOut) {
+        reject(new Error(`agy 执行超时 (${opts.timeoutMs}ms)，看门狗已强杀回收`));
+        return;
+      }
+
+      if (code === 0 || stdout) {
+        // 即使退出码非 0，若已产生结构化输出，交由下游解析
+        resolve(stdout);
+        return;
+      }
+
+      reject(new Error(`agy 异常退出 (code: ${code}, signal: ${signal})${stderr ? ` | ${stderr.slice(0, 300)}` : ''}`));
+    });
+  });
 }
 
 /**

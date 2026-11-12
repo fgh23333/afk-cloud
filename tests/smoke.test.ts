@@ -312,6 +312,17 @@ async function runAllTests() {
       const statusJson: any = await statusRes.json();
       assert.strictEqual(statusJson.jobId, 'test-job-auth-101', '查询到的 jobId 应正确对应');
 
+      // 3.7 宿主机单例硬件互斥锁与看门狗回收验证
+      const { acquireLock, getActiveLock, releaseLock, reapStaleAgyProcesses } = await import('../packages/shim/src/runner');
+      assert.strictEqual(acquireLock('test-lock-job-1'), true, '首次应能成功获取单例硬件锁');
+      assert.strictEqual(acquireLock('test-lock-job-2'), false, '锁被占用期间，并发的第二个任务必须被拒绝直接执行');
+      assert.strictEqual(getActiveLock()?.jobId, 'test-lock-job-1', '活跃锁的 jobId 应准确记录');
+      releaseLock('test-lock-job-1');
+      assert.strictEqual(getActiveLock(), null, '释放锁后应恢复空闲状态');
+      assert.strictEqual(acquireLock('test-lock-job-2'), true, '释放后第二个任务应能顺利获取锁');
+      releaseLock();
+      assert.doesNotThrow(() => reapStaleAgyProcesses(), '看门狗巡检执行不应抛出任何未捕获异常');
+
       console.log(' ✅ [Test 5/6 PASS] Server Shim HMAC-SHA256 签名、防重放、域名白名单与加固契约验证通过');
     } finally {
       const { stopManagedBrowser } = await import('../packages/shim/src/browser');

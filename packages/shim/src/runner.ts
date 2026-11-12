@@ -1,6 +1,12 @@
+import { execSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
+  cleanStaleAgyWorkspace,
   extractLastJsonObject,
   invokeAgy,
+  killProcessGroup,
   UNTRUSTED_CONTENT_RULES,
   wrapUntrusted,
 } from '../../core/agy-invoke';
@@ -28,12 +34,136 @@ export interface TaskJob {
   updatedAt: string;
 }
 
+export interface AgyLockData {
+  jobId: string;
+  shimPid: number;
+  agyPid?: number;
+  startedAt: string;
+  timestamp: number;
+}
+
+/** 硬件单例互斥锁文件路径 */
+const LOCK_FILE_PATH = process.env.AFK_LOCK_FILE || path.join(os.tmpdir(), 'afk-agy-active.lock');
+/** 本地任务持久化文件，服务重启状态不丢失 */
+const JOBS_PERSIST_PATH = process.env.AFK_JOBS_FILE || path.join(os.homedir(), '.cache', 'afk-shim-jobs.json');
+
 /** 内存中最多保留的任务数（超出后淘汰最早的已终结任务，避免常驻进程内存无限增长） */
 const MAX_JOBS_RETAINED = 200;
 
 const jobStore = new Map<string, TaskJob>();
 const executionQueue: TaskJob[] = [];
 let isWorkerRunning = false;
+
+// 启动时从磁盘加载历史任务状态
+loadJobsFromDisk();
+
+export function getActiveLock(): AgyLockData | null {
+  try {
+    if (!fs.existsSync(LOCK_FILE_PATH)) return null;
+    const raw = fs.readFileSync(LOCK_FILE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.timestamp === 'number') {
+      return parsed as AgyLockData;
+    }
+  } catch {}
+  return null;
+}
+
+export function isProcessAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: any) {
+    return e?.code === 'EPERM';
+  }
+}
+
+export function acquireLock(jobId: string): boolean {
+  const existing = getActiveLock();
+  const now = Date.now();
+  if (existing) {
+    const isAlive = existing.agyPid ? isProcessAlive(existing.agyPid) : isProcessAlive(existing.shimPid);
+    const isExpired = now - existing.timestamp > 15 * 60 * 1000;
+
+    if (isAlive && !isExpired) {
+      if (existing.jobId === jobId) return true;
+      return false; // 锁正被另一个活跃任务持有
+    }
+
+    console.warn(
+      `[Shim Lock] 检测到残留/过期硬件锁 (Job: ${existing.jobId}, isAlive: ${isAlive}, isExpired: ${isExpired})，执行清理与接管`
+    );
+    if (existing.agyPid && isAlive) {
+      killProcessGroup(existing.agyPid);
+    }
+    releaseLock();
+  }
+
+  const data: AgyLockData = {
+    jobId,
+    shimPid: process.pid,
+    startedAt: formatUtc8Now(),
+    timestamp: now,
+  };
+  try {
+    fs.writeFileSync(LOCK_FILE_PATH, JSON.stringify(data, null, 2), 'utf8');
+    return true;
+  } catch (err: any) {
+    console.error(`[Shim Lock] 写入锁文件失败: ${err?.message || err}`);
+    return false;
+  }
+}
+
+export function updateLockAgyPid(jobId: string, agyPid: number): void {
+  try {
+    const lock = getActiveLock();
+    if (lock && lock.jobId === jobId) {
+      lock.agyPid = agyPid;
+      fs.writeFileSync(LOCK_FILE_PATH, JSON.stringify(lock, null, 2), 'utf8');
+    }
+  } catch {}
+}
+
+export function releaseLock(jobId?: string): void {
+  try {
+    const lock = getActiveLock();
+    if (lock && (!jobId || lock.jobId === jobId)) {
+      if (fs.existsSync(LOCK_FILE_PATH)) {
+        fs.unlinkSync(LOCK_FILE_PATH);
+      }
+    }
+  } catch {}
+}
+
+function saveJobsToDisk(): void {
+  try {
+    const dir = path.dirname(JOBS_PERSIST_PATH);
+    fs.mkdirSync(dir, { recursive: true });
+    const list = Array.from(jobStore.values());
+    fs.writeFileSync(JOBS_PERSIST_PATH, JSON.stringify(list, null, 2), 'utf8');
+  } catch {}
+}
+
+function loadJobsFromDisk(): void {
+  try {
+    if (!fs.existsSync(JOBS_PERSIST_PATH)) return;
+    const raw = fs.readFileSync(JOBS_PERSIST_PATH, 'utf8');
+    const list = JSON.parse(raw);
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        if (item && item.jobId) {
+          if (item.phase === 'running') {
+            item.phase = 'failed';
+            item.error = '服务重启导致执行中断，已自动复位';
+            item.updatedAt = formatUtc8Now();
+          }
+          jobStore.set(item.jobId, item);
+        }
+      }
+    }
+  } catch {}
+}
 
 const DRAFT_OUTPUT_SCHEMA = {
   type: 'object',
@@ -147,18 +277,24 @@ async function triggerQueueDrain(): Promise<void> {
     return;
   }
 
-  isWorkerRunning = true;
-  const currentJob = executionQueue.shift();
+  const currentJob = executionQueue[0];
+  if (!currentJob) return;
 
-  if (!currentJob) {
-    isWorkerRunning = false;
+  // 1. 尝试抢占单例硬件互斥锁
+  if (!acquireLock(currentJob.jobId)) {
+    console.log(`[Shim Runner] 硬件互斥锁已被占用，任务 [${currentJob.jobId}] 在队列中等待`);
     return;
   }
+
+  // 2. 成功获取锁，出队开始执行
+  executionQueue.shift();
+  isWorkerRunning = true;
 
   try {
     currentJob.phase = 'running';
     currentJob.updatedAt = formatUtc8Now();
-    console.log(`[Shim Runner] 开始执行任务: ${currentJob.jobId} (模式: ${currentJob.mode})`);
+    saveJobsToDisk();
+    console.log(`[Shim Runner] 🔒 获取硬件单例互斥锁成功，开始执行任务: ${currentJob.jobId} (模式: ${currentJob.mode})`);
 
     if (currentJob.mode === 'submit') {
       await processSubmitTask(currentJob);
@@ -173,10 +309,12 @@ async function triggerQueueDrain(): Promise<void> {
     await notifyEdgeCallback(currentJob);
   } finally {
     isWorkerRunning = false;
-    // 继续消费后续任务
+    releaseLock(currentJob.jobId);
+    saveJobsToDisk();
+    // 调度消费队列中下一个任务
     setTimeout(() => {
       triggerQueueDrain();
-    }, 200);
+    }, 500);
   }
 }
 
@@ -242,6 +380,7 @@ async function processDraftTask(job: TaskJob): Promise<void> {
     timeoutMs: 10 * 60 * 1000,
     jsonSchema: DRAFT_OUTPUT_SCHEMA,
     maxBuffer: 20 * 1024 * 1024,
+    onSpawn: (pid) => updateLockAgyPid(job.jobId, pid),
   });
 
   // 3. 稳健提取结构化 JSON 结果
@@ -292,6 +431,7 @@ async function processSubmitTask(job: TaskJob): Promise<void> {
     model: proModel,
     timeoutMs: 5 * 60 * 1000,
     jsonSchema: SUBMIT_OUTPUT_SCHEMA,
+    onSpawn: (pid) => updateLockAgyPid(job.jobId, pid),
   });
 
   // 必须拿到明确的 submitted 结论才记为已提交，否则一律视为失败
@@ -353,5 +493,77 @@ export async function notifyEdgeCallback(job: TaskJob): Promise<boolean> {
   } catch (err: any) {
     console.error(`[Shim Callback Error] 回调失败: ${err?.message || err}`);
     return false;
+  }
+}
+
+/**
+ * 宿主机看门狗回收器：每 60 秒检查并强制清除超期硬件锁、孤儿进程与遗留临时目录
+ */
+export function reapStaleAgyProcesses(): void {
+  const lock = getActiveLock();
+  const now = Date.now();
+
+  // 1. 检查锁是否已超时 (>15分钟)
+  if (lock && now - lock.timestamp > 15 * 60 * 1000) {
+    console.warn(`[Shim Watchdog] ⚠️ 检测到超期硬件单例锁 (>15m, Job: ${lock.jobId})，立即强制回收！`);
+    if (lock.agyPid) {
+      killProcessGroup(lock.agyPid);
+    }
+    releaseLock();
+    const job = jobStore.get(lock.jobId);
+    if (job && job.phase === 'running') {
+      job.phase = 'failed';
+      job.error = '执行超时 (>15m)，宿主机看门狗已强制杀死 agy 进程并回收单例锁';
+      job.updatedAt = formatUtc8Now();
+      saveJobsToDisk();
+      notifyEdgeCallback(job).catch(() => {});
+    }
+    isWorkerRunning = false;
+    setTimeout(() => {
+      triggerQueueDrain();
+    }, 500);
+  }
+
+  // 2. POSIX 环境下扫描可能遗留的孤儿 agy 进程
+  if (process.platform !== 'win32' && !lock && !isWorkerRunning) {
+    try {
+      const output = execSync('pgrep -f "agy"', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const pids = output
+        .trim()
+        .split('\n')
+        .map((p: string) => parseInt(p.trim(), 10))
+        .filter((p: number) => !isNaN(p) && p !== process.pid && p > 1);
+
+      for (const orphanPid of pids) {
+        console.warn(`[Shim Watchdog] ⚠️ 发现脱缰孤儿 agy 进程 (PID: ${orphanPid})，立即连带进程组执行 SIGKILL！`);
+        killProcessGroup(orphanPid);
+      }
+    } catch {
+      // pgrep 无匹配时退出码为 1，正常现象
+    }
+  }
+
+  // 3. 定期清理隔离工作区超过 24 小时的临时垃圾
+  cleanStaleAgyWorkspace();
+}
+
+let watchdogTimer: NodeJS.Timeout | null = null;
+
+export function startAgyWatchdog(intervalMs = 60_000): void {
+  if (watchdogTimer) return;
+  // 启动即先执行一轮巡检与清理
+  reapStaleAgyProcesses();
+  watchdogTimer = setInterval(() => {
+    reapStaleAgyProcesses();
+  }, intervalMs);
+  if (watchdogTimer.unref) {
+    watchdogTimer.unref();
+  }
+}
+
+export function stopAgyWatchdog(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
   }
 }

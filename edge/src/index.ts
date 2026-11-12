@@ -805,6 +805,16 @@ export default {
         return corsJson({ synced: updatedCount, time: nowUtc8() });
       }
 
+      // 查询当前全局任务调度队列与单例执行状态
+      if (url.pathname === '/api/tasks/queue' && request.method === 'GET') {
+        if (env.SOLVER_AGENT) {
+          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+          const queue = await (solverStub as any).getQueueStatus();
+          return corsJson({ ok: true, queue, time: nowUtc8() });
+        }
+        return corsJson({ ok: true, queue: { activeJobId: null, pendingCount: 0, totalTasks: 0 }, time: nowUtc8() });
+      }
+
       // D7 审批门接口：人工确认草稿无误后下发正式提交
       if (
         (url.pathname.match(/^\/api\/tasks\/([^\/]+)\/approve$/) || url.pathname === '/api/tasks/approve') &&
@@ -1080,17 +1090,12 @@ async function dispatchSingleTask(
     return { taskId, success: false, status: 'rejected', reason: '任务 URL 非法或不在安全白名单内' };
   }
 
-  // 1. 更新 D1 状态为 dispatched
-  await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
-    .bind('dispatched', now, taskId)
-    .run();
-
-  // 2. 调度派发 (优先通过 SOLVER_AGENT DO 状态机管理；未开启 DO 时直连常驻 shim)
+  // 1. 调度派发 (优先通过 SOLVER_AGENT DO 状态机单例队列管理；未开启 DO 时直连常驻 shim)
   const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
   const shimSecret = env.AFK_SHIM_SECRET;
   const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
-  let dispatchedToAgent = false;
-  let dispatchedToShim = false;
+  let finalStatus = 'dispatched';
+  let reasonMsg = '';
 
   if (env.SOLVER_AGENT) {
     try {
@@ -1104,12 +1109,15 @@ async function dispatchSingleTask(
         title: task.title,
         force: true,
       });
-      dispatchedToAgent = !!res?.accepted;
+      finalStatus = res?.status || 'dispatched';
+      reasonMsg = res?.reason || (finalStatus === 'dispatched' ? '已安全派发至服务器 shim' : '已入队单例队列等待排队');
     } catch (e: any) {
       console.warn(`[dispatchSingleTask] SOLVER_AGENT enqueue 异常: ${e?.message || e}`);
+      finalStatus = 'pending';
+      reasonMsg = `入队异常: ${e?.message || e}`;
     }
   } else if (shimUrl) {
-    // 3. 未绑定 SOLVER_AGENT 时，直连常驻服务器 shim (强制 HMAC 签名或 Bearer)
+    // 2. 未绑定 SOLVER_AGENT 时，直连常驻服务器 shim (强制 HMAC 签名或 Bearer)
     try {
       const endpoint = new URL('/task', shimUrl.replace(/\/+$/, '') + '/');
       const body = JSON.stringify({
@@ -1138,33 +1146,46 @@ async function dispatchSingleTask(
         headers,
         body,
       });
-      dispatchedToShim = res.ok;
+      finalStatus = res.ok ? 'dispatched' : 'pending';
+      reasonMsg = res.ok ? '已成功签名下发至服务器 shim' : `shim 响应异常 HTTP ${res.status}`;
     } catch (e: any) {
       console.warn(`[dispatchSingleTask] 直接通知 shim 异常: ${e?.message || e}`);
+      finalStatus = 'pending';
+      reasonMsg = `派发网络异常: ${e?.message || e}`;
     }
   }
 
-  await logExecution(
-    env,
-    'task_dispatched',
-    task.platform || 'chaoxing',
-    `【主动派发给 agy】课程《${task.course_name}》- ${task.title}`
-  );
+  // 3. 准确同步 D1 状态与执行日志
+  await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
+    .bind(finalStatus, now, taskId)
+    .run();
 
-  await sendNotification(
-    'afk-cloud 任务主动派发 🚀',
-    `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
-    env
-  );
+  if (finalStatus === 'dispatched') {
+    await logExecution(
+      env,
+      'task_dispatched',
+      task.platform || 'chaoxing',
+      `【主动派发给 agy】课程《${task.course_name}》- ${task.title}`
+    );
+
+    await sendNotification(
+      'afk-cloud 任务主动派发 🚀',
+      `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
+      env
+    );
+  } else {
+    await logExecution(
+      env,
+      'task_queued',
+      task.platform || 'chaoxing',
+      `【排队等待】课程《${task.course_name}》- ${task.title} (单例保护已启动)`
+    );
+  }
 
   return {
     taskId,
     success: true,
-    status: 'dispatched',
-    reason: dispatchedToShim
-      ? '已成功签名下发至服务器 shim'
-      : dispatchedToAgent
-      ? '已入队 Durable Object 调度'
-      : '已更新状态为已派发，等待云端 agy 拉取',
+    status: finalStatus,
+    reason: reasonMsg,
   };
 }
