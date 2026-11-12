@@ -395,7 +395,71 @@ async function runAllTests() {
     console.log(' ✅ [Test 7/7 PASS] 超星移动端防风控请求头与 UA 契约验证通过');
   }
 
-  console.log(`\n🎉 全部 7 项核心自检与安全链路测试 100% 通过！\n`);
+  // --- Test 8: 超星 WebIM 信令监听解析与 Cloud Run 灾备契约验证 ---
+  {
+    const { parseWebIMMessage, ChaoxingWebIMListener } = await import(
+      '../packages/adapters/chaoxing/webim'
+    );
+    const { forwardTaskToCloudRun } = await import('../packages/core/sandbox');
+
+    // 1. 验证群聊文本消息中的签到 URL 识别抽取
+    const rawMsg1 = {
+      data: '同学请注意，老师已发布签到：https://mobilelearn.chaoxing.com/newsign/preSign?courseId=267230708&classId=155058274&activePrimaryId=5000181110795&appType=15',
+    };
+    const s1 = parseWebIMMessage(rawMsg1);
+    assert.ok(s1 && s1.type === 'sign', '应准确从文本消息中提取签到信令');
+    assert.strictEqual(s1?.activeId, '5000181110795', '应准确提取 activePrimaryId');
+    assert.strictEqual(s1?.courseId, '267230708', '应准确提取 courseId');
+
+    // 2. 验证 ext 结构化载荷识别
+    const rawMsg2 = {
+      ext: {
+        activeId: '6000181740534',
+        courseId: '268090261',
+        atype: 'sign',
+        name: '周四机房签到20261112',
+      },
+    };
+    const s2 = parseWebIMMessage(rawMsg2);
+    assert.ok(s2 && s2.type === 'sign', '应准确从 ext 结构体中解析签到');
+    assert.strictEqual(s2?.activeId, '6000181740534');
+
+    // 3. 验证 ChaoxingWebIMListener 事件分发
+    let capturedSignal: any = null;
+    const listener = new ChaoxingWebIMListener({
+      cookies: {
+        _uid: '149258490',
+        _d: 'test',
+        vc3: 'test',
+        uf: 'test',
+        fid: '2893',
+        cookieStr: '',
+      },
+      onSignSignal: (sig) => {
+        capturedSignal = sig;
+      },
+    });
+    listener.handleRawMessage(rawMsg1);
+    assert.ok(capturedSignal && capturedSignal.activeId === '5000181110795', '监听器事件分发应正常触发');
+
+    // 4. 验证 Cloud Run 容器配置与脚本文件
+    const dockerfileShim = fs.readFileSync(path.join(__dirname, '../infra/docker/Dockerfile.shim'), 'utf8');
+    assert.ok(dockerfileShim.includes('EXPOSE 8080'), 'Cloud Run Dockerfile 必须暴露 8080 端口');
+    assert.ok(dockerfileShim.includes('SHIM_HOST=0.0.0.0'), 'Cloud Run Dockerfile 必须绑定 0.0.0.0');
+
+    const cloudRunDeployScript = fs.readFileSync(
+      path.join(__dirname, '../infra/gcp/deploy-cloud-run-service.sh'),
+      'utf8'
+    );
+    assert.ok(cloudRunDeployScript.includes('gcloud run deploy'), '必须包含 gcloud run deploy 指令');
+    assert.ok(cloudRunDeployScript.includes('--min-instances=0'), '必须配置 min-instances=0 实现按需零计费缩容');
+
+    assert.strictEqual(typeof forwardTaskToCloudRun, 'function', 'sandbox 模块必须导出 forwardTaskToCloudRun');
+
+    console.log(' ✅ [Test 8/8 PASS] 超星 WebIM 信令监听解析与 Cloud Run 灾备契约验证通过');
+  }
+
+  console.log(`\n🎉 全部 8 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

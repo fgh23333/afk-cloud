@@ -81,3 +81,28 @@ DROP INDEX IF EXISTS idx_pending_tasks_course_status;
 DROP INDEX IF EXISTS idx_question_bank_lookup;
 DROP INDEX IF EXISTS idx_execution_logs_event_type;
 ```
+
+---
+
+## 四、 Tier 2: Google Cloud Run 无服务器算力灾备节点
+
+当本地虚拟机出现高负载计算或网络瞬断时，系统支持通过无服务器容器实现平滑故障转移：
+
+* **构建与部署**：
+  ```bash
+  bash infra/gcp/deploy-cloud-run-service.sh
+  ```
+* **核心特性**：
+  * **按需冷启动与零闲置计费 (`min-instances=0`)**：无流量时不占用任何 vCPU/内存资源，100% 落在 Google Cloud 每月 200 万次请求 + 360,000 vCPU-秒免费额度内。
+  * **Fail-Closed HMAC 签名校验**：所有派发请求均由 Edge Worker 通过 HMAC-SHA256 签名，防止公网未授权访问。
+
+---
+
+## 五、 超星 WebIM 实时信令监听管道
+
+为规避定时轮询引发的超星接口频控（“请勿频繁操作”），系统引入了基于环信 IM 课程群信令的事件驱动监听器：
+
+* **核心模块**：[`packages/adapters/chaoxing/webim.ts`](file:///home/Jimmy/afk-cloud/packages/adapters/chaoxing/webim.ts)
+* **信令抽取**：实时解析群聊消息正文与 `ext` 自定义载荷，100ms 级别捕获 `activeId` 并触发 `performSign`。
+* **降级容灾**：当 WebSocket 离线时，系统自动保持 `taskactivelist` 移动抗风控接口兜底，主备无缝切换。
+
