@@ -509,6 +509,30 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     };
   }
 
+  /**
+   * 忽略/归档任务：同步更新 DO SQLite 与 D1 状态，并释放若占用中的 activeJobId
+   */
+  @callable()
+  async ignoreTask(jobId: string): Promise<{ ok: boolean; jobId: string; status: string }> {
+    const now = nowUtc8();
+    this.ctx.storage.sql.exec(
+      'UPDATE tasks SET status = ?, updated_at = ? WHERE job_id = ?',
+      'ignored',
+      now,
+      jobId
+    );
+    if (this.state.activeJobId === jobId) {
+      this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+    }
+    if (this.env.DB) {
+      await this.env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
+        .bind('ignored', now, jobId)
+        .run()
+        .catch(() => {});
+    }
+    return { ok: true, jobId, status: 'ignored' };
+  }
+
   private async revertSubmittingStatus(jobId: string, prevStatus: string, prevUpdatedAt: string): Promise<void> {
     this.ctx.storage.sql.exec(
       "UPDATE tasks SET status = ?, updated_at = ? WHERE job_id = ? AND status = 'submitting'",

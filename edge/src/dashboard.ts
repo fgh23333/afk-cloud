@@ -12,6 +12,7 @@ export interface DashboardData {
     draftCount: number;
     submittedCount: number;
     failedCount: number;
+    ignoredCount?: number;
     signinCount: number;
     questionBankCount: number;
     discussionPendingCount?: number;
@@ -185,6 +186,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     let draftCount = 0;
     let submittedCount = 0;
     let failedCount = 0;
+    let ignoredCount = 0;
 
     type HomeworkItem = NonNullable<DashboardData['homeworks']>[number];
     const homeworkMap = new Map<string, HomeworkItem>();
@@ -195,6 +197,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
 
     const getStatusPriority = (status: string): number => {
       switch (status) {
+        case 'ignored':
+          return 8;
         case 'submitted':
           return 7;
         case 'submitting':
@@ -231,6 +235,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         statusLabel = '已提交';
       } else if (t.status === 'failed') {
         statusLabel = '求解失败';
+      } else if (t.status === 'ignored') {
+        statusLabel = '已忽略';
       }
 
       const isPending = t.status === 'pending';
@@ -358,6 +364,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         submittedCount++;
       } else if (hw.status === 'failed') {
         failedCount++;
+      } else if (hw.status === 'ignored') {
+        ignoredCount++;
       } else {
         pendingCount++;
       }
@@ -644,6 +652,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         draftCount,
         submittedCount,
         failedCount,
+        ignoredCount,
         signinCount,
         questionBankCount: qbCount,
         discussionPendingCount,
@@ -836,8 +845,13 @@ export function renderDashboardHtml(): string {
             <button onclick="setHomeworkFilter('draft_saved')" id="filter-draft_saved" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-transparent transition">🛡️ 做完暂存 (<span id="cnt-draft">0</span>)</button>
             <button onclick="setHomeworkFilter('submitting')" id="filter-submitting" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-violet-400 hover:bg-slate-800 border border-transparent transition">📤 提交中 (<span id="cnt-submitting">0</span>)</button>
             <button onclick="setHomeworkFilter('submitted')" id="filter-submitted" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">✅ 已提交 (<span id="cnt-submitted">0</span>)</button>
+            <button onclick="setHomeworkFilter('failed')" id="filter-failed" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-rose-400 hover:bg-slate-800 border border-transparent transition">⚠️ 失败 (<span id="cnt-failed">0</span>)</button>
+            <button onclick="setHomeworkFilter('ignored')" id="filter-ignored" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-500 hover:bg-slate-800 border border-transparent transition">🚫 已忽略 (<span id="cnt-ignored">0</span>)</button>
           </div>
           <div class="flex items-center gap-2">
+            <button onclick="retryFailedTasksUI()" id="retryFailedBtn" class="hidden flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs shadow-md shadow-rose-900/30 transition active:scale-95">
+              <span>🔁 一键重试失败任务</span>
+            </button>
             <button onclick="dispatchAllPendingTasks()" id="dispatchAllBtn" class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs shadow-md shadow-brand-900/30 transition active:scale-95">
               <span>🚀 一键派发未派发作业</span>
             </button>
@@ -1073,6 +1087,8 @@ export function renderDashboardHtml(): string {
       const draftCount = hwList.filter(h => h.status === 'draft_saved' || h.status === 'awaiting_approval').length;
       const submittingCount = hwList.filter(h => h.status === 'submitting').length;
       const submittedCount = hwList.filter(h => h.status === 'submitted').length;
+      const failedCount = hwList.filter(h => h.status === 'failed').length;
+      const ignoredCount = hwList.filter(h => h.status === 'ignored').length;
 
       document.getElementById('pendingHomeworkCount').innerText = String(pendingCount);
       document.getElementById('solvedHomeworkCount').innerText = \`\${dispatchedCount} 已派发 · \${draftCount} 做完暂存 · \${submittingCount} 提交中 · \${submittedCount} 已提交\`;
@@ -1089,6 +1105,19 @@ export function renderDashboardHtml(): string {
       if (cntSubmitting) cntSubmitting.innerText = String(submittingCount);
       const cntSubmitted = document.getElementById('cnt-submitted');
       if (cntSubmitted) cntSubmitted.innerText = String(submittedCount);
+      const cntFailed = document.getElementById('cnt-failed');
+      if (cntFailed) cntFailed.innerText = String(failedCount);
+      const cntIgnored = document.getElementById('cnt-ignored');
+      if (cntIgnored) cntIgnored.innerText = String(ignoredCount);
+      const retryFailedBtn = document.getElementById('retryFailedBtn');
+      if (retryFailedBtn) {
+        if (failedCount > 0) {
+          retryFailedBtn.classList.remove('hidden');
+          retryFailedBtn.innerText = \`🔁 重试失败 (\${failedCount})\`;
+        } else {
+          retryFailedBtn.classList.add('hidden');
+        }
+      }
 
       const activeExams = (state.exams || []).filter(e => checkExamIsActive(e));
       document.getElementById('activeExamsCount').innerText = String(activeExams.length);
@@ -1151,6 +1180,8 @@ export function renderDashboardHtml(): string {
         if (currentHomeworkFilter === 'draft_saved') return hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
         if (currentHomeworkFilter === 'submitting') return hw.status === 'submitting';
         if (currentHomeworkFilter === 'submitted') return hw.status === 'submitted';
+        if (currentHomeworkFilter === 'failed') return hw.status === 'failed';
+        if (currentHomeworkFilter === 'ignored') return hw.status === 'ignored';
         return true;
       });
 
@@ -1165,7 +1196,8 @@ export function renderDashboardHtml(): string {
         const isSubmitted = hw.status === 'submitted';
         const isDispatched = hw.status === 'dispatched' || hw.status === 'processing';
         const isFailed = hw.status === 'failed';
-        const isPending = !isDraft && !isSubmitting && !isSubmitted && !isDispatched && !isFailed;
+        const isIgnored = hw.status === 'ignored';
+        const isPending = !isDraft && !isSubmitting && !isSubmitted && !isDispatched && !isFailed && !isIgnored;
 
         let badge = '';
         let statusDesc = '';
@@ -1183,7 +1215,10 @@ export function renderDashboardHtml(): string {
           statusDesc = '已完成审批并正式提交至超星学习通平台';
         } else if (isFailed) {
           badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-rose-500/20 text-rose-300 border-rose-500/30">⚠️ 求解失败</span>';
-          statusDesc = '上次求解遇到异常，支持重新派发给 agy';
+          statusDesc = '上次求解遇到异常，支持重新派发或忽略归档';
+        } else if (isIgnored) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-slate-700/40 text-slate-400 border-slate-700">🚫 已忽略归档</span>';
+          statusDesc = '已人工忽略或归档，不再参与待办统计';
         } else {
           badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">⏳ 未派发</span>';
           statusDesc = '新探测作业，尚未派发给 agy Agent 执行作答';
@@ -1220,7 +1255,7 @@ export function renderDashboardHtml(): string {
               <div class="text-xs text-slate-400 space-y-1">
                 <p>📅 截止时间: <span class="text-slate-300 font-mono">\${safeEndDate}</span></p>
                 <p class="text-[11px] text-slate-400">💡 状态说明: \${statusDesc}</p>
-                \${safeResultSummary ? \`<p class="text-[11px] text-sky-300/90 truncate">📝 详情: \${safeResultSummary}</p>\` : ''}
+                \${safeResultSummary ? \`<p class="text-[11px] \${isFailed ? 'text-rose-300/90 line-clamp-2 break-all' : 'text-sky-300/90 truncate'}" title="\${safeResultSummary}">📝 详情: \${safeResultSummary}</p>\` : ''}
               </div>
             </div>
 
@@ -1230,9 +1265,14 @@ export function renderDashboardHtml(): string {
               </div>
               <div class="flex items-center gap-2 flex-wrap">
                 \${answerBtn}
-                <button onclick="dispatchTask('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
-                  <span>\${isPending ? '🚀 派发给 agy' : '🔄 重新派发 agy'}</span>
+                <button onclick="dispatchTask('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-medium rounded-lg \${isFailed ? 'bg-rose-600/80 hover:bg-rose-500 text-white border border-rose-500/40' : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'} transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
+                  <span>\${isPending ? '🚀 派发给 agy' : isFailed ? '🔁 重试求解' : isIgnored ? '🔄 恢复并派发' : '🔄 重新派发 agy'}</span>
                 </button>
+                \${(isFailed || isPending) ? \`
+                  <button onclick="ignoreTaskUI('\${safeTaskIdAttr}')" class="px-2 py-1 text-xs font-medium rounded-lg bg-slate-800/70 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/70 transition active:scale-95" title="忽略并归档该任务">
+                    <span>🚫 忽略</span>
+                  </button>
+                \` : ''}
                 \${isDraft ? \`
                   <button onclick="approveSubmit('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1" title="确认并正式提交作业草稿">
                     <span>✅ 审批提交 &rarr;</span>
@@ -1645,7 +1685,7 @@ export function renderDashboardHtml(): string {
       if (!confirm('确定将该作业主动派发给云端 agy / 本地 shim 求解吗？')) return;
       try {
         showToast('正在主动派发任务给 agy...', true);
-        const res = await fetch(\`/api/tasks/\${taskId}/dispatch\`, {
+        const res = await fetch(\`/api/tasks/\${encodeURIComponent(taskId)}/dispatch\`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1658,6 +1698,61 @@ export function renderDashboardHtml(): string {
         }
       } catch (e) {
         showToast('派发请求异常', false);
+      }
+    }
+
+    async function retryFailedTasksUI() {
+      const failedTasks = (state.homeworks || []).filter(h => h.status === 'failed');
+      if (failedTasks.length === 0) {
+        showToast('当前没有需要重试的失败任务');
+        return;
+      }
+      if (!confirm(\`确定将全部 \${failedTasks.length} 份失败作业重新入队并依次派发给 agy 吗？\`)) return;
+
+      const btn = document.getElementById('retryFailedBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '重试派发中...';
+      }
+      try {
+        const res = await fetch('/api/tasks/retry-failed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskIds: failedTasks.map(t => t.taskId) })
+        });
+        const json = await res.json();
+        if (json.success) {
+          showToast(\`已重新入队 \${json.retriedCount || 0} 份失败作业（\${json.dispatchedCount || 0} 已立即派发，\${json.queuedCount || 0} 排队中）🔁\`);
+          await refreshData();
+        } else {
+          showToast('批量重试失败：' + (json.reason || '未知错误'), false);
+        }
+      } catch (e) {
+        showToast('批量重试网络异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+        }
+      }
+    }
+
+    async function ignoreTaskUI(taskId) {
+      if (!confirm('确定忽略并归档该作业吗？（后续可在“已忽略”分类恢复）')) return;
+      try {
+        const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/ignore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskId })
+        });
+        const json = await res.json();
+        if (json.success || json.updated) {
+          showToast('已忽略并归档该作业');
+          await refreshData();
+        } else {
+          showToast('归档失败：' + (json.reason || '未知错误'), false);
+        }
+      } catch (e) {
+        showToast('归档请求异常', false);
       }
     }
 

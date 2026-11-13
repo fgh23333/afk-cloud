@@ -922,7 +922,7 @@ export default {
         const match = url.pathname.match(/^\/api\/tasks\/([^\/]+)\/dispatch$/);
         const body: any = await request.json().catch(() => ({}));
         const taskIds: string[] = match
-          ? [match[1]]
+          ? [decodeURIComponent(match[1])]
           : (Array.isArray(body.taskIds) ? body.taskIds : [body.taskId || body.jobId]).filter(Boolean);
 
         const results: Array<{ taskId: string; success: boolean; status: string; reason?: string }> = [];
@@ -939,6 +939,59 @@ export default {
           results,
           time: nowUtc8(),
         });
+      }
+
+      // 一键重试失败任务接口：支持指定 taskIds 或批量重跑全部 status='failed' 作业
+      if (url.pathname === '/api/tasks/retry-failed' && request.method === 'POST') {
+        if (!env.DB) {
+          return corsJson({ success: false, total: 0, dispatchedCount: 0, queuedCount: 0, results: [], reason: 'D1 数据库未连接' }, 500);
+        }
+        const body: any = await request.json().catch(() => ({}));
+        let targetIds: string[] = Array.isArray(body.taskIds) ? body.taskIds.filter(Boolean) : [];
+        if (targetIds.length === 0) {
+          const failedRes = await env.DB.prepare(
+            "SELECT task_id FROM pending_tasks WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 50"
+          ).all<{ task_id: string }>();
+          targetIds = (failedRes.results || []).map((r) => r.task_id).filter(Boolean);
+        }
+
+        const results: Array<{ taskId: string; success: boolean; status: string; reason?: string }> = [];
+        for (const tid of targetIds) {
+          const res = await dispatchSingleTask(env, tid, { force: true, suppressQueueLog: true });
+          results.push(res);
+        }
+        const retriedCount = results.filter((r) => r.success).length;
+        const dispatchedCount = results.filter((r) => r.success && r.status === 'dispatched').length;
+        const queuedCount = results.filter((r) => r.success && r.status === 'pending').length;
+        return corsJson({
+          success: retriedCount > 0 || targetIds.length === 0,
+          total: results.length,
+          retriedCount,
+          dispatchedCount,
+          queuedCount,
+          results,
+          time: nowUtc8(),
+        });
+      }
+
+      // 忽略/归档单个任务接口
+      if (url.pathname.match(/^\/api\/tasks\/([^\/]+)\/ignore$/) && request.method === 'POST') {
+        if (!env.DB) return corsJson({ success: false, updated: false, reason: 'D1 数据库未连接' }, 500);
+        const match = url.pathname.match(/^\/api\/tasks\/([^\/]+)\/ignore$/)!;
+        const taskId = decodeURIComponent(match[1]);
+        const body: any = await request.json().catch(() => ({}));
+        const summary = typeof body.resultSummary === 'string' ? body.resultSummary : '';
+
+        if (env.SOLVER_AGENT) {
+          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+          await (solverStub as any).ignoreTask(taskId).catch(() => {});
+        }
+        await env.DB.prepare(
+          "UPDATE pending_tasks SET status = 'ignored', result_summary = COALESCE(NULLIF(?, ''), result_summary), updated_at = ? WHERE task_id = ?"
+        )
+          .bind(summary, nowUtc8(), taskId)
+          .run();
+        return corsJson({ success: true, updated: true, taskId, status: 'ignored', time: nowUtc8() });
       }
 
       // 更新单个任务状态
@@ -964,6 +1017,15 @@ export default {
               reason: e?.message || String(e),
               time: nowUtc8(),
             });
+          }
+        }
+
+        if (body.status === 'ignored' && env.SOLVER_AGENT) {
+          try {
+            const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+            await (solverStub as any).ignoreTask(body.taskId);
+          } catch (e: any) {
+            console.warn(`[联动 ignoreTask 异常] ${e?.message || e}`);
           }
         }
 
@@ -1152,6 +1214,7 @@ async function dispatchSingleTask(
   if (!task) {
     return { taskId, success: false, status: 'not_found', reason: '任务不存在' };
   }
+  const wasFailed = task.status === 'failed';
 
   let taskUrl = '';
   if (task.payload_json) {
@@ -1239,10 +1302,16 @@ async function dispatchSingleTask(
     }
   }
 
-  // 3. 准确同步 D1 状态与执行日志
-  await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
-    .bind(finalStatus, now, taskId)
-    .run();
+  // 3. 准确同步 D1 状态与执行日志（若从 failed 重试则清空旧失败摘要）
+  if (wasFailed) {
+    await env.DB.prepare("UPDATE pending_tasks SET status = ?, result_summary = '', updated_at = ? WHERE task_id = ?")
+      .bind(finalStatus, now, taskId)
+      .run();
+  } else {
+    await env.DB.prepare('UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ?')
+      .bind(finalStatus, now, taskId)
+      .run();
+  }
 
   if (finalStatus === 'dispatched') {
     await logExecution(

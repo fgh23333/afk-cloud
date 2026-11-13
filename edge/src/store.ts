@@ -239,12 +239,15 @@ export async function upsertPendingTask(
     );
     task = { ...task, taskId: canonicalTaskId };
 
-    // 若已存在且状态为 submitted / draft_saved，则不覆盖其已完成状态；若新数据携带 notice idCode，仅补充合并 payload_json
+    // 若已存在且状态为 submitted / draft_saved / ignored，则不覆盖其终态；若新数据携带 notice idCode，仅补充合并 payload_json
     const existing = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
       .bind(task.taskId)
       .first<{ status: string; payload_json?: string }>();
 
-    if (existing && (existing.status === 'submitted' || existing.status === 'draft_saved')) {
+    if (
+      existing &&
+      (existing.status === 'submitted' || existing.status === 'draft_saved' || existing.status === 'ignored')
+    ) {
       if (task.payload && typeof task.payload === 'object') {
         try {
           const prevPayload = existing.payload_json ? JSON.parse(existing.payload_json) : {};
