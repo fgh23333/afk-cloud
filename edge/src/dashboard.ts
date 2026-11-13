@@ -154,7 +154,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   try {
     const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes, enrolledCoursesRes, signinLogsRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
-      env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
+      env.DB.prepare("SELECT id, event_type, platform, summary, created_at FROM execution_logs WHERE summary NOT LIKE '[历史同步]%' ORDER BY id DESC LIMIT 50"),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
       env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type IN ('signin', 'sign_success')"),

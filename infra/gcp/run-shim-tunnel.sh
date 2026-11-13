@@ -77,8 +77,8 @@ sync_worker_secret() {
     -d "$payload" \
     "$api_url")
   http_code=$(echo "$resp" | tail -n1)
-  if [[ "$http_code" == "200" ]]; then
-    log_utc8 "✅ 已自动更新 Worker [${WORKER_NAME}] Secret: AFK_SHIM_URL=${tunnel_url}"
+  if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+    log_utc8 "✅ 已自动更新 Worker [${WORKER_NAME}] Secret: AFK_SHIM_URL=${tunnel_url} (HTTP=${http_code})"
   else
     log_utc8 "❌ 更新 Worker Secret 失败 (HTTP=${http_code}): $(echo "$resp" | sed '$d')"
   fi
