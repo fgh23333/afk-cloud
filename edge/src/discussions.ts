@@ -9,12 +9,15 @@ import {
 } from './chaoxing';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
 import {
+  claimDiscussionForPublishing,
   getCachedSession,
   getDiscussionById,
   getKnownDiscussionMetaMap,
   logExecution,
   markDiscussionPublished,
+  restoreDiscussionAfterPublishFailure,
   saveCachedSession,
+  updateDiscussionStatus,
   upsertDiscoveredDiscussion,
 } from './store';
 
@@ -179,89 +182,189 @@ export async function approveAndPublishDiscussion(
     return { success: false, msg: '讨论记录不存在', discussionId };
   }
 
+  if (row.status === 'submitted') {
+    return { success: false, msg: '该讨论回复已提交，请勿重复发布', discussionId };
+  }
+  if (row.status === 'publishing') {
+    return { success: false, msg: '该讨论回复正在发布中，请勿重复点击', discussionId };
+  }
+  if (row.status === 'replied_externally') {
+    return { success: false, msg: '检测到本人已在该讨论帖回复，无需重复发布', discussionId };
+  }
+
   const content = (overrideReplyText !== undefined ? overrideReplyText : row.draft_reply || '').trim();
   if (!content) {
     return { success: false, msg: '回复内容为空，请先在看板填写或由 AI 生成拟稿后再审批发布', discussionId };
   }
 
-  let session = await ensureChaoxingEdgeSession(env);
-  if (!session) {
-    return { success: false, msg: '未配置或无法获取学习通登录态', discussionId };
+  const claimed = await claimDiscussionForPublishing(env, discussionId);
+  if (!claimed) {
+    return { success: false, msg: '该讨论正在发布中或已发布，请勿重复提交', discussionId };
   }
 
-  let replyParams: BbsReplyParams | null = null;
-  if (row.reply_params_json) {
-    try {
-      replyParams = JSON.parse(row.reply_params_json) as BbsReplyParams;
-    } catch {
-      replyParams = null;
+  let lockSettled = false;
+  try {
+    let session = await ensureChaoxingEdgeSession(env);
+    if (!session) {
+      await restoreDiscussionAfterPublishFailure(env, discussionId);
+      lockSettled = true;
+      return { success: false, msg: '未配置或无法获取学习通登录态', discussionId };
     }
-  }
 
-  // 若缺少 openc 或签名参数，从详情页实时拉取一次补齐
-  if ((!replyParams || !replyParams.openc) && row.topic_url) {
-    const freshDetail = await fetchTopicDetail(
-      {
-        topicId: String(row.topic_id),
-        courseId: String(row.course_id),
-        classId: String(row.class_id),
-        courseName: String(row.course_name || ''),
-        title: String(row.title || ''),
-        author: String(row.author || ''),
-        chapterLabel: String(row.chapter_label || ''),
-        detailUrl: String(row.topic_url),
-        bbsUrl: String(row.bbs_url || ''),
-        replyCount: Number(row.reply_count || 0),
-        isPinned: false,
-        isTeacherTopic: true,
-      },
-      session.cookie,
-      env.CHAOXING_REALNAME
-    );
-    replyParams = freshDetail.replyParams;
-  }
-
-  if (!replyParams) {
-    return { success: false, msg: '未能解析该讨论帖的提交参数 (话题可能已关闭回复)', discussionId };
-  }
-
-  let postRes = await postTopicReply(replyParams, content, session.cookie, row.topic_url);
-  // 若疑似会话过期导致失败，重登刷新一次后再试
-  if (!postRes.success && /登录|超时|过期|HTTP 302|HTTP 403/i.test(postRes.msg)) {
-    const phone = env.CHAOXING_PHONE || env.PHONE || '';
-    const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
-    if (phone && password) {
-      const freshSession = await login(phone, password);
-      if (freshSession) {
-        session = freshSession;
-        await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
-        postRes = await postTopicReply(replyParams, content, session.cookie, row.topic_url);
+    let replyParams: BbsReplyParams | null = null;
+    if (row.reply_params_json) {
+      try {
+        replyParams = JSON.parse(row.reply_params_json) as BbsReplyParams;
+      } catch {
+        replyParams = null;
       }
     }
+
+    // 若缺少 openc 或签名参数，从详情页实时拉取一次补齐
+    if ((!replyParams || !replyParams.openc) && row.topic_url) {
+      const freshDetail = await fetchTopicDetail(
+        {
+          topicId: String(row.topic_id),
+          courseId: String(row.course_id),
+          classId: String(row.class_id),
+          courseName: String(row.course_name || ''),
+          title: String(row.title || ''),
+          author: String(row.author || ''),
+          chapterLabel: String(row.chapter_label || ''),
+          detailUrl: String(row.topic_url),
+          bbsUrl: String(row.bbs_url || ''),
+          replyCount: Number(row.reply_count || 0),
+          isPinned: false,
+          isTeacherTopic: true,
+        },
+        session.cookie,
+        env.CHAOXING_REALNAME
+      );
+      if (freshDetail.myReplied) {
+        await updateDiscussionStatus(env, discussionId, 'replied_externally');
+        lockSettled = true;
+        return { success: false, msg: '检测到本人已在学习通回复该话题，已同步状态并取消重复提交', discussionId };
+      }
+      replyParams = freshDetail.replyParams;
+    }
+
+    if (!replyParams) {
+      await restoreDiscussionAfterPublishFailure(env, discussionId);
+      lockSettled = true;
+      return { success: false, msg: '未能解析该讨论帖的提交参数 (话题可能已关闭回复)', discussionId };
+    }
+
+    let postRes = await postTopicReply(replyParams, content, session.cookie, row.topic_url);
+    // 若疑似会话过期导致失败，重登刷新一次后再试
+    if (!postRes.success && /登录|超时|过期|HTTP 302|HTTP 403/i.test(postRes.msg)) {
+      const phone = env.CHAOXING_PHONE || env.PHONE || '';
+      const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+      if (phone && password) {
+        const freshSession = await login(phone, password);
+        if (freshSession) {
+          session = freshSession;
+          await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+          postRes = await postTopicReply(replyParams, content, session.cookie, row.topic_url);
+        }
+      }
+    }
+
+    if (!postRes.success) {
+      await restoreDiscussionAfterPublishFailure(env, discussionId);
+      lockSettled = true;
+      return { success: false, msg: postRes.msg, discussionId };
+    }
+
+    lockSettled = true;
+    await markDiscussionPublished(env, discussionId, content);
+    await logExecution(
+      env,
+      'discussion_replied',
+      'chaoxing',
+      `已批准并发布讨论回复：《${row.course_name}》- ${row.title}`,
+      { discussionId, topicId: row.topic_id, replyLength: content.length }
+    );
+    await sendNotification(
+      '学习通话题讨论回复已发布 ✅',
+      `课程：《${row.course_name}》\n话题：${row.title}\n字数：${content.length} 字`,
+      env
+    );
+
+    return {
+      success: true,
+      msg: postRes.msg,
+      discussionId,
+      postedReply: content,
+    };
+  } catch (err: any) {
+    if (!lockSettled) {
+      await restoreDiscussionAfterPublishFailure(env, discussionId);
+    }
+    return {
+      success: false,
+      msg: err?.message || '发布讨论回复异常',
+      discussionId,
+    };
+  }
+}
+
+const ALLOWED_EXTERNAL_DISCUSSION_STATUSES = new Set(['replied_externally', 'ignored']);
+
+/**
+ * 校验并更新讨论安全状态（白名单仅允许 replied_externally / ignored，防止绕过审批门伪造 submitted）
+ */
+export async function handleDiscussionStatusUpdate(
+  env: ExtendedNotifyEnv,
+  discussionId: string,
+  status: string
+): Promise<{
+  ok: boolean;
+  statusCode: number;
+  discussionId: string;
+  status?: string;
+  unchanged?: boolean;
+  error?: string;
+}> {
+  const normalizedStatus = status.trim();
+  if (!discussionId || !ALLOWED_EXTERNAL_DISCUSSION_STATUSES.has(normalizedStatus)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      discussionId,
+      error: '非法状态参数，仅支持 replied_externally 或 ignored',
+    };
   }
 
-  if (!postRes.success) {
-    return { success: false, msg: postRes.msg, discussionId };
+  const existing = await getDiscussionById(env, discussionId);
+  if (!existing) {
+    return {
+      ok: false,
+      statusCode: 404,
+      discussionId,
+      error: '讨论记录不存在',
+    };
   }
 
-  await markDiscussionPublished(env, discussionId, content);
-  await logExecution(
+  if (existing.status === 'submitted' || existing.status === 'publishing') {
+    return {
+      ok: true,
+      statusCode: 200,
+      discussionId,
+      status: existing.status,
+      unchanged: true,
+    };
+  }
+
+  const ok = await updateDiscussionStatus(
     env,
-    'discussion_replied',
-    'chaoxing',
-    `已批准并发布讨论回复：《${row.course_name}》- ${row.title}`,
-    { discussionId, topicId: row.topic_id, replyLength: content.length }
-  );
-  await sendNotification(
-    '学习通话题讨论回复已发布 ✅',
-    `课程：《${row.course_name}》\n话题：${row.title}\n字数：${content.length} 字`,
-    env
-  );
-
-  return {
-    success: true,
-    msg: postRes.msg,
     discussionId,
-    postedReply: content,
+    normalizedStatus as 'replied_externally' | 'ignored'
+  );
+  return {
+    ok,
+    statusCode: ok ? 200 : 500,
+    discussionId,
+    status: normalizedStatus,
+    ...(ok ? {} : { error: '更新讨论状态失败' }),
   };
 }
