@@ -76,11 +76,17 @@ export async function getCourseHomeworkList(
     const statusM = text.match(/作业状态：\s*([^\s]+)/);
 
     const statusText = statusM ? statusM[1] : statusType === '1' ? '待批阅' : '待做';
+    const isDone =
+      statusText.includes('待批') ||
+      statusText.includes('已批') ||
+      statusText.includes('已交') ||
+      statusText.includes('完成');
     const isPending =
-      hasPendingDot ||
-      statusText.includes('待做') ||
-      statusText.includes('未交') ||
-      statusText.includes('重新编辑');
+      !isDone &&
+      (hasPendingDot ||
+        statusText.includes('待做') ||
+        statusText.includes('未交') ||
+        statusText.includes('重新编辑'));
     const canEdit = statusType === '0' || statusType === '1' || statusType === '4' || isPending;
 
     if (workId) {
@@ -331,17 +337,29 @@ export async function submitHomework(
 
   const hwReferer = `https://mooc1-1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=${homework.courseId}&classId=${homework.classId}&workId=${homework.workId}&cpi=${session.cpi}`;
 
-  const res = await fetch(submitUrl, {
-    method: 'POST',
-    headers: {
-      Cookie: session.courseCookie,
-      'User-Agent': BROWSER_UA,
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'X-Requested-With': 'XMLHttpRequest',
-      Referer: hwReferer,
-    },
-    body: postData.toString(),
-  });
+  let res: Response | undefined;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      res = await fetch(submitUrl, {
+        method: 'POST',
+        headers: {
+          Cookie: session.courseCookie,
+          'User-Agent': BROWSER_UA,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          Referer: hwReferer,
+        },
+        body: postData.toString(),
+      });
+      break;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      await new Promise((r) => setTimeout(r, 1200 * attempt));
+    }
+  }
+  if (!res) {
+    throw new Error('学习通作业提交/暂存请求未返回响应');
+  }
 
   const text = await res.text();
   let json: any = null;

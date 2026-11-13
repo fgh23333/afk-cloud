@@ -44,16 +44,16 @@ gcloud compute ssh afk-node --zone=us-west1-a --command="curl -fsSL https://raw.
 
 ---
 
-## 4. 模型配额保护铁律：切至 Gemini 3.8 Flash
+## 4. 默认模型策略：Gemini 4 Hydrogen 分级调度
 
-为了防止过快耗尽高价值的 Gemini Pro Quota，Agent 在调度与执行解题时必须严格执行模型分级策略：
+Agent 在调度与执行解题时按任务复杂度使用 Gemini 4 Hydrogen 分级模型：
 
 > [!IMPORTANT]
-> **主力轨优先切换至 Gemini 3.8 Flash (`gemini-3.8-flash` / `flash`)**：
-> - 针对在读课程扫描、客观题批量作答（单选/多选/判断/填空）、常规数据清洗与日常心跳，**默认一律使用 Gemini 3.8 Flash**。
-> - 在 `.env` 中配置：`AFK_FLASH_MODEL=gemini-3.8-flash`。
-> - Gemini 3.8 Flash 具备极高响应速度与高并发吞吐，能大幅降低 Token 消耗并避免触发 Pro 配额限流。
-> - **何时才升级到 Gemini Pro**：仅当遇到 1M Token 超长课件 RAG 深度检索、包含电路/几何图表的多模态大题、以及 PTA 算法代码沙箱反思自愈时，才按需升级调用 Gemini Pro。
+> **主力轨默认切换至 Gemini 4 Hydrogen (`gemini-4-hydrogen-medium` / `gemini-4-hydrogen-xhigh`)**：
+> - 针对在读课程扫描、客观题批量作答（单选/多选/判断/填空）、常规数据清洗与日常心跳，**默认使用 `gemini-4-hydrogen-medium`**。
+> - 在 `.env` 中配置：`AFK_FLASH_MODEL=gemini-4-hydrogen-medium`，`AFK_PRO_MODEL=gemini-4-hydrogen-xhigh`。
+> - Gemini 4 Hydrogen Medium 具备极高响应速度与并发吞吐，能在保证客观题准确率的同时避免不必要的高档位配额消耗。
+> - **何时升级到 Gemini 4 Hydrogen XHigh**：当遇到 1M Token 超长课件 RAG 深度检索、包含电路/几何图表的多模态大题、主观论述及 PTA 算法代码沙箱反思自愈时，按需升级调用 `gemini-4-hydrogen-xhigh`。
 
 ---
 

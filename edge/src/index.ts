@@ -763,7 +763,7 @@ export default {
         return corsJson({ tasks: rows.results || [] });
       }
 
-      // 批量同步作业待办
+      // 批量同步作业待办 (支持跨 prefix workId 状态联动对齐与 DO 锁释放)
       if ((url.pathname === '/api/tasks/sync' || url.pathname === '/api/sync') && request.method === 'POST') {
         if (!env.DB) return corsJson({ error: 'DB not available' }, 500);
         const body: any = await request.json();
@@ -774,14 +774,19 @@ export default {
         for (const t of tasks) {
           if (!t.workId && !t.taskId) continue;
           const tid = t.taskId || `chaoxing-work-${t.workId}`;
+          const rawId = String(t.workId || tid.replace(/^chaoxing-(?:notice-)?(?:work|hw)-/, '').split('-')[0] || '');
+          const nextStatus = t.status || (t.isPending ? 'pending' : 'submitted');
+          const resultSummary = t.resultSummary || null;
+
           await env.DB.prepare(
             `INSERT INTO pending_tasks 
-             (task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, payload_json, updated_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, result_summary, payload_json, updated_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(task_id) DO UPDATE SET 
                title = excluded.title,
-               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'submitted') THEN pending_tasks.status ELSE excluded.status END,
+               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'submitted') AND excluded.status = 'pending' THEN pending_tasks.status ELSE excluded.status END,
                deadline = excluded.deadline,
+               result_summary = COALESCE(excluded.result_summary, pending_tasks.result_summary),
                payload_json = excluded.payload_json,
                updated_at = excluded.updated_at`
           )
@@ -792,17 +797,56 @@ export default {
               t.classId || '',
               t.courseName || '',
               t.title || '',
-              t.status || (t.isPending ? 'pending' : 'submitted'),
+              nextStatus,
               t.computeTier || 'tier1-cloud-run',
               t.deadline || '',
+              resultSummary,
               JSON.stringify(t),
               now,
               now
             )
             .run();
+
+          if (rawId && (nextStatus === 'draft_saved' || nextStatus === 'submitted')) {
+            await env.DB.prepare(
+              `UPDATE pending_tasks 
+               SET status = ?, result_summary = COALESCE(?, result_summary), updated_at = ?
+               WHERE (task_id LIKE ? OR task_id LIKE ?) AND status != ?`
+            )
+              .bind(nextStatus, resultSummary, now, `%work-${rawId}%`, `%hw-${rawId}%`, nextStatus)
+              .run()
+              .catch(() => {});
+
+            await logExecution(
+              env,
+              nextStatus,
+              t.platform || 'chaoxing',
+              `作业《${t.courseName || ''} - ${t.title || ''}》已${nextStatus === 'draft_saved' ? '暂存草稿 (pyFlag=1)' : '正式提交'}`,
+              { taskId: tid, rawId, resultSummary }
+            ).catch(() => {});
+          }
+
+          if (env.SOLVER_AGENT && ['draft_saved', 'submitted', 'failed'].includes(nextStatus)) {
+            try {
+              const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+              await (solverStub as any).syncExternalTaskStatus(tid, nextStatus, resultSummary || undefined);
+            } catch {
+              // ignore DO sync error
+            }
+          }
+
           updatedCount++;
         }
         return corsJson({ synced: updatedCount, time: nowUtc8() });
+      }
+
+      // 供无公网隧道环境下的本地 Worker / Cron 主动拉取待执行与超期未回调任务
+      if ((url.pathname === '/api/tasks/pull' || url.pathname === '/api/tasks/pending') && request.method === 'GET') {
+        if (!env.DB) return corsJson({ error: 'DB not available' }, 500);
+        const rows = await env.DB.prepare(
+          `SELECT * FROM pending_tasks WHERE status IN ('pending', 'dispatched') ORDER BY updated_at ASC LIMIT 20`
+        ).all<any>();
+        return corsJson({ ok: true, tasks: rows.results || [], time: nowUtc8() });
       }
 
       // 查询当前全局任务调度队列与单例执行状态
@@ -1094,8 +1138,8 @@ async function dispatchSingleTask(
   const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
   const shimSecret = env.AFK_SHIM_SECRET;
   const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
-  let finalStatus = 'dispatched';
-  let reasonMsg = '';
+  let finalStatus = 'pending';
+  let reasonMsg = '等待客户端或 shim 执行';
 
   if (env.SOLVER_AGENT) {
     try {

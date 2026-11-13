@@ -40,6 +40,6 @@ description: 超星学习通（Chaoxing）全功能适配器技能。涵盖 DES 
    - 针对每道作业题干提取核心学科关键词，在课程资料库中进行相关性打分检索（`searchCourseMaterialsContext`）。
 2. **D1 题库缓存优先**：
    - 计算题目唯一指纹 `sha256(type + normalizedTitle + normalizedOptions)`，若命中缓存直接 0 Token 秒回。
-3. **Flash 批量客观题 JSON + Pro 专项主观/编程题**：
-   - 单选、多选、判断、填空题一次性打包发给 `AFK_FLASH_MODEL`（默认 `flash`），返回结构化 JSON 映射。
-   - 简答、论述、编程题单独路由给 `AFK_PRO_MODEL`（默认 `pro`），并在 `downloads/courses/<课程名>/homeworks/` 下生成完整的 UTC+8 Markdown 报告。
+3. **Medium 批量客观题 JSON + XHigh 专项主观/编程题**：
+   - 单选、多选、判断、填空题一次性打包发给 `AFK_FLASH_MODEL`（默认 `gemini-4-hydrogen-medium`），返回结构化 JSON 映射。
+   - 简答、论述、编程题单独路由给 `AFK_PRO_MODEL`（默认 `gemini-4-hydrogen-xhigh`），并在 `downloads/courses/<课程名>/homeworks/` 下生成完整的 UTC+8 Markdown 报告。

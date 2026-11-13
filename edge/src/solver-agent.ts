@@ -3,7 +3,7 @@ import { isAllowedTaskUrl } from './auth';
 import { computeQuestionHash } from './hash';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
 import { signRequest } from './request-signing';
-import { nowUtc8, upsertPendingTask, upsertQuestionCache } from './store';
+import { nowUtc8, parseUtc8ToMs, upsertPendingTask, upsertQuestionCache } from './store';
 
 export { computeQuestionHash, isAllowedTaskUrl };
 
@@ -90,9 +90,9 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       if (rows.length > 0) {
         const activeTask = rows[0];
         if (['dispatched', 'submitting'].includes(activeTask.status)) {
-          // 检查是否超时 (> 15 分钟)
-          const startedTime = new Date(activeTask.updated_at).getTime();
-          const elapsedMs = Date.now() - (isNaN(startedTime) ? Date.now() : startedTime);
+          // 检查是否超时 (> 15 分钟)；无法解析的时间戳视作已超时以免死锁
+          const startedTime = parseUtc8ToMs(activeTask.updated_at);
+          const elapsedMs = isNaN(startedTime) ? 15 * 60 * 1000 + 1 : Date.now() - startedTime;
           if (elapsedMs < 15 * 60 * 1000) {
             return {
               dispatched: false,
@@ -101,18 +101,25 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
             };
           }
 
-          // 超时熔断
-          console.warn(`[SolverAgent 熔断] 任务 [${this.state.activeJobId}] 运行超过 15 分钟未响应，强制判定超时并释放单例锁`);
+          // 超时熔断：若未配置 shimUrl，则退回 pending 等待客户端主动拉取；若已配置 shimUrl 但超时未回调，标记为 failed
+          const hasShim = !!(this.env.AFK_SHIM_URL || this.env.SHIM_URL);
+          const timeoutStatus = hasShim ? 'failed' : 'pending';
+          const timeoutSummary = hasShim
+            ? '执行超时 (>15分钟)，边缘控制器已自动熔断回收'
+            : '边缘等待超时，已重置为待拉取队列';
+          console.warn(`[SolverAgent 熔断] 任务 [${this.state.activeJobId}] 超过 15 分钟未响应，状态重置为 ${timeoutStatus}`);
           this.ctx.storage.sql.exec(
-            "UPDATE tasks SET status = 'failed', summary = '执行超时 (>15分钟)，边缘控制器已自动熔断回收', updated_at = ? WHERE job_id = ?",
+            'UPDATE tasks SET status = ?, summary = ?, updated_at = ? WHERE job_id = ?',
+            timeoutStatus,
+            timeoutSummary,
             now,
             this.state.activeJobId
           );
           if (this.env.DB) {
             await this.env.DB.prepare(
-              "UPDATE pending_tasks SET status = 'failed', result_summary = '执行超时 (>15分钟)，边缘控制器已自动熔断回收', updated_at = ? WHERE task_id = ?"
+              'UPDATE pending_tasks SET status = ?, result_summary = ?, updated_at = ? WHERE task_id = ?'
             )
-              .bind(now, this.state.activeJobId)
+              .bind(timeoutStatus, timeoutSummary, now, this.state.activeJobId)
               .run()
               .catch(() => {});
           }
@@ -224,6 +231,11 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       return false;
     }
 
+    if (!shimUrl) {
+      console.warn(`[SolverAgent] 未配置 AFK_SHIM_URL，任务 [${jobId}] 保持 pending 等待客户端主动拉取`);
+      return false;
+    }
+
     const now = nowUtc8();
     this.ctx.storage.sql.exec(
       'UPDATE tasks SET status = ?, attempts = attempts + 1, updated_at = ? WHERE job_id = ?',
@@ -237,11 +249,6 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         .bind('dispatched', now, jobId)
         .run()
         .catch(() => {});
-    }
-
-    if (!shimUrl) {
-      console.warn(`[SolverAgent] 未配置 AFK_SHIM_URL，任务 [${jobId}] 保持 dispatched 等待 shim 接入`);
-      return false;
     }
 
     try {
@@ -495,58 +502,116 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   }
 
   /**
-   * 兜底对账轮询 (当回调偶发丢失时推进状态，带签名查询)
+   * 外部执行回执同步：CLI/Cron 自主完成草稿或提交后，立即更新 DO 状态并释放全局单例锁
+   */
+  @callable()
+  async syncExternalTaskStatus(jobId: string, status: string, summary?: string): Promise<void> {
+    const now = nowUtc8();
+    const rawId = jobId.replace(/^chaoxing-(?:notice-)?(?:work|hw)-/, '').split('-')[0];
+    const finalSummary = summary || '';
+
+    this.ctx.storage.sql.exec(
+      'UPDATE tasks SET status = ?, summary = COALESCE(NULLIF(?, \'\'), summary), updated_at = ? WHERE job_id = ?',
+      status,
+      finalSummary,
+      now,
+      jobId
+    );
+
+    if (rawId) {
+      this.ctx.storage.sql.exec(
+        'UPDATE tasks SET status = ?, summary = COALESCE(NULLIF(?, \'\'), summary), updated_at = ? WHERE job_id LIKE ? OR job_id LIKE ?',
+        status,
+        finalSummary,
+        now,
+        `%work-${rawId}%`,
+        `%hw-${rawId}%`
+      );
+    }
+
+    if (this.state.activeJobId && (this.state.activeJobId === jobId || (rawId && this.state.activeJobId.includes(rawId)))) {
+      if (['draft_saved', 'submitted', 'failed', 'pending'].includes(status)) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+    }
+  }
+
+  /**
+   * 兜底对账轮询 (当回调偶发丢失或队列超时卡死时自动推进状态与释放单例锁)
    */
   async reconcileDispatchedTasks(): Promise<void> {
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
     const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
-    if (!shimUrl) return;
 
     const cursor = this.ctx.storage.sql.exec(
       "SELECT * FROM tasks WHERE status IN ('dispatched', 'submitting') LIMIT 10"
     );
     const tasks = [...cursor] as any[];
 
-    for (const t of tasks) {
-      try {
-        const pathWithQuery = `/status/${encodeURIComponent(t.job_id)}`;
-        const endpoint = new URL(pathWithQuery, shimUrl.replace(/\/+$/, '') + '/');
-        const headers: Record<string, string> = {};
+    if (shimUrl) {
+      for (const t of tasks) {
+        try {
+          const pathWithQuery = `/status/${encodeURIComponent(t.job_id)}`;
+          const endpoint = new URL(pathWithQuery, shimUrl.replace(/\/+$/, '') + '/');
+          const headers: Record<string, string> = {};
 
-        if (shimSecret) {
-          const sigHeaders = await signRequest({
-            secret: shimSecret,
-            method: 'GET',
-            pathWithQuery,
-          });
-          Object.assign(headers, sigHeaders);
-        } else if (shimToken) {
-          headers['Authorization'] = `Bearer ${shimToken}`;
-        }
-
-        const res = await fetch(endpoint.toString(), { headers });
-        if (res.ok) {
-          const remote: any = await res.json();
-          if (remote?.phase && remote.phase !== t.status) {
-            console.log(`[SolverAgent 对账兜底] 任务 [${t.job_id}] 状态由 ${t.status} 推进为 ${remote.phase}`);
-            await this.handleCallback({
-              jobId: t.job_id,
-              phase: remote.phase,
-              qa: remote.qa,
-              summary: remote.summary,
-              error: remote.error,
-              platform: t.platform,
-              taskUrl: t.task_url,
+          if (shimSecret) {
+            const sigHeaders = await signRequest({
+              secret: shimSecret,
+              method: 'GET',
+              pathWithQuery,
             });
+            Object.assign(headers, sigHeaders);
+          } else if (shimToken) {
+            headers['Authorization'] = `Bearer ${shimToken}`;
+          }
+
+          const res = await fetch(endpoint.toString(), { headers });
+          if (res.ok) {
+            const remote: any = await res.json();
+            if (remote?.phase && remote.phase !== t.status) {
+              console.log(`[SolverAgent 对账兜底] 任务 [${t.job_id}] 状态由 ${t.status} 推进为 ${remote.phase}`);
+              await this.handleCallback({
+                jobId: t.job_id,
+                phase: remote.phase,
+                qa: remote.qa,
+                summary: remote.summary,
+                error: remote.error,
+                platform: t.platform,
+                taskUrl: t.task_url,
+              });
+            }
+          }
+        } catch {
+          // ignore network jitter
+        }
+      }
+    } else {
+      // 未配置 shimUrl 时，将超过 15 分钟卡在 dispatched 的历史任务回收至 pending 等待客户端拉取
+      const now = nowUtc8();
+      for (const t of tasks) {
+        const startedMs = parseUtc8ToMs(t.updated_at);
+        const elapsedMs = isNaN(startedMs) ? 15 * 60 * 1000 + 1 : Date.now() - startedMs;
+        if (elapsedMs >= 15 * 60 * 1000) {
+          this.ctx.storage.sql.exec(
+            "UPDATE tasks SET status = 'pending', updated_at = ? WHERE job_id = ?",
+            now,
+            t.job_id
+          );
+          if (this.env.DB) {
+            await this.env.DB.prepare(
+              "UPDATE pending_tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'dispatched'"
+            )
+              .bind(now, t.job_id)
+              .run()
+              .catch(() => {});
           }
         }
-      } catch {
-        // ignore network jitter
       }
     }
 
-    // 2. 检查是否有空闲单例槽位，自动驱动队列出队
+    // 2. 检查是否有空闲单例槽位或超时锁，自动驱动队列出队与锁释放
     await this.tryDispatchNext();
   }
 }
