@@ -31,7 +31,9 @@ jobs:
         run: pnpm install
 
       - name: Pre-deployment Typecheck
-        run: pnpm typecheck
+        run: |
+          pnpm typecheck
+          npx tsc --noEmit -p edge/tsconfig.json
 
       - name: Check Cloudflare Credentials
         id: cf_check
@@ -43,14 +45,53 @@ jobs:
             echo "ℹ️ 未检测到 CLOUDFLARE_API_TOKEN，跳过生产部署步骤 (Dry-run)"
           fi
 
-      - name: Deploy to Cloudflare Workers
+      - name: Generate Wrangler Runtime Config
         if: steps.cf_check.outputs.has_token == 'true'
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: 'edge'
-          command: deploy
+        env:
+          D1_ID: ${{ secrets.AFK_D1_DATABASE_ID }}
+          KV_ID: ${{ secrets.AFK_KV_NAMESPACE_ID }}
+        run: |
+          if [ ! -f edge/wrangler.jsonc ]; then
+            if [ -z "$D1_ID" ] || [ -z "$KV_ID" ]; then
+              echo "❌ 缺少 AFK_D1_DATABASE_ID 或 AFK_KV_NAMESPACE_ID Secret，无法生成 wrangler.jsonc"
+              exit 1
+            fi
+            node -e '
+              const fs = require("fs");
+              const cfg = {
+                "$schema": "node_modules/wrangler/config-schema.json",
+                "name": "chaoxing-dashboard-worker",
+                "main": "src/index.ts",
+                "compatibility_date": "2024-11-01",
+                "compatibility_flags": ["nodejs_compat"],
+                "keep_vars": true,
+                "triggers": { "crons": ["* * * * *"] },
+                "d1_databases": [
+                  {
+                    "binding": "DB",
+                    "database_name": "afk-cloud-db",
+                    "database_id": process.env.D1_ID
+                  }
+                ],
+                "kv_namespaces": [
+                  {
+                    "binding": "CHAOXING_KV",
+                    "id": process.env.KV_ID
+                  }
+                ],
+                "durable_objects": {
+                  "bindings": [
+                    { "name": "SIGN_AGENT", "class_name": "SignAgent" },
+                    { "name": "SOLVER_AGENT", "class_name": "SolverAgent" }
+                  ]
+                },
+                "migrations": [
+                  { "tag": "v1", "new_sqlite_classes": ["SignAgent", "SolverAgent"] }
+                ]
+              };
+              fs.writeFileSync("edge/wrangler.jsonc", JSON.stringify(cfg, null, 2) + "\n");
+            '
+          fi
 
       - name: Apply Remote D1 Migrations
         if: steps.cf_check.outputs.has_token == 'true'
@@ -61,22 +102,38 @@ jobs:
           workingDirectory: 'edge'
           command: d1 migrations apply DB --remote
 
+      - name: Deploy to Cloudflare Workers
+        if: steps.cf_check.outputs.has_token == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: 'edge'
+          command: deploy --keep-vars
+
       - name: Post-Deployment Observability Probe & Rollback Guard
         if: steps.cf_check.outputs.has_token == 'true'
         run: |
           PROBE_URL="${{ secrets.AFK_ENDPOINT_URL || 'https://afk.idiotshoumy.com' }}/health"
           echo "📡 正在对上线服务执行端到端健康可观测性探测: $PROBE_URL"
-          
+
           MAX_RETRIES=5
           SUCCESS=0
           for i in $(seq 1 $MAX_RETRIES); do
             echo "第 $i 次探测中..."
             HTTP_CODE=$(curl -s -o /tmp/health_resp.json -w "%{http_code}" "$PROBE_URL" || echo "000")
             if [ "$HTTP_CODE" = "200" ]; then
-              STATUS=$(cat /tmp/health_resp.json | grep -o '"status":"[^"]*"' | cut -d':' -f2 | tr -d '"')
-              if [ "$STATUS" = "healthy" ]; then
+              HEALTH_OK=$(node -e "
+                try {
+                  const j = JSON.parse(require('fs').readFileSync('/tmp/health_resp.json', 'utf8'));
+                  const ok = j.status === 'healthy' && (!j.components || !j.components.d1 || j.components.d1.status === 'healthy');
+                  process.stdout.write(ok ? 'true' : 'false');
+                } catch { process.stdout.write('false'); }
+              ")
+              if [ "$HEALTH_OK" = "true" ]; then
                 echo "✅ 边缘服务健康检查完全通过 (HTTP 200, status: healthy)"
                 cat /tmp/health_resp.json
+                echo ""
                 SUCCESS=1
                 break
               fi
@@ -96,4 +153,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: 'edge'
-          command: rollback
+          command: rollback --yes --message "Automated rollback: post-deploy /health observability probe failed"
