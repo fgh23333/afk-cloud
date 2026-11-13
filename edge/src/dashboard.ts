@@ -8,6 +8,7 @@ export interface DashboardData {
   stats: {
     pendingCount: number;
     dispatchedCount?: number;
+    submittingCount?: number;
     draftCount: number;
     submittedCount: number;
     failedCount: number;
@@ -127,6 +128,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     stats: {
       pendingCount: 0,
       dispatchedCount: 0,
+      submittingCount: 0,
       draftCount: 0,
       submittedCount: 0,
       failedCount: 0,
@@ -152,13 +154,13 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   try {
     const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes, enrolledCoursesRes, signinLogsRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
-      env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
+      env.DB.prepare("SELECT id, event_type, platform, summary, created_at FROM execution_logs WHERE summary NOT LIKE '[历史同步]%' ORDER BY id DESC LIMIT 50"),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
       env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type IN ('signin', 'sign_success')"),
       env.DB.prepare('SELECT id_code, title, creater_name, send_time, content, tag, source_type, raw_json FROM notices ORDER BY send_time DESC LIMIT 30'),
       env.DB.prepare('SELECT course_id, class_id, course_name, cpi, teacher_name FROM enrolled_courses ORDER BY course_name ASC'),
-      env.DB.prepare("SELECT id, event_type, platform, summary, created_at FROM execution_logs WHERE event_type IN ('signin', 'sign_success', 'sign_fail') ORDER BY id DESC LIMIT 30"),
+      env.DB.prepare("SELECT id, event_type, platform, summary, detail_json, created_at FROM execution_logs WHERE (event_type IN ('signin', 'sign_success', 'sign_fail') OR event_type = 'sign_missed') ORDER BY id DESC LIMIT 60"),
     ]);
 
     const tasks = (tasksRes.results || []) as DashboardData['tasks'];
@@ -179,6 +181,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
 
     let pendingCount = 0;
     let dispatchedCount = 0;
+    let submittingCount = 0;
     let draftCount = 0;
     let submittedCount = 0;
     let failedCount = 0;
@@ -193,6 +196,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     const getStatusPriority = (status: string): number => {
       switch (status) {
         case 'submitted':
+          return 7;
+        case 'submitting':
           return 6;
         case 'draft_saved':
           return 5;
@@ -220,6 +225,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         statusLabel = '已派发';
       } else if (t.status === 'draft_saved' || t.status === 'awaiting_approval') {
         statusLabel = '做完暂存';
+      } else if (t.status === 'submitting') {
+        statusLabel = '正式提交中';
       } else if (t.status === 'submitted') {
         statusLabel = '已提交';
       } else if (t.status === 'failed') {
@@ -276,7 +283,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         platform: t.platform || 'chaoxing',
         computeTier: t.compute_tier || 'tier1-cloud-run',
         resultSummary: t.result_summary || '',
-        aiSolved: t.status === 'draft_saved' || t.status === 'submitted',
+        aiSolved: t.status === 'draft_saved' || t.status === 'submitting' || t.status === 'submitted',
         url: primaryUrl,
         directUrl,
         noticeUrl,
@@ -345,6 +352,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         dispatchedCount++;
       } else if (hw.status === 'draft_saved' || hw.status === 'awaiting_approval') {
         draftCount++;
+      } else if (hw.status === 'submitting') {
+        submittingCount++;
       } else if (hw.status === 'submitted') {
         submittedCount++;
       } else if (hw.status === 'failed') {
@@ -367,42 +376,105 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       }
     }
 
-    const signinHistory: NonNullable<DashboardData['signinHistory']> = [];
+    const signinMap = new Map<
+      string,
+      {
+        rank: number;
+        id: number;
+        ms: number;
+        item: NonNullable<DashboardData['signinHistory']>[number];
+      }
+    >();
     const notices: NonNullable<DashboardData['notices']> = [];
     const exams: NonNullable<DashboardData['exams']> = [];
 
-    for (const log of signinLogs) {
+    for (const log of signinLogs as Array<any>) {
+      let detail: any = null;
+      if (log.detail_json) {
+        try {
+          detail = JSON.parse(log.detail_json);
+        } catch {
+          detail = null;
+        }
+      }
+      const summary = String(log.summary || '');
       const isSuccess =
         log.event_type === 'sign_success' ||
-        (log.event_type === 'signin' && !log.summary.includes('异常') && !log.summary.includes('失败')) ||
-        log.summary.includes('成功');
-      const courseMatch = log.summary.match(/《(.*?)》/);
-      const courseName = courseMatch ? courseMatch[1] : (log.summary.split(':')[0] || '在线课程');
-      const typeMatch = log.summary.match(/\[([^\]]*签到[^\]]*)\]/);
-      const signType = log.summary.includes('位置')
-        ? '位置签到'
-        : log.summary.includes('拍照')
-          ? '拍照签到'
-          : log.summary.includes('手势')
-            ? '手势签到'
-            : log.summary.includes('签到码')
-              ? '签到码签到'
-              : log.summary.includes('二维码')
-                ? '二维码签到'
-                : typeMatch
-                  ? typeMatch[1]
-                  : '通用签到';
-      const parenMatch = log.summary.match(/\(([^()]{1,60})\)\s*$/);
-      const address = parenMatch && !parenMatch[1].startsWith('ID:') ? parenMatch[1] : '-';
+        (log.event_type === 'signin' && !summary.includes('异常') && !summary.includes('失败')) ||
+        summary.includes('成功') ||
+        summary.includes('已签');
+      const isMissed =
+        !isSuccess &&
+        (log.event_type === 'sign_missed' || summary.includes('已截止未签到') || summary.includes('已结束'));
+      const rank = isSuccess ? 3 : isMissed ? 2 : 1;
+      const resultText = isSuccess ? '签到成功' : isMissed ? '已截止未签到' : '签到异常';
 
-      signinHistory.push({
-        time: log.created_at,
-        courseName,
-        type: signType,
-        address,
-        result: isSuccess ? '签到成功' : '签到异常',
-      });
+      const courseMatch = summary.match(/《(.*?)》/);
+      const courseName = courseMatch ? courseMatch[1] : summary.split(':')[0] || '在线课程';
+      const typeMatch = summary.match(/\[([^\]]*签到[^\]]*)\]/);
+      const signTypeRaw = detail?.signType
+        ? String(detail.signType)
+        : summary.includes('位置')
+          ? '位置签到'
+          : summary.includes('拍照')
+            ? '拍照签到'
+            : summary.includes('手势')
+              ? '手势签到'
+              : summary.includes('签到码')
+                ? '签到码签到'
+                : summary.includes('二维码')
+                  ? '二维码签到'
+                  : typeMatch
+                    ? typeMatch[1]
+                    : '通用签到';
+      const actName = detail?.actName
+        ? String(detail.actName)
+        : summary.match(/《[^》]*》\[([^\]]+)\]/)?.[1] || '';
+      const signType = actName && actName !== signTypeRaw && !actName.includes(signTypeRaw)
+        ? `${signTypeRaw} · ${actName}`
+        : signTypeRaw;
+
+      const parenMatch = summary.match(/\(([^()]{1,80})\)\s*$/);
+      const parsedParen = parenMatch && !parenMatch[1].startsWith('ID:') ? parenMatch[1].trim() : '';
+      const address =
+        (detail?.address ? String(detail.address) : '') ||
+        parsedParen ||
+        (isSuccess ? '学习通自动打卡' : isMissed ? '已过截止时间' : '未匹配/等待凭证');
+
+      const activeId = detail?.activeId
+        ? String(detail.activeId)
+        : summary.match(/\bID:\s*(\d{5,})\b/)?.[1] || '';
+      const dedupKey = activeId ? `act_${activeId}` : `log_${log.id}`;
+      const tsMs = parseTimeToMs(log.created_at) || 0;
+
+      const prev = signinMap.get(dedupKey);
+      if (!prev || rank > prev.rank || (rank === prev.rank && Number(log.id || 0) > prev.id)) {
+        signinMap.set(dedupKey, {
+          rank,
+          id: Number(log.id || 0),
+          ms: tsMs,
+          item: {
+            time: log.created_at,
+            courseName,
+            type: signType,
+            address,
+            result: resultText,
+          },
+        });
+      }
     }
+
+    const hasHistorySyncRow = (signinLogs as Array<any>).some((l) => {
+      if (l.event_type === 'sign_missed') return true;
+      if (typeof l.detail_json === 'string' && l.detail_json.includes('history_sync')) return true;
+      return String(l.summary || '').includes('[历史同步]');
+    });
+
+    const signinEntries = Array.from(signinMap.values());
+    if (hasHistorySyncRow) {
+      signinEntries.sort((a, b) => (b.ms !== a.ms ? b.ms - a.ms : b.id - a.id));
+    }
+    const signinHistory: NonNullable<DashboardData['signinHistory']> = signinEntries.map((entry) => entry.item);
 
     const examMap = new Map<string, any>();
 
@@ -568,6 +640,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       stats: {
         pendingCount,
         dispatchedCount,
+        submittingCount,
         draftCount,
         submittedCount,
         failedCount,
@@ -694,7 +767,7 @@ export function renderDashboardHtml(): string {
           <span id="pendingHomeworkCount">0</span>
           <span class="text-xs font-normal text-slate-400">份未派发</span>
         </div>
-        <div class="mt-2 text-[11px] text-slate-400 truncate" id="solvedHomeworkCount">0 已派发 · 0 做完暂存 · 0 已提交</div>
+        <div class="mt-2 text-[11px] text-slate-400 truncate" id="solvedHomeworkCount">0 已派发 · 0 做完暂存 · 0 提交中 · 0 已提交</div>
       </div>
 
       <!-- 考试与多平台任务 -->
@@ -741,6 +814,7 @@ export function renderDashboardHtml(): string {
         </button>
         <button onclick="switchTab('signs')" id="tabBtn-signs" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
           <span>📍 自动签到记录</span>
+          <span id="badge-signs" class="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/20 text-sky-300">0</span>
         </button>
         <button onclick="switchTab('courses')" id="tabBtn-courses" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
           <span>📚 在读课程概况</span>
@@ -760,6 +834,7 @@ export function renderDashboardHtml(): string {
             <button onclick="setHomeworkFilter('pending')" id="filter-pending" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 hover:bg-slate-800 border border-transparent transition">⏳ 未派发 (<span id="cnt-pending">0</span>)</button>
             <button onclick="setHomeworkFilter('dispatched')" id="filter-dispatched" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-sky-400 hover:bg-slate-800 border border-transparent transition">🚀 已派发 (<span id="cnt-dispatched">0</span>)</button>
             <button onclick="setHomeworkFilter('draft_saved')" id="filter-draft_saved" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-transparent transition">🛡️ 做完暂存 (<span id="cnt-draft">0</span>)</button>
+            <button onclick="setHomeworkFilter('submitting')" id="filter-submitting" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-violet-400 hover:bg-slate-800 border border-transparent transition">📤 提交中 (<span id="cnt-submitting">0</span>)</button>
             <button onclick="setHomeworkFilter('submitted')" id="filter-submitted" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">✅ 已提交 (<span id="cnt-submitted">0</span>)</button>
           </div>
           <div class="flex items-center gap-2">
@@ -807,6 +882,14 @@ export function renderDashboardHtml(): string {
 
       <!-- Tab 3: 签到记录 -->
       <section id="tab-signs" class="space-y-3 hidden">
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+          <span class="text-slate-300">
+            共记录 <span id="totalSignCount" class="font-bold text-white">0</span> 条签到活动（成功 <span id="successSignCount" class="font-bold text-emerald-400">0</span> 条）
+          </span>
+          <button onclick="syncSigninsUI()" id="syncSigninsBtn" class="px-2.5 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white font-medium border border-sky-500/40 transition active:scale-95 flex items-center gap-1">
+            <span>🔄 同步历史签到</span>
+          </button>
+        </div>
         <div class="glass-card rounded-2xl overflow-hidden border border-slate-800">
           <table class="w-full text-left text-xs">
             <thead class="bg-slate-900/80 text-slate-400 border-b border-slate-800">
@@ -988,29 +1071,44 @@ export function renderDashboardHtml(): string {
       const pendingCount = hwList.filter(h => h.status === 'pending').length;
       const dispatchedCount = hwList.filter(h => h.status === 'dispatched' || h.status === 'processing').length;
       const draftCount = hwList.filter(h => h.status === 'draft_saved' || h.status === 'awaiting_approval').length;
+      const submittingCount = hwList.filter(h => h.status === 'submitting').length;
       const submittedCount = hwList.filter(h => h.status === 'submitted').length;
 
-      document.getElementById('pendingHomeworkCount').innerText = pendingCount;
-      document.getElementById('solvedHomeworkCount').innerText = \`\${dispatchedCount} 已派发 · \${draftCount} 做完暂存 · \${submittedCount} 已提交\`;
+      document.getElementById('pendingHomeworkCount').innerText = String(pendingCount);
+      document.getElementById('solvedHomeworkCount').innerText = \`\${dispatchedCount} 已派发 · \${draftCount} 做完暂存 · \${submittingCount} 提交中 · \${submittedCount} 已提交\`;
 
       const cntAll = document.getElementById('cnt-all');
-      if (cntAll) cntAll.innerText = hwList.length;
+      if (cntAll) cntAll.innerText = String(hwList.length);
       const cntPending = document.getElementById('cnt-pending');
-      if (cntPending) cntPending.innerText = pendingCount;
+      if (cntPending) cntPending.innerText = String(pendingCount);
       const cntDispatched = document.getElementById('cnt-dispatched');
-      if (cntDispatched) cntDispatched.innerText = dispatchedCount;
+      if (cntDispatched) cntDispatched.innerText = String(dispatchedCount);
       const cntDraft = document.getElementById('cnt-draft');
-      if (cntDraft) cntDraft.innerText = draftCount;
+      if (cntDraft) cntDraft.innerText = String(draftCount);
+      const cntSubmitting = document.getElementById('cnt-submitting');
+      if (cntSubmitting) cntSubmitting.innerText = String(submittingCount);
       const cntSubmitted = document.getElementById('cnt-submitted');
-      if (cntSubmitted) cntSubmitted.innerText = submittedCount;
+      if (cntSubmitted) cntSubmitted.innerText = String(submittedCount);
 
       const activeExams = (state.exams || []).filter(e => checkExamIsActive(e));
-      document.getElementById('activeExamsCount').innerText = activeExams.length;
+      document.getElementById('activeExamsCount').innerText = String(activeExams.length);
       document.getElementById('totalNoticesCount').innerText = '通知箱捕获: ' + (state.notices || []).length + ' 条';
-      document.getElementById('signedCount').innerText = state.stats?.signinCount || (state.signinHistory || []).length;
 
-      document.getElementById('badge-homework').innerText = pendingCount;
-      document.getElementById('badge-exams').innerText = activeExams.length;
+      const signList = state.signinHistory || [];
+      const successSignCount = signList.filter(s => s.result === '签到成功' || s.result === '已签到').length;
+      const signedTotal = (typeof state.stats?.signinCount === 'number' && state.stats.signinCount >= successSignCount)
+        ? state.stats.signinCount
+        : successSignCount;
+      document.getElementById('signedCount').innerText = String(signedTotal);
+
+      document.getElementById('badge-homework').innerText = String(pendingCount);
+      document.getElementById('badge-exams').innerText = String(activeExams.length);
+      const badgeSigns = document.getElementById('badge-signs');
+      if (badgeSigns) badgeSigns.innerText = String(signList.length);
+      const totalSignEl = document.getElementById('totalSignCount');
+      if (totalSignEl) totalSignEl.innerText = String(signList.length);
+      const successSignEl = document.getElementById('successSignCount');
+      if (successSignEl) successSignEl.innerText = String(successSignCount);
 
       const courseCount = (state.courses || []).length;
       const badgeCourses = document.getElementById('badge-courses');
@@ -1051,6 +1149,7 @@ export function renderDashboardHtml(): string {
         if (currentHomeworkFilter === 'pending') return hw.status === 'pending';
         if (currentHomeworkFilter === 'dispatched') return hw.status === 'dispatched' || hw.status === 'processing';
         if (currentHomeworkFilter === 'draft_saved') return hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
+        if (currentHomeworkFilter === 'submitting') return hw.status === 'submitting';
         if (currentHomeworkFilter === 'submitted') return hw.status === 'submitted';
         return true;
       });
@@ -1062,16 +1161,20 @@ export function renderDashboardHtml(): string {
 
       container.innerHTML = list.map(hw => {
         const isDraft = hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
+        const isSubmitting = hw.status === 'submitting';
         const isSubmitted = hw.status === 'submitted';
         const isDispatched = hw.status === 'dispatched' || hw.status === 'processing';
         const isFailed = hw.status === 'failed';
-        const isPending = !isDraft && !isSubmitted && !isDispatched && !isFailed;
+        const isPending = !isDraft && !isSubmitting && !isSubmitted && !isDispatched && !isFailed;
 
         let badge = '';
         let statusDesc = '';
         if (isDraft) {
           badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">🛡️ 做完暂存 · 待审批</span>';
           statusDesc = '双轨模型已完成解答，草稿已暂存平台，等待人工审批正式提交';
+        } else if (isSubmitting) {
+          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-violet-500/20 text-violet-300 border-violet-500/30">📤 正式提交中</span>';
+          statusDesc = '已通过人工审批，正在等待 shim 执行正式提交并回执确认';
         } else if (isDispatched) {
           badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-blue-500/20 text-blue-300 border-blue-500/30">🚀 已派发给 agy</span>';
           statusDesc = '任务已下发至云端 Antigravity Agent / 本地 shim 正在深度推理求解中';
@@ -1086,15 +1189,21 @@ export function renderDashboardHtml(): string {
           statusDesc = '新探测作业，尚未派发给 agy Agent 执行作答';
         }
 
-        const platformLabel = hw.platform ? hw.platform.toUpperCase() : 'CHAOXING';
+        const platformLabel = escapeHtml(hw.platform ? hw.platform.toUpperCase() : 'CHAOXING');
         const platformBadge = \`<span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">\${platformLabel}</span>\`;
 
+        const safeCourseName = escapeHtml(hw.courseName || '课程');
+        const safeTitle = escapeHtml(hw.title);
+        const safeEndDate = escapeHtml(hw.endDate || '无截止限制');
+        const safeResultSummary = escapeHtml(hw.resultSummary || '');
+        const safeTaskIdAttr = escapeHtml(hw.taskId || '');
+
         const courseLink = hw.courseUrl
-          ? '<a href="' + hw.courseUrl + '" target="_blank" rel="noopener noreferrer" class="text-[11px] text-sky-400/90 hover:text-sky-300 hover:underline truncate max-w-[150px] inline-flex items-center gap-0.5" title="点击直达课程空间">' + (hw.courseName || '课程') + ' ↗</a>'
-          : '<span class="text-[11px] text-slate-400 truncate max-w-[150px]">' + (hw.courseName || '课程') + '</span>';
+          ? '<a href="' + escapeHtml(hw.courseUrl) + '" target="_blank" rel="noopener noreferrer" class="text-[11px] text-sky-400/90 hover:text-sky-300 hover:underline truncate max-w-[150px] inline-flex items-center gap-0.5" title="点击直达课程空间">' + safeCourseName + ' ↗</a>'
+          : '<span class="text-[11px] text-slate-400 truncate max-w-[150px]">' + safeCourseName + '</span>';
 
         const answerBtn = hw.url
-          ? '<a href="' + hw.url + '" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition active:scale-95 shadow-md shadow-sky-900/30 flex items-center gap-1" title="' + (hw.noticeUrl ? '在超星官方平台打开作业通知卡片作答（免403防阻断）' : '在超星平台打开作答界面') + '"><span>🔗 打开作答界面 &rarr;</span></a>'
+          ? '<a href="' + escapeHtml(hw.url) + '" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition active:scale-95 shadow-md shadow-sky-900/30 flex items-center gap-1" title="' + (hw.noticeUrl ? '在超星官方平台打开作业通知卡片作答（免403防阻断）' : '在超星平台打开作答界面') + '"><span>🔗 打开作答界面 &rarr;</span></a>'
           : '';
 
         return \`
@@ -1107,25 +1216,25 @@ export function renderDashboardHtml(): string {
                 </div>
                 \${courseLink}
               </div>
-              <h3 class="text-sm font-bold text-white tracking-tight">\${hw.title}</h3>
+              <h3 class="text-sm font-bold text-white tracking-tight">\${safeTitle}</h3>
               <div class="text-xs text-slate-400 space-y-1">
-                <p>📅 截止时间: <span class="text-slate-300 font-mono">\${hw.endDate || '无截止限制'}</span></p>
+                <p>📅 截止时间: <span class="text-slate-300 font-mono">\${safeEndDate}</span></p>
                 <p class="text-[11px] text-slate-400">💡 状态说明: \${statusDesc}</p>
-                \${hw.resultSummary ? \`<p class="text-[11px] text-sky-300/90 truncate">📝 详情: \${hw.resultSummary}</p>\` : ''}
+                \${safeResultSummary ? \`<p class="text-[11px] text-sky-300/90 truncate">📝 详情: \${safeResultSummary}</p>\` : ''}
               </div>
             </div>
 
             <div class="pt-2.5 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
               <div class="text-[11px] text-slate-500">
-                \${isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
+                \${isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isSubmitting ? '<span class="text-violet-300/90">📤 正在向平台提交确认中</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
               </div>
               <div class="flex items-center gap-2 flex-wrap">
                 \${answerBtn}
-                <button onclick="dispatchTask('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
+                <button onclick="dispatchTask('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
                   <span>\${isPending ? '🚀 派发给 agy' : '🔄 重新派发 agy'}</span>
                 </button>
                 \${isDraft ? \`
-                  <button onclick="approveSubmit('\${hw.taskId}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1" title="确认并正式提交作业草稿">
+                  <button onclick="approveSubmit('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1" title="确认并正式提交作业草稿">
                     <span>✅ 审批提交 &rarr;</span>
                   </button>
                 \` : ''}
@@ -1196,19 +1305,30 @@ export function renderDashboardHtml(): string {
       const tbody = document.getElementById('signinTableBody');
       const list = state.signinHistory || [];
       if (list.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-500">云端已就绪，当前暂无签到历史记录</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-500">云端已就绪，点击右上角【🔄 同步历史签到】即可从学习通拉取过往签到记录</td></tr>';
         return;
       }
 
-      tbody.innerHTML = list.map(item => \`
+      tbody.innerHTML = list.map(item => {
+        const resultStr = String(item.result || '已完成');
+        const isOk = resultStr.includes('成功') || resultStr.includes('已签') || resultStr.includes('已完成');
+        const isMissed = resultStr.includes('未签到') || resultStr.includes('已截止') || resultStr.includes('已结束');
+        const resultClass = isOk
+          ? 'text-emerald-400'
+          : isMissed
+            ? 'text-amber-300'
+            : 'text-rose-400';
+
+        return \`
         <tr class="hover:bg-slate-800/30 transition">
-          <td class="p-3 font-mono text-slate-400">\${item.time}</td>
-          <td class="p-3 font-medium text-white">\${item.courseName}</td>
-          <td class="p-3"><span class="px-2 py-0.5 rounded bg-sky-500/10 text-sky-300">\${item.type}</span></td>
-          <td class="p-3 text-slate-300">\${item.address || '上海海洋大学预设经纬度'}</td>
-          <td class="p-3 text-right text-emerald-400 font-semibold">\${item.result || '已完成'}</td>
+          <td class="p-3 font-mono text-slate-400">\${escapeHtml(item.time || '')}</td>
+          <td class="p-3 font-medium text-white">\${escapeHtml(item.courseName || '在线课程')}</td>
+          <td class="p-3"><span class="px-2 py-0.5 rounded bg-sky-500/10 text-sky-300">\${escapeHtml(item.type || '普通签到')}</span></td>
+          <td class="p-3 text-slate-300">\${escapeHtml(item.address || '学习通自动打卡')}</td>
+          <td class="p-3 text-right \${resultClass} font-semibold">\${escapeHtml(resultStr)}</td>
         </tr>
-      \`).join('');
+      \`;
+      }).join('');
     }
 
     function renderCourses() {
@@ -1580,24 +1700,69 @@ export function renderDashboardHtml(): string {
     async function approveSubmit(taskId) {
       if (!confirm('确定将该作业正式提交到平台吗？提交后将无法修改草稿。')) return;
       try {
-        const res = await fetch('/api/tasks/status', {
+        const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            taskId: taskId,
-            status: 'submitted',
-            resultSummary: '用户已在看板手动审批正式提交'
-          })
+          body: JSON.stringify({ taskId })
         });
         const json = await res.json();
-        if (json.updated) {
-          showToast('作业已批准并正式提交！');
+        if (json.success) {
+          showToast(json.msg || '已下发正式提交指令！');
           await refreshData();
         } else {
-          showToast('提交处理失败', false);
+          showToast('提交处理失败：' + (json.msg || json.reason || '未知错误'), false);
         }
       } catch (e) {
         showToast('网络请求异常', false);
+      }
+    }
+
+    async function syncSigninsUI() {
+      const btn = document.getElementById('syncSigninsBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '同步历史签到中...';
+      }
+      try {
+        let offset = 0;
+        let totalSynced = 0;
+        let rounds = 0;
+        let lastMsg = '';
+        let abortedByRateLimit = false;
+
+        while (rounds < 6) {
+          rounds++;
+          const res = await fetch('/api/signins/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ offset, limit: 5 })
+          });
+          const json = await res.json();
+          totalSynced += Number(json.syncedCount || 0);
+          lastMsg = json.msg || '';
+          if (json.rateLimited) {
+            abortedByRateLimit = true;
+            break;
+          }
+          if (!json.hasMore || typeof json.nextOffset !== 'number' || json.nextOffset <= offset) {
+            break;
+          }
+          offset = json.nextOffset;
+        }
+
+        if (abortedByRateLimit && totalSynced === 0) {
+          showToast(lastMsg || '触发学习通频控，请稍后再试', false);
+        } else {
+          showToast(totalSynced > 0 ? \`成功回溯同步 \${totalSynced} 条历史签到记录！\` : (lastMsg || '已完成全课签到记录核对'));
+        }
+        await refreshData();
+      } catch (e) {
+        showToast('同步历史签到请求异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🔄 同步历史签到';
+        }
       }
     }
 

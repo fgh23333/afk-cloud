@@ -52,8 +52,17 @@ export interface EdgeEnv {
   BARK_KEY?: string;
 }
 
+export function formatUtc8(date: Date = new Date()): string {
+  return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + ' (UTC+8)';
+}
+
+export function formatUtc8FromMs(ms?: number | null): string | undefined {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return formatUtc8(new Date(ms));
+}
+
 export function nowUtc8(): string {
-  return new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + ' (UTC+8)';
+  return formatUtc8(new Date());
 }
 
 /**
@@ -372,7 +381,8 @@ export async function logExecution(
   eventType: string,
   platform: string,
   summary: string,
-  detail?: unknown
+  detail?: unknown,
+  createdAt?: string
 ): Promise<void> {
   if (!env.DB) return;
   try {
@@ -380,11 +390,46 @@ export async function logExecution(
       `INSERT INTO execution_logs (event_type, platform, summary, detail_json, created_at)
        VALUES (?, ?, ?, ?, ?)`
     )
-      .bind(eventType, platform, summary, detail ? JSON.stringify(detail) : null, nowUtc8())
+      .bind(eventType, platform, summary, detail ? JSON.stringify(detail) : null, createdAt || nowUtc8())
       .run();
   } catch {
     // ignore
   }
+}
+
+/**
+ * 读取 D1 中已记录且无需重复尝试的签到活动 ID 集合（含已成功、历史同步及明确已结束项）
+ */
+export async function getRecordedSignActivityIds(env: EdgeEnv, limit = 200): Promise<Set<string>> {
+  const recorded = new Set<string>();
+  if (!env.DB) return recorded;
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT detail_json, summary FROM execution_logs WHERE event_type IN ('signin', 'sign_success', 'sign_missed') ORDER BY id DESC LIMIT ?"
+    )
+      .bind(limit)
+      .all<{ detail_json?: string; summary?: string }>();
+    for (const row of rows.results || []) {
+      if (row.detail_json) {
+        try {
+          const parsed = JSON.parse(row.detail_json);
+          if (parsed?.activeId !== undefined && parsed?.activeId !== null) {
+            recorded.add(String(parsed.activeId));
+            continue;
+          }
+        } catch {
+          // ignore invalid json
+        }
+      }
+      const idMatch = String(row.summary || '').match(/\bID:\s*(\d{5,})\b/);
+      if (idMatch) {
+        recorded.add(idMatch[1]);
+      }
+    }
+  } catch {
+    // ignore query error in minimal mock DBs
+  }
+  return recorded;
 }
 
 /**

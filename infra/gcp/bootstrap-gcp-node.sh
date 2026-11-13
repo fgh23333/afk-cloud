@@ -16,8 +16,25 @@ export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y
 sudo apt-get install -y curl wget git build-essential apt-transport-https ca-certificates gnupg
 
-# 1.5 系统精简与 e2-micro (1GB RAM) 内存/Swap 调优（防止 IO 颠簸导致系统卡死）
-echo "🧠 正在优化内核参数与内存换页配置..."
+# 1.5 系统精简与 e2-micro (1GB RAM) 内存/Swap/日志上限调优（防止 IO 颠簸与磁盘膨胀）
+echo "🧠 正在优化内核参数、本地 Hosts 与 journald 上限..."
+HOST_SHORT=$(hostname -s 2>/dev/null || hostname)
+if grep -qE "^[[:space:]]*${HOST_SHORT}[[:space:]]*$" /etc/hosts 2>/dev/null; then
+  sudo sed -i "/^[[:space:]]*${HOST_SHORT}[[:space:]]*$/d" /etc/hosts
+fi
+if ! grep -qE "^127\.0\.0\.1[[:space:]].*\b${HOST_SHORT}\b" /etc/hosts 2>/dev/null; then
+  sudo sed -i "s/^127\.0\.0\.1[[:space:]]\+localhost.*/127.0.0.1\tlocalhost ${HOST_SHORT}/" /etc/hosts || true
+fi
+
+sudo mkdir -p /etc/systemd/journald.conf.d
+cat << 'EOF' | sudo tee /etc/systemd/journald.conf.d/99-afk-limit.conf
+[Journal]
+SystemMaxUse=50M
+RuntimeMaxUse=20M
+EOF
+sudo systemctl restart systemd-journald || true
+sudo journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+
 sudo sysctl -w vm.swappiness=10
 sudo sysctl -w vm.vfs_cache_pressure=50
 echo -e "vm.swappiness=10\nvm.vfs_cache_pressure=50" | sudo tee /etc/sysctl.d/99-afk-tuning.conf
@@ -131,7 +148,7 @@ pnpm test
 # 8. 注册并启动 afk-shim 守护进程
 SERVICE_FILE="/etc/systemd/system/afk-shim.service"
 echo "⚙️ 正在注册并启动 systemd afk-shim 服务..."
-sudo bash -c "cat << 'EOF' > ${SERVICE_FILE}
+sudo bash -c "cat << EOF > ${SERVICE_FILE}
 [Unit]
 Description=afk-cloud Server Shim (Pet Node for Antigravity & Browser)
 After=network.target
@@ -147,6 +164,8 @@ EnvironmentFile=${WORKSPACE_DIR}/.env
 ExecStart=$(command -v pnpm) shim
 Restart=always
 RestartSec=5
+MemoryHigh=256M
+MemoryMax=384M
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65536
@@ -162,7 +181,7 @@ sudo systemctl enable --now afk-shim
 if [ -f /root/.local/bin/agy ] || [ -f "${HOME}/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
   AGY_EXEC=$(command -v agy || ([ -f /root/.local/bin/agy ] && echo "/root/.local/bin/agy") || echo "${HOME}/.local/bin/agy")
   echo "🤖 正在注册并守护 Antigravity Remote Control 常驻服务..."
-  sudo bash -c "cat << 'EOF' > /etc/systemd/system/antigravity-remote-control.service
+  sudo bash -c "cat << EOF > /etc/systemd/system/antigravity-remote-control.service
 [Unit]
 Description=Antigravity CLI Remote Control Daemon
 After=network.target network-online.target
@@ -178,6 +197,8 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.local/bin
 ExecStart=${AGY_EXEC} remote-control serve
 Restart=always
 RestartSec=5
+MemoryHigh=420M
+MemoryMax=560M
 LimitNOFILE=65536
 
 [Install]
@@ -185,6 +206,36 @@ WantedBy=multi-user.target
 EOF"
   sudo systemctl daemon-reload
   sudo systemctl enable --now antigravity-remote-control.service || true
+fi
+
+# 8.6 注册并启动 cloudflared Tunnel（为 afk-shim 提供免费 HTTPS 隧道并自动同步 AFK_SHIM_URL）
+if command -v cloudflared >/dev/null 2>&1 && [ -f "${WORKSPACE_DIR}/infra/gcp/run-shim-tunnel.sh" ]; then
+  chmod +x "${WORKSPACE_DIR}/infra/gcp/run-shim-tunnel.sh"
+  echo "🌐 正在注册并启动 afk-tunnel 服务..."
+  sudo bash -c "cat << EOF > /etc/systemd/system/afk-tunnel.service
+[Unit]
+Description=afk-cloud Cloudflare Tunnel for afk-shim
+After=network-online.target afk-shim.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER}
+WorkingDirectory=${WORKSPACE_DIR}
+Environment=AFK_REPO_DIR=${WORKSPACE_DIR}
+ExecStart=/usr/bin/env bash ${WORKSPACE_DIR}/infra/gcp/run-shim-tunnel.sh
+Restart=always
+RestartSec=10
+MemoryHigh=96M
+MemoryMax=160M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now afk-tunnel.service || true
 fi
 
 # 9. 状态自检与 Cloudflare OAuth2 说明

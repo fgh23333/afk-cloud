@@ -15,7 +15,7 @@ import {
   handleDiscussionStatusUpdate,
   scanDiscussionsBatch,
 } from './discussions';
-import { runChaoxingInspectionCycle } from './inspection';
+import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
 import { ExtendedNotifyEnv, sendDigestNotification, sendNotification } from './notify';
 import { signRequest, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
@@ -816,7 +816,7 @@ export default {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(task_id) DO UPDATE SET 
                title = excluded.title,
-               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'submitted') AND excluded.status = 'pending' THEN pending_tasks.status ELSE excluded.status END,
+               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'awaiting_approval', 'submitting', 'submitted') AND excluded.status = 'pending' THEN pending_tasks.status ELSE excluded.status END,
                deadline = excluded.deadline,
                result_summary = COALESCE(excluded.result_summary, pending_tasks.result_summary),
                payload_json = excluded.payload_json,
@@ -898,13 +898,20 @@ export default {
       ) {
         const match = url.pathname.match(/^\/api\/tasks\/([^\/]+)\/approve$/);
         const body: any = await request.json().catch(() => ({}));
-        const jobId = match ? match[1] : (body.taskId || body.jobId);
-        if (env.SOLVER_AGENT && jobId) {
+        const jobId = match ? decodeURIComponent(match[1]) : (body.taskId || body.jobId);
+        if (!jobId) {
+          return corsJson({ success: false, msg: '缺少 taskId / jobId', reason: '缺少 taskId / jobId' }, 400);
+        }
+        if (env.SOLVER_AGENT) {
           const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
           const result: any = await (solverStub as any).approveTask(jobId);
           return corsJson(result);
         }
-        return corsJson({ success: false, reason: 'SOLVER_AGENT not available or missing jobId' });
+        const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+        const reason = shimUrl
+          ? 'SOLVER_AGENT not available'
+          : '未配置 AFK_SHIM_URL / SHIM_URL，无法派发正式提交指令，任务状态保持不变';
+        return corsJson({ success: false, jobId, msg: reason, reason });
       }
 
       // 任务主动重新派发接口：支持单任务或批量派发给 agy (常驻服务器 shim / Cloud Run)
@@ -938,21 +945,45 @@ export default {
       if (url.pathname === '/api/tasks/status' && request.method === 'POST') {
         if (!env.DB) return corsJson({ updated: false });
         const body: any = await request.json();
+
+        if (body.status === 'submitted' && env.SOLVER_AGENT) {
+          try {
+            const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+            const result: any = await (solverStub as any).approveTask(body.taskId);
+            return corsJson({
+              updated: Boolean(result?.success),
+              ...result,
+              time: nowUtc8(),
+            });
+          } catch (e: any) {
+            console.warn(`[联动 approveTask 异常] ${e?.message || e}`);
+            return corsJson({
+              updated: false,
+              success: false,
+              msg: e?.message || String(e),
+              reason: e?.message || String(e),
+              time: nowUtc8(),
+            });
+          }
+        }
+
         await env.DB.prepare(
           'UPDATE pending_tasks SET status = ?, result_summary = ?, updated_at = ? WHERE task_id = ?'
         )
           .bind(body.status, body.resultSummary || '', nowUtc8(), body.taskId)
           .run();
 
-        if (body.status === 'submitted' && env.SOLVER_AGENT) {
-          try {
-            const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
-            await (solverStub as any).approveTask(body.taskId);
-          } catch (e: any) {
-            console.warn(`[联动 approveTask 异常] ${e?.message || e}`);
-          }
-        }
         return corsJson({ updated: true, time: nowUtc8() });
+      }
+
+      // 分批回溯同步学习通历史签到记录
+      if (url.pathname === '/api/signins/sync' && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const result = await syncChaoxingSignHistory(env, {
+          offset: Number(body.offset) || 0,
+          limit: Number(body.limit) || 5,
+        });
+        return corsJson({ ...result, time: nowUtc8() }, result.success || result.rateLimited ? 200 : 400);
       }
 
       // 批量查询题库 SHA-256 缓存

@@ -1,6 +1,10 @@
 import {
+  CHAOXING_MOBILE_UA,
   checkHomeworkPendingCourses,
+  classifyPreSignHtml,
+  fetchCourseSignHistoryCandidates,
   fetchNoticeList,
+  getChaoxingSignTypeLabel,
   getCourses,
   login,
   performSign,
@@ -11,7 +15,9 @@ import {
 import { scanDiscussionsBatch } from './discussions';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
 import {
+  formatUtc8FromMs,
   getCachedSession,
+  getRecordedSignActivityIds,
   hasTrackedHomeworkForCourse,
   logExecution,
   nowUtc8,
@@ -20,6 +26,17 @@ import {
   saveNotices,
 } from './store';
 
+export const RATE_LIMIT_BACKOFF_MINUTES = [15, 30, 60, 120] as const;
+
+export function escalateRateLimitBackoff(currentLevel = 0): { level: number; minutes: number } {
+  const normalized = Number.isFinite(currentLevel) ? Math.max(0, Math.floor(currentLevel)) : 0;
+  const nextLevel = Math.min(normalized + 1, RATE_LIMIT_BACKOFF_MINUTES.length);
+  return {
+    level: nextLevel,
+    minutes: RATE_LIMIT_BACKOFF_MINUTES[nextLevel - 1],
+  };
+}
+
 export interface SignState {
   lastCheckedAt?: string;
   lastSignAt?: string;
@@ -27,6 +44,7 @@ export interface SignState {
   recentSignedIds?: string[];
   rateLimitUntilMs?: number;
   rateLimitNotifiedAtMs?: number;
+  rateLimitBackoffLevel?: number;
   roundRobinCursor?: number;
   discussionCursor?: number;
   lastNoticeCheckMs?: number;
@@ -35,6 +53,7 @@ export interface SignState {
   lastNightMobileCheckMs?: number;
   lastCourseSyncMs?: number;
   seenClassActivityIds?: string[];
+  recentFailedSignMap?: Record<string, number>;
 }
 
 export interface InspectionOptions {
@@ -42,6 +61,7 @@ export interface InspectionOptions {
   bypassCooldown?: boolean;
   scanDiscussions?: boolean;
   checkHomework?: boolean;
+  nowMs?: number;
   state?: SignState;
   onStateUpdate?: (nextState: SignState) => void;
 }
@@ -62,6 +82,8 @@ export interface InspectionSummary {
   newDiscussionsFound: number;
   rateLimited: boolean;
   cooldownActive: boolean;
+  rateLimitBackoffLevel?: number;
+  canaryProbe?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -133,7 +155,7 @@ export async function runChaoxingInspectionCycle(
     };
   }
 
-  const nowMs = Date.now();
+  const nowMs = options.nowMs ?? Date.now();
   const prevState: SignState = options.state || { activeActivitiesCount: 0, recentSignedIds: [] };
   const force = Boolean(options.force);
   const bypassCooldown = Boolean(options.bypassCooldown);
@@ -146,10 +168,16 @@ export async function runChaoxingInspectionCycle(
   }
 
   const recentSigned = new Set(prevState.recentSignedIds || []);
+  const dbRecordedSignIds = await getRecordedSignActivityIds(env);
+  for (const id of dbRecordedSignIds) {
+    recentSigned.add(id);
+  }
   const seenClassActs = new Set(prevState.seenClassActivityIds || []);
+  const recentFailedSignMap: Record<string, number> = { ...(prevState.recentFailedSignMap || {}) };
   let roundRobinCursor = prevState.roundRobinCursor || 0;
   let rateLimitUntilMs = prevState.rateLimitUntilMs || 0;
   let rateLimitNotifiedAtMs = prevState.rateLimitNotifiedAtMs || 0;
+  let rateLimitBackoffLevel = prevState.rateLimitBackoffLevel ?? (rateLimitUntilMs > 0 ? 1 : 0);
   let lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
 
   const utc8 = new Date(nowMs + 8 * 3600 * 1000);
@@ -164,16 +192,22 @@ export async function runChaoxingInspectionCycle(
     }
   }
 
+  const isCanaryProbe = shouldScanMobile && !bypassCooldown && rateLimitBackoffLevel > 0;
   let signsHandled = 0;
   let classActivitiesFound = 0;
   let hitRateLimit = false;
+  let scanException = false;
   const signsExecuted: string[] = [];
 
   if (shouldScanMobile) {
     const customLocations = resolveSignLocations(env);
     const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
-    const batchSize = force ? targetCourses.length : Math.min(6, targetCourses.length);
-    const startIdx = force ? 0 : roundRobinCursor % targetCourses.length;
+    const batchSize = isCanaryProbe ? 1 : force ? targetCourses.length : Math.min(6, targetCourses.length);
+    const startIdx = isCanaryProbe
+      ? roundRobinCursor % targetCourses.length
+      : force
+        ? 0
+        : roundRobinCursor % targetCourses.length;
     if (isQuietNight) {
       lastNightMobileCheckMs = nowMs;
     }
@@ -192,7 +226,9 @@ export async function runChaoxingInspectionCycle(
           hitRateLimit = true;
           cooldownActive = true;
           roundRobinCursor = (idx + 1) % targetCourses.length;
-          rateLimitUntilMs = nowMs + 15 * 60 * 1000;
+          const nextBackoff = escalateRateLimitBackoff(rateLimitBackoffLevel);
+          rateLimitBackoffLevel = nextBackoff.level;
+          rateLimitUntilMs = nowMs + nextBackoff.minutes * 60 * 1000;
 
           if (!rateLimitNotifiedAtMs || nowMs - rateLimitNotifiedAtMs >= 14 * 60 * 1000) {
             rateLimitNotifiedAtMs = nowMs;
@@ -200,8 +236,12 @@ export async function runChaoxingInspectionCycle(
               env,
               'rate_limit',
               'chaoxing',
-              `移动端活动接口触发频控 (${scanRes.errorMsg || '请勿频繁操作'})，已启动 15 分钟自动退避冷却`,
-              { courseId: course.courseId, nextRetryAfterMin: 15 }
+              `移动端活动接口触发频控 (${scanRes.errorMsg || '请勿频繁操作'})，已启动 ${nextBackoff.minutes} 分钟自动退避冷却 (L${rateLimitBackoffLevel})`,
+              {
+                courseId: course.courseId,
+                nextRetryAfterMin: nextBackoff.minutes,
+                backoffLevel: rateLimitBackoffLevel,
+              }
             );
           }
           break;
@@ -212,29 +252,60 @@ export async function runChaoxingInspectionCycle(
           const actIdStr = String(act.id);
           if (recentSigned.has(actIdStr)) continue;
 
+          // 同一未完成签到若短时间内刚失败过（如缺签到码/不在范围），避免每分钟重复打扰与刷日志
+          const lastFailedAt = recentFailedSignMap[actIdStr] || 0;
+          const failSuppressWindow = lastFailedAt > 0 && nowMs - lastFailedAt < 15 * 60 * 1000;
+
           console.log(`[Inspection] 发现课程《${course.courseName}》签到活动: ${act.name} (ID: ${act.id})`);
           const signRes = await performSign(act, course, session, realname, customLocations);
-          const success = signRes.includes('成功') || signRes.includes('已签');
+          const isSuccess = signRes.includes('成功') || signRes.includes('已签');
+          const isExpired = signRes.includes('已结束');
+          const typeLabel = `${getChaoxingSignTypeLabel(act.otherId, act.ifphoto, act.name)}签到`;
+          const addrMatch = signRes.match(/匹配坐标:\s*([^)]+)\)/);
+          const signAddress = addrMatch
+            ? addrMatch[1].trim()
+            : isSuccess
+              ? '学习通云端自动打卡'
+              : isExpired
+                ? '已过教师设置截止时间'
+                : signRes.replace(/^\[[^\]]+\]\s*/, '').slice(0, 60);
+
+          if (isSuccess || isExpired) {
+            recentSigned.add(actIdStr);
+            delete recentFailedSignMap[actIdStr];
+          } else {
+            if (failSuppressWindow) {
+              continue;
+            }
+            recentFailedSignMap[actIdStr] = nowMs;
+          }
+
           signsHandled++;
           signsExecuted.push(`《${course.courseName}》: ${signRes}`);
 
-          if (success) {
-            recentSigned.add(actIdStr);
-          }
-
+          const eventType = isSuccess ? 'sign_success' : isExpired ? 'sign_missed' : 'sign_fail';
           await logExecution(
             env,
-            success ? 'sign_success' : 'sign_fail',
+            eventType,
             'chaoxing',
             `课程《${course.courseName}》[${act.name}]: ${signRes}`,
-            { courseId: course.courseId, classId: course.classId, activeId: act.id }
+            {
+              courseId: course.courseId,
+              classId: course.classId,
+              activeId: act.id,
+              actName: act.name,
+              signType: typeLabel,
+              address: signAddress,
+            }
           );
 
-          await sendNotification(
-            `学习通签到${success ? '成功 ✅' : '异常 ⚠️'}`,
-            `课程：《${course.courseName}》\n活动：${act.name}\n状态：${signRes}\n时间：${nowUtc8()}`,
-            env
-          );
+          if (!isExpired) {
+            await sendNotification(
+              `学习通签到${isSuccess ? '成功 ✅' : '异常 ⚠️'}`,
+              `课程：《${course.courseName}》\n活动：${act.name}\n状态：${signRes}\n时间：${nowUtc8()}`,
+              env
+            );
+          }
         }
 
         // 处理随堂非签到互动（如课堂主题讨论/抢答/问卷）
@@ -257,14 +328,16 @@ export async function runChaoxingInspectionCycle(
           );
         }
       } catch (err: any) {
+        scanException = true;
         console.warn(`[Inspection] 扫描课程《${course.courseName}》异常: ${err?.message || err}`);
       }
     }
 
     if (!hitRateLimit && targetCourses.length > 0) {
       roundRobinCursor = (startIdx + batchSize) % targetCourses.length;
-      if (rateLimitUntilMs && rateLimitUntilMs <= nowMs) {
+      if (!scanException) {
         rateLimitUntilMs = 0;
+        rateLimitBackoffLevel = 0;
       }
     }
   }
@@ -353,16 +426,24 @@ export async function runChaoxingInspectionCycle(
   }
 
   if (options.onStateUpdate) {
+    const prunedFailedMap: Record<string, number> = {};
+    for (const [k, ts] of Object.entries(recentFailedSignMap).slice(-30)) {
+      if (nowMs - ts < 2 * 60 * 60 * 1000) {
+        prunedFailedMap[k] = ts;
+      }
+    }
     options.onStateUpdate({
       lastCheckedAt: nowUtc8(),
       lastSignAt: signsHandled > 0 ? nowUtc8() : prevState.lastSignAt,
       activeActivitiesCount: signsHandled,
       recentSignedIds: Array.from(recentSigned).slice(-50),
       seenClassActivityIds: Array.from(seenClassActs).slice(-50),
+      recentFailedSignMap: prunedFailedMap,
       roundRobinCursor,
       discussionCursor,
       rateLimitUntilMs,
       rateLimitNotifiedAtMs,
+      rateLimitBackoffLevel,
       lastNoticeCheckMs,
       lastHomeworkCheckMs,
       lastDiscussionCheckMs,
@@ -378,7 +459,9 @@ export async function runChaoxingInspectionCycle(
     `通知 ${noticesFound} 条`,
   ];
   if (cooldownActive) {
-    msgParts.push('移动端处于频控退避冷却中');
+    msgParts.push(`移动端处于频控退避冷却中(L${rateLimitBackoffLevel})`);
+  } else if (isCanaryProbe && !hitRateLimit && !scanException) {
+    msgParts.push('移动端 Canary 试探成功并恢复轮转');
   }
 
   return {
@@ -397,5 +480,202 @@ export async function runChaoxingInspectionCycle(
     newDiscussionsFound,
     rateLimited: hitRateLimit,
     cooldownActive,
+    rateLimitBackoffLevel,
+    canaryProbe: isCanaryProbe,
+  };
+}
+
+export interface SignHistorySyncResult {
+  success: boolean;
+  msg: string;
+  scannedCourses: number;
+  totalCourses: number;
+  offset: number;
+  nextOffset: number;
+  hasMore: boolean;
+  syncedCount: number;
+  alreadyKnownCount: number;
+  rateLimited: boolean;
+  records: Array<{
+    activeId: string;
+    courseName: string;
+    name: string;
+    type: string;
+    result: string;
+    time: string;
+  }>;
+}
+
+/**
+ * 分批回溯学习通全课历史签到记录（基于 taskactivelist status=1/2 + preSign 状态检查）
+ * 控制单次子请求在 Cloudflare Workers 免费额度上限内（每批 <= 6 门课、<= 15 次 preSign 探测）。
+ */
+export async function syncChaoxingSignHistory(
+  env: ExtendedNotifyEnv,
+  options: { offset?: number; limit?: number } = {}
+): Promise<SignHistorySyncResult> {
+  const phone = env.CHAOXING_PHONE || env.PHONE || '';
+  const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+  const offset = Math.max(0, Number(options.offset) || 0);
+  const limit = Math.max(1, Math.min(8, Number(options.limit) || 5));
+
+  const empty: SignHistorySyncResult = {
+    success: false,
+    msg: '',
+    scannedCourses: 0,
+    totalCourses: 0,
+    offset,
+    nextOffset: offset,
+    hasMore: false,
+    syncedCount: 0,
+    alreadyKnownCount: 0,
+    rateLimited: false,
+    records: [],
+  };
+
+  if (!phone || !password) {
+    return { ...empty, msg: '未配置学习通账号凭据' };
+  }
+
+  let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
+  if (!session) {
+    session = await login(phone, password);
+    if (session) await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+  }
+  if (!session) {
+    return { ...empty, msg: '学习通登录失败' };
+  }
+
+  let courses = await getCourses(session);
+  if (courses.length === 0) {
+    const fresh = await login(phone, password);
+    if (fresh) {
+      session = fresh;
+      await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+      courses = await getCourses(session);
+    }
+  }
+  if (courses.length === 0) {
+    return { ...empty, success: true, msg: '未获取到学期课程列表' };
+  }
+
+  const targetSlice = courses.slice(offset, offset + limit);
+  const knownIds = await getRecordedSignActivityIds(env, 300);
+  let scannedCourses = 0;
+  let alreadyKnownCount = 0;
+  let rateLimited = false;
+  let preSignBudget = 16;
+  const records: SignHistorySyncResult['records'] = [];
+
+  for (let i = 0; i < targetSlice.length; i++) {
+    if (preSignBudget <= 0) break;
+    if (i > 0) await sleep(180);
+    const course = targetSlice[i];
+    const scanRes = await fetchCourseSignHistoryCandidates(
+      course,
+      session.cookie,
+      session._uid,
+      CHAOXING_MOBILE_UA
+    );
+    if (scanRes.rateLimited) {
+      rateLimited = true;
+      break;
+    }
+
+    // 最新活动优先，避免旧记录挤占 preSign 预算
+    const sorted = [...scanRes.candidates].sort((a, b) => (b.startTimeMs || 0) - (a.startTimeMs || 0));
+    let exhaustedMidCourse = false;
+    for (const act of sorted) {
+      if (knownIds.has(act.id)) {
+        alreadyKnownCount++;
+        continue;
+      }
+      if (preSignBudget <= 0) {
+        exhaustedMidCourse = true;
+        break;
+      }
+      preSignBudget--;
+
+      await sleep(120);
+      const preUrl = `https://mobilelearn.chaoxing.com/newsign/preSign?courseId=${course.courseId}&classId=${course.classId}&activePrimaryId=${act.id}&general=1&sys=1&ls=1&appType=15&uid=${session._uid}&ut=s`;
+      let preHtml = '';
+      try {
+        const preRes = await fetch(preUrl, {
+          headers: {
+            Cookie: session.cookie,
+            'User-Agent': CHAOXING_MOBILE_UA,
+          },
+        });
+        preHtml = await preRes.text().catch(() => '');
+      } catch {
+        continue;
+      }
+
+      const preStatus = classifyPreSignHtml(preHtml);
+      if (preStatus.state === 'pending' && act.status === 1) {
+        // 仍在进行中的签到交给自动巡检执行，不提前写为历史记录
+        continue;
+      }
+
+      const isSigned = preStatus.state === 'already_signed';
+      const eventType = isSigned ? 'sign_success' : 'sign_missed';
+      const typeLabel = `${getChaoxingSignTypeLabel(act.otherId, act.ifphoto, act.name)}签到`;
+      const resultText = isSigned ? '签到成功' : '已截止未签到';
+      const address = isSigned ? '历史同步 · 已完成签到' : '已过教师设置截止时间';
+      const createdAt = formatUtc8FromMs(act.startTimeMs) || nowUtc8();
+
+      knownIds.add(act.id);
+      await logExecution(
+        env,
+        eventType,
+        'chaoxing',
+        `[历史同步] 课程《${course.courseName}》[${act.name}]: [${typeLabel}] ${resultText} (${address})`,
+        {
+          courseId: course.courseId,
+          classId: course.classId,
+          activeId: act.id,
+          actName: act.name,
+          signType: typeLabel,
+          address,
+          source: 'history_sync',
+          startTimeMs: act.startTimeMs,
+        },
+        createdAt
+      );
+
+      records.push({
+        activeId: act.id,
+        courseName: course.courseName,
+        name: act.name,
+        type: typeLabel,
+        result: resultText,
+        time: createdAt,
+      });
+    }
+
+    if (!exhaustedMidCourse || scannedCourses === 0) {
+      scannedCourses++;
+    }
+    if (preSignBudget <= 0) break;
+  }
+
+  const nextOffset = offset + scannedCourses;
+  const hasMore = !rateLimited && nextOffset < courses.length;
+  const msg = rateLimited
+    ? `同步触发超星频控，已暂停（已扫描 ${scannedCourses} 门课，新增 ${records.length} 条记录）`
+    : `已扫描 ${scannedCourses} 门课，新同步 ${records.length} 条历史签到记录（已存在 ${alreadyKnownCount} 条）`;
+
+  return {
+    success: !rateLimited || records.length > 0,
+    msg,
+    scannedCourses,
+    totalCourses: courses.length,
+    offset,
+    nextOffset,
+    hasMore,
+    syncedCount: records.length,
+    alreadyKnownCount,
+    rateLimited,
+    records,
   };
 }

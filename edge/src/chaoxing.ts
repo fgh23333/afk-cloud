@@ -1,8 +1,15 @@
 import { desEcbPkcs7EncryptHex } from '../../packages/adapters/chaoxing/des';
 import {
+  classifyPreSignHtml,
+  executeChaoxingSignProtocol,
+  fetchCourseSignHistoryCandidates,
+  getChaoxingSignTypeLabel,
   scanCourseActivitiesShared,
+  stripChaoxingHtmlTags,
   type ParsedClassActivity,
   type ParsedSignActivity,
+  type ParsedSignHistoryCandidate,
+  type PreSignInspectionResult,
   type ScanActivitiesResult,
 } from '../../packages/adapters/chaoxing/activity-protocol';
 export {
@@ -14,7 +21,19 @@ export {
   type BbsTopicCard,
   type BbsTopicDetail,
 } from '../../packages/adapters/chaoxing/bbs-protocol';
-export type { ParsedClassActivity, ParsedSignActivity, ScanActivitiesResult };
+export {
+  classifyPreSignHtml,
+  fetchCourseSignHistoryCandidates,
+  getChaoxingSignTypeLabel,
+  stripChaoxingHtmlTags,
+};
+export type {
+  ParsedClassActivity,
+  ParsedSignActivity,
+  ParsedSignHistoryCandidate,
+  PreSignInspectionResult,
+  ScanActivitiesResult,
+};
 
 export interface UserSession {
   _uid: string;
@@ -369,111 +388,26 @@ export async function performSign(
     // 降级使用传入属性
   }
 
-  // 2. 发起 preSign 预签到
-  try {
-    const preUrl = `https://mobilelearn.chaoxing.com/newsign/preSign?courseId=${course.courseId}&classId=${course.classId}&activePrimaryId=${activeId}&general=1&sys=1&ls=1&appType=15&uid=${session._uid}&ut=s`;
-    await fetch(preUrl, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': CHAOXING_MOBILE_UA,
-      },
-    });
-  } catch {
-    // ignore
-  }
-
   const pool = locations.length > 0 ? locations : DEFAULT_SIGN_LOCATIONS;
 
-  // 3. 针对不同类型分发（对齐 chaoxing-signin 的 monitor 分发逻辑）
-
-  // A. 位置签到 (otherId === 4 或名称包含位置)：多坐标轮流尝试打卡匹配
-  if (otherId === 4 || actName.includes('位置')) {
-    let lastMsg = '';
-    for (let i = 0; i < pool.length; i++) {
-      const loc = pool[i];
-      const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1`;
-      try {
-        const res = await fetch(stuSignUrl, {
-          headers: {
-            Cookie: session.cookie,
-            'User-Agent': CHAOXING_MOBILE_UA,
-          },
-        });
-        const text = await res.text();
-        if (text.includes('success') || text.includes('成功')) {
-          return `[位置签到成功] 活动: ${actName} (匹配坐标: ${loc.address})`;
-        }
-        lastMsg = text;
-      } catch (e: any) {
-        lastMsg = e?.message || '网络异常';
-      }
-    }
-    return `[位置签到未匹配] 活动: ${actName} (尝试 ${pool.length} 处坐标，响应: ${lastMsg})`;
-  }
-
-  // B. 拍照签到 (ifphoto === 1 或 otherId === 0 且提示拍照)
-  let targetObjectId = objectId;
-  if (!targetObjectId && (ifphoto === 1 || actName.includes('拍照'))) {
-    console.log(`[拍照签到] 活动 ${activeId} 需上传照片，自动调用云盘接口上传打卡图...`);
-    targetObjectId = (await getOrUploadPhotoObject(session)) || '';
-  }
-
-  // 构造公用参数
-  const loc = pool[Math.floor(Math.random() * pool.length)];
-  const encParam = enc ? `&enc=${encodeURIComponent(enc)}` : '';
-  const objParam = targetObjectId ? `&objectId=${encodeURIComponent(targetObjectId)}` : '';
-  const signCodeParam = signCode ? `&signCode=${encodeURIComponent(signCode)}` : '';
-
-  // 4. 主通道：stuSignajax 提交签到
-  const stuSignUrl = `https://mobilelearn.chaoxing.com/pptSign/stuSignajax?name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}&activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&ifTiJiao=1${encParam}${objParam}${signCodeParam}`;
-
-  try {
-    const res = await fetch(stuSignUrl, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': CHAOXING_MOBILE_UA,
-      },
-    });
-    const text = await res.text();
-    if (text.includes('success') || text.includes('成功')) {
-      const typeLabel = targetObjectId ? '拍照' : otherId === 3 ? '手势' : otherId === 5 ? '签到码' : otherId === 2 ? '二维码' : '通用';
-      return `[${typeLabel}签到成功] 活动: ${actName} (ID: ${activeId})`;
-    }
-  } catch {
-    // ignore
-  }
-
-  // 5. 备用通道一：receivedAttendanceWindowList
-  try {
-    const signUrl = `https://mobilelearn.chaoxing.com/ppt/activeAPI/receivedAttendanceWindowList?activeId=${activeId}&uid=${session._uid}&clientip=&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&address=${encodeURIComponent(loc.address)}&name=${encodeURIComponent(name)}${encParam}${objParam}${signCodeParam}`;
-    const res = await fetch(signUrl, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
-    const text = await res.text();
-    if (text.includes('success') || text.includes('成功')) {
-      return `[签到成功(备用通道)] 活动: ${actName} (ID: ${activeId})`;
-    }
-  } catch {
-    // ignore
-  }
-
-  // 6. 备用通道二：pcReq (移动接口直通)
-  try {
-    const mobileUrl = `https://mobilelearn.chaoxing.com/widget/sign/pcReq?activeId=${activeId}&uid=${session._uid}&latitude=${loc.lat}&longitude=${loc.lon}&fid=${session.fid}&appType=15&name=${encodeURIComponent(name)}&address=${encodeURIComponent(loc.address)}${objParam}`;
-    const mRes = await fetch(mobileUrl, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': CHAOXING_MOBILE_UA,
-      },
-    });
-    const mText = await mRes.text();
-    return `[签到提交] 响应: ${mText.substring(0, 100).replace(/\s+/g, ' ')}`;
-  } catch (e: any) {
-    return `[签到异常] ${e?.message || e}`;
-  }
+  return executeChaoxingSignProtocol({
+    activeId,
+    actName,
+    courseId: course.courseId,
+    classId: course.classId,
+    uid: session._uid,
+    fid: session.fid,
+    cookieStr: session.cookie,
+    mobileUa: CHAOXING_MOBILE_UA,
+    name,
+    locations: pool,
+    otherId,
+    ifphoto,
+    enc,
+    objectId,
+    signCode,
+    resolvePhotoObjectId: () => getOrUploadPhotoObject(session),
+  });
 }
 
 export interface ChaoxingNoticeItem {
