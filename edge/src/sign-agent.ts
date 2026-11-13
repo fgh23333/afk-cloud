@@ -16,6 +16,9 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
     seenClassActivityIds: [],
     roundRobinCursor: 0,
     discussionCursor: 0,
+    rateLimitUntilMs: 0,
+    rateLimitNotifiedAtMs: 0,
+    rateLimitBackoffLevel: 0,
   };
 
   onStart(): void {
