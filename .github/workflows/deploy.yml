@@ -153,4 +153,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: 'edge'
-          command: rollback --yes --message "Automated rollback: post-deploy /health observability probe failed"
+          command: 'rollback --yes --message "Automated rollback: post-deploy /health observability probe failed"'
