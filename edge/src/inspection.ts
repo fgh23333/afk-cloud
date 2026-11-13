@@ -20,6 +20,17 @@ import {
   saveNotices,
 } from './store';
 
+export const RATE_LIMIT_BACKOFF_MINUTES = [15, 30, 60, 120] as const;
+
+export function escalateRateLimitBackoff(currentLevel = 0): { level: number; minutes: number } {
+  const normalized = Number.isFinite(currentLevel) ? Math.max(0, Math.floor(currentLevel)) : 0;
+  const nextLevel = Math.min(normalized + 1, RATE_LIMIT_BACKOFF_MINUTES.length);
+  return {
+    level: nextLevel,
+    minutes: RATE_LIMIT_BACKOFF_MINUTES[nextLevel - 1],
+  };
+}
+
 export interface SignState {
   lastCheckedAt?: string;
   lastSignAt?: string;
@@ -27,6 +38,7 @@ export interface SignState {
   recentSignedIds?: string[];
   rateLimitUntilMs?: number;
   rateLimitNotifiedAtMs?: number;
+  rateLimitBackoffLevel?: number;
   roundRobinCursor?: number;
   discussionCursor?: number;
   lastNoticeCheckMs?: number;
@@ -42,6 +54,7 @@ export interface InspectionOptions {
   bypassCooldown?: boolean;
   scanDiscussions?: boolean;
   checkHomework?: boolean;
+  nowMs?: number;
   state?: SignState;
   onStateUpdate?: (nextState: SignState) => void;
 }
@@ -62,6 +75,8 @@ export interface InspectionSummary {
   newDiscussionsFound: number;
   rateLimited: boolean;
   cooldownActive: boolean;
+  rateLimitBackoffLevel?: number;
+  canaryProbe?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -133,7 +148,7 @@ export async function runChaoxingInspectionCycle(
     };
   }
 
-  const nowMs = Date.now();
+  const nowMs = options.nowMs ?? Date.now();
   const prevState: SignState = options.state || { activeActivitiesCount: 0, recentSignedIds: [] };
   const force = Boolean(options.force);
   const bypassCooldown = Boolean(options.bypassCooldown);
@@ -150,6 +165,7 @@ export async function runChaoxingInspectionCycle(
   let roundRobinCursor = prevState.roundRobinCursor || 0;
   let rateLimitUntilMs = prevState.rateLimitUntilMs || 0;
   let rateLimitNotifiedAtMs = prevState.rateLimitNotifiedAtMs || 0;
+  let rateLimitBackoffLevel = prevState.rateLimitBackoffLevel ?? (rateLimitUntilMs > 0 ? 1 : 0);
   let lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
 
   const utc8 = new Date(nowMs + 8 * 3600 * 1000);
@@ -164,16 +180,22 @@ export async function runChaoxingInspectionCycle(
     }
   }
 
+  const isCanaryProbe = shouldScanMobile && !bypassCooldown && rateLimitBackoffLevel > 0;
   let signsHandled = 0;
   let classActivitiesFound = 0;
   let hitRateLimit = false;
+  let scanException = false;
   const signsExecuted: string[] = [];
 
   if (shouldScanMobile) {
     const customLocations = resolveSignLocations(env);
     const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
-    const batchSize = force ? targetCourses.length : Math.min(6, targetCourses.length);
-    const startIdx = force ? 0 : roundRobinCursor % targetCourses.length;
+    const batchSize = isCanaryProbe ? 1 : force ? targetCourses.length : Math.min(6, targetCourses.length);
+    const startIdx = isCanaryProbe
+      ? roundRobinCursor % targetCourses.length
+      : force
+        ? 0
+        : roundRobinCursor % targetCourses.length;
     if (isQuietNight) {
       lastNightMobileCheckMs = nowMs;
     }
@@ -192,7 +214,9 @@ export async function runChaoxingInspectionCycle(
           hitRateLimit = true;
           cooldownActive = true;
           roundRobinCursor = (idx + 1) % targetCourses.length;
-          rateLimitUntilMs = nowMs + 15 * 60 * 1000;
+          const nextBackoff = escalateRateLimitBackoff(rateLimitBackoffLevel);
+          rateLimitBackoffLevel = nextBackoff.level;
+          rateLimitUntilMs = nowMs + nextBackoff.minutes * 60 * 1000;
 
           if (!rateLimitNotifiedAtMs || nowMs - rateLimitNotifiedAtMs >= 14 * 60 * 1000) {
             rateLimitNotifiedAtMs = nowMs;
@@ -200,8 +224,12 @@ export async function runChaoxingInspectionCycle(
               env,
               'rate_limit',
               'chaoxing',
-              `移动端活动接口触发频控 (${scanRes.errorMsg || '请勿频繁操作'})，已启动 15 分钟自动退避冷却`,
-              { courseId: course.courseId, nextRetryAfterMin: 15 }
+              `移动端活动接口触发频控 (${scanRes.errorMsg || '请勿频繁操作'})，已启动 ${nextBackoff.minutes} 分钟自动退避冷却 (L${rateLimitBackoffLevel})`,
+              {
+                courseId: course.courseId,
+                nextRetryAfterMin: nextBackoff.minutes,
+                backoffLevel: rateLimitBackoffLevel,
+              }
             );
           }
           break;
@@ -257,14 +285,16 @@ export async function runChaoxingInspectionCycle(
           );
         }
       } catch (err: any) {
+        scanException = true;
         console.warn(`[Inspection] 扫描课程《${course.courseName}》异常: ${err?.message || err}`);
       }
     }
 
     if (!hitRateLimit && targetCourses.length > 0) {
       roundRobinCursor = (startIdx + batchSize) % targetCourses.length;
-      if (rateLimitUntilMs && rateLimitUntilMs <= nowMs) {
+      if (!scanException) {
         rateLimitUntilMs = 0;
+        rateLimitBackoffLevel = 0;
       }
     }
   }
@@ -363,6 +393,7 @@ export async function runChaoxingInspectionCycle(
       discussionCursor,
       rateLimitUntilMs,
       rateLimitNotifiedAtMs,
+      rateLimitBackoffLevel,
       lastNoticeCheckMs,
       lastHomeworkCheckMs,
       lastDiscussionCheckMs,
@@ -378,7 +409,9 @@ export async function runChaoxingInspectionCycle(
     `通知 ${noticesFound} 条`,
   ];
   if (cooldownActive) {
-    msgParts.push('移动端处于频控退避冷却中');
+    msgParts.push(`移动端处于频控退避冷却中(L${rateLimitBackoffLevel})`);
+  } else if (isCanaryProbe && !hitRateLimit && !scanException) {
+    msgParts.push('移动端 Canary 试探成功并恢复轮转');
   }
 
   return {
@@ -397,5 +430,7 @@ export async function runChaoxingInspectionCycle(
     newDiscussionsFound,
     rateLimited: hitRateLimit,
     cooldownActive,
+    rateLimitBackoffLevel,
+    canaryProbe: isCanaryProbe,
   };
 }
