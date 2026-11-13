@@ -3,9 +3,11 @@ import { isAllowedTaskUrl } from './auth';
 import { computeQuestionHash } from './hash';
 import { ExtendedNotifyEnv, sendNotification } from './notify';
 import { signRequest } from './request-signing';
-import { nowUtc8, parseUtc8ToMs, upsertPendingTask, upsertQuestionCache } from './store';
+import { logExecution, nowUtc8, parseUtc8ToMs, upsertPendingTask, upsertQuestionCache } from './store';
 
 export { computeQuestionHash, isAllowedTaskUrl };
+
+export const SUBMITTING_TIMEOUT_MS = 15 * 60 * 1000;
 
 export interface SolverState {
   initialized: boolean;
@@ -101,13 +103,20 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
             };
           }
 
-          // 超时熔断：若未配置 shimUrl，则退回 pending 等待客户端主动拉取；若已配置 shimUrl 但超时未回调，标记为 failed
+          // 超时熔断：
+          // - 若任务处于 submitting（草稿已保存、仅提交指令超时），回退为 draft_saved 并记日志
+          // - 若未配置 shimUrl，则退回 pending 等待客户端主动拉取；若已配置 shimUrl 但超时未回调，标记为 failed
           const hasShim = !!(this.env.AFK_SHIM_URL || this.env.SHIM_URL);
-          const timeoutStatus = hasShim ? 'failed' : 'pending';
-          const timeoutSummary = hasShim
-            ? '执行超时 (>15分钟)，边缘控制器已自动熔断回收'
-            : '边缘等待超时，已重置为待拉取队列';
-          console.warn(`[SolverAgent 熔断] 任务 [${this.state.activeJobId}] 超过 15 分钟未响应，状态重置为 ${timeoutStatus}`);
+          const isSubmittingTimeout = activeTask.status === 'submitting';
+          const timeoutStatus = isSubmittingTimeout ? 'draft_saved' : hasShim ? 'failed' : 'pending';
+          const timeoutSummary = isSubmittingTimeout
+            ? '正式提交超时 (>15分钟)，已自动回退为草稿暂存状态'
+            : hasShim
+              ? '执行超时 (>15分钟)，边缘控制器已自动熔断回收'
+              : '边缘等待超时，已重置为待拉取队列';
+          console.warn(
+            `[SolverAgent 熔断] 任务 [${this.state.activeJobId}] (${activeTask.status}) 超过 15 分钟未响应，状态重置为 ${timeoutStatus}`
+          );
           this.ctx.storage.sql.exec(
             'UPDATE tasks SET status = ?, summary = ?, updated_at = ? WHERE job_id = ?',
             timeoutStatus,
@@ -122,6 +131,15 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
               .bind(timeoutStatus, timeoutSummary, now, this.state.activeJobId)
               .run()
               .catch(() => {});
+          }
+          if (isSubmittingTimeout) {
+            await logExecution(
+              this.env,
+              'submitting_reverted',
+              activeTask.platform || 'chaoxing',
+              `任务 [${this.state.activeJobId}] 处于 submitting 状态超时 (>15分钟)，已自动回退为 draft_saved`,
+              { taskId: this.state.activeJobId, from: 'submitting', to: 'draft_saved', source: 'tryDispatchNext' }
+            );
           }
         }
       }
@@ -306,10 +324,7 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     const qaJson = JSON.stringify(payload.qa || []);
     const summary = payload.summary || payload.error || '';
 
-    let nextStatus = payload.phase;
-    if (payload.phase === 'draft_saved') {
-      nextStatus = this.env.AUTO_SUBMIT_HOMEWORK === 'true' ? 'submitting' : 'awaiting_approval';
-    }
+    let nextStatus = payload.phase === 'draft_saved' ? 'awaiting_approval' : payload.phase;
 
     this.ctx.storage.sql.exec(
       'UPDATE tasks SET status = ?, qa_json = ?, summary = ?, updated_at = ? WHERE job_id = ?',
@@ -363,10 +378,18 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
 
     // 3. 阶段性通知与审批门 (D7 铁律)
     if (payload.phase === 'draft_saved') {
+      let autoSubmitted = false;
       if (this.env.AUTO_SUBMIT_HOMEWORK === 'true') {
         console.log(`[SolverAgent] 检测到开启全自动提交，立即链式下发 submit 指令`);
-        await this.submitTask(payload.jobId);
-      } else {
+        const submitRes = await this.submitTask(payload.jobId);
+        autoSubmitted = submitRes.ok;
+        if (autoSubmitted) {
+          nextStatus = 'submitting';
+        } else {
+          console.warn(`[SolverAgent] 自动提交未能触发，保留 awaiting_approval: ${submitRes.reason}`);
+        }
+      }
+      if (!autoSubmitted) {
         await sendNotification(
           'afk-cloud 作业安全草稿已暂存',
           `任务：${payload.jobId}\n状态：已保存草稿 (包含 ${payload.qa?.length || 0} 题)\n详情：${summary}\n👉 请登录看板核验并点击【审批提交】。`,
@@ -409,11 +432,55 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
    * 审批通过门 (D7)：触发第二条指令下发 submit
    */
   @callable()
-  async approveTask(jobId: string): Promise<{ success: boolean; jobId: string; status: string; msg: string }> {
-    const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId);
-    const rows = [...cursor];
+  async approveTask(
+    jobId: string
+  ): Promise<{ success: boolean; jobId: string; status: string; msg: string; reason?: string }> {
+    let rows = [...this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId)] as any[];
+
+    // 若 DO SQLite 尚无该任务（例如 CLI 同步写入 D1 pending_tasks 的草稿），从 D1 兜底读取任务元信息
+    if (rows.length === 0 && this.env.DB) {
+      try {
+        const d1Task = await this.env.DB.prepare('SELECT * FROM pending_tasks WHERE task_id = ?')
+          .bind(jobId)
+          .first<any>();
+        if (d1Task) {
+          let taskUrl = '';
+          if (d1Task.payload_json) {
+            try {
+              taskUrl = JSON.parse(d1Task.payload_json)?.url || '';
+            } catch {
+              // ignore
+            }
+          }
+          if (!taskUrl && d1Task.course_id && d1Task.class_id) {
+            const rawWorkId = String(d1Task.task_id || '')
+              .replace(/^chaoxing-(?:notice-)?(?:work|hw)-/, '')
+              .split('-')[0];
+            if (rawWorkId) {
+              taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${d1Task.course_id}&classId=${d1Task.class_id}&cpi=&workId=${rawWorkId}`;
+            }
+          }
+          this.ctx.storage.sql.exec(
+            `INSERT OR IGNORE INTO tasks (job_id, platform, task_url, status, deadline, qa_json, summary, attempts, updated_at)
+             VALUES (?, ?, ?, ?, ?, '[]', ?, 0, ?)`,
+            jobId,
+            d1Task.platform || 'chaoxing',
+            taskUrl,
+            d1Task.status || 'draft_saved',
+            d1Task.deadline || '',
+            d1Task.result_summary || '',
+            d1Task.updated_at || nowUtc8()
+          );
+          rows = [...this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId)] as any[];
+        }
+      } catch {
+        // ignore D1 fallback error
+      }
+    }
+
     if (rows.length === 0) {
-      return { success: false, jobId, status: 'not_found', msg: '未找到指定任务' };
+      const reason = '未找到指定任务';
+      return { success: false, jobId, status: 'not_found', msg: reason, reason };
     }
 
     const task = rows[0] as any;
@@ -421,35 +488,71 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       return { success: true, jobId, status: 'submitted', msg: '任务此前已正式提交' };
     }
 
-    const ok = await this.submitTask(jobId);
-    if (ok) {
+    const submitRes = await this.submitTask(jobId);
+    if (submitRes.ok) {
       this.setState({ ...this.state, activeJobId: jobId, activeJobStartedAt: nowUtc8() });
+      return {
+        success: true,
+        jobId,
+        status: 'submitting',
+        msg: '已下发正式提交指令',
+      };
     }
+
+    const reason = submitRes.reason || '派发提交失败，请检查 shim 通信';
     return {
-      success: ok,
+      success: false,
       jobId,
-      status: ok ? 'submitting' : task.status,
-      msg: ok ? '已下发正式提交指令' : '派发提交失败，请检查 shim 通信',
+      status: task.status,
+      msg: reason,
+      reason,
     };
+  }
+
+  private async revertSubmittingStatus(jobId: string, prevStatus: string, prevUpdatedAt: string): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "UPDATE tasks SET status = ?, updated_at = ? WHERE job_id = ? AND status = 'submitting'",
+      prevStatus,
+      prevUpdatedAt,
+      jobId
+    );
+    if (this.env.DB) {
+      await this.env.DB.prepare(
+        "UPDATE pending_tasks SET status = ?, updated_at = ? WHERE task_id = ? AND status = 'submitting'"
+      )
+        .bind(prevStatus, prevUpdatedAt, jobId)
+        .run()
+        .catch(() => {});
+    }
   }
 
   /**
    * 下发第二条指令：让 agy 回到页面点提交 (HMAC 签名认证)
    */
-  async submitTask(jobId: string): Promise<boolean> {
+  async submitTask(jobId: string): Promise<{ ok: boolean; reason?: string }> {
     const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', jobId);
     const rows = [...cursor];
-    if (rows.length === 0) return false;
+    if (rows.length === 0) {
+      return { ok: false, reason: '未找到指定任务' };
+    }
     const task = rows[0] as any;
+    const prevStatus = task.status;
+    const prevUpdatedAt = task.updated_at;
 
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
     const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
 
-    // 安全校验
+    // 安全校验 1：URL 域名白名单与 HTTPS 校验（不通过时不改写任何状态）
     if (!isAllowedTaskUrl(task.task_url, this.env.AFK_TASK_HOST_ALLOWLIST)) {
       console.warn(`[SolverAgent Security] 提交任务 URL 非法: ${task.task_url}`);
-      return false;
+      return { ok: false, reason: '任务 URL 非法或不在安全白名单内，任务状态保持不变' };
+    }
+
+    // 安全校验 2：必须先确认已配置 shimUrl，未配置时保持原状态不变
+    if (!shimUrl) {
+      console.warn(`[SolverAgent] 未配置 AFK_SHIM_URL，任务 [${jobId}] 保持 ${prevStatus} 状态不变`);
+      return { ok: false, reason: '未配置 AFK_SHIM_URL / SHIM_URL，无法派发正式提交指令，任务状态保持不变' };
     }
 
     const now = nowUtc8();
@@ -466,8 +569,6 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         .run()
         .catch(() => {});
     }
-
-    if (!shimUrl) return false;
 
     try {
       const endpoint = new URL('/submit', shimUrl.replace(/\/+$/, '') + '/');
@@ -494,10 +595,18 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         headers,
         body,
       });
-      return res.ok;
+      if (!res.ok) {
+        const reason = `shim /submit 返回 HTTP ${res.status}，任务状态已保留为 ${prevStatus}`;
+        console.warn(`[SolverAgent] ${reason}`);
+        await this.revertSubmittingStatus(jobId, prevStatus, prevUpdatedAt);
+        return { ok: false, reason };
+      }
+      return { ok: true };
     } catch (err: any) {
-      console.error(`[SolverAgent] 触发 submit 指令异常: ${err?.message || err}`);
-      return false;
+      const reason = `触发 submit 指令异常: ${err?.message || err}`;
+      console.error(`[SolverAgent] ${reason}`);
+      await this.revertSubmittingStatus(jobId, prevStatus, prevUpdatedAt);
+      return { ok: false, reason };
     }
   }
 
@@ -539,18 +648,58 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   /**
    * 兜底对账轮询 (当回调偶发丢失或队列超时卡死时自动推进状态与释放单例锁)
    */
-  async reconcileDispatchedTasks(): Promise<void> {
+  async reconcileDispatchedTasks(options?: { submittingTimeoutMs?: number; nowMs?: number }): Promise<void> {
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
     const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
+    const submittingTimeoutMs = options?.submittingTimeoutMs ?? SUBMITTING_TIMEOUT_MS;
+    const nowMs = options?.nowMs ?? Date.now();
+    const now = nowUtc8();
 
     const cursor = this.ctx.storage.sql.exec(
       "SELECT * FROM tasks WHERE status IN ('dispatched', 'submitting') LIMIT 10"
     );
     const tasks = [...cursor] as any[];
+    const revertedIds = new Set<string>();
+    const freshSubmittingIds = new Set<string>();
+
+    const revertSubmittingTask = async (
+      jobId: string,
+      platform: string,
+      reason: string,
+      detail?: Record<string, unknown>
+    ) => {
+      if (revertedIds.has(jobId)) return;
+      revertedIds.add(jobId);
+
+      this.ctx.storage.sql.exec(
+        "UPDATE tasks SET status = 'draft_saved', updated_at = ? WHERE job_id = ? AND status = 'submitting'",
+        now,
+        jobId
+      );
+      if (this.env.DB) {
+        await this.env.DB.prepare(
+          "UPDATE pending_tasks SET status = 'draft_saved', updated_at = ? WHERE task_id = ? AND status = 'submitting'"
+        )
+          .bind(now, jobId)
+          .run()
+          .catch(() => {});
+      }
+      if (this.state.activeJobId === jobId) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+      await logExecution(
+        this.env,
+        'submitting_reverted',
+        platform || 'chaoxing',
+        `任务 [${jobId}] 处于 submitting 状态超时未完成，已自动回退为 draft_saved (${reason})`,
+        { taskId: jobId, from: 'submitting', to: 'draft_saved', reason, ...detail }
+      );
+    };
 
     if (shimUrl) {
       for (const t of tasks) {
+        let resolvedByRemote = false;
         try {
           const pathWithQuery = `/status/${encodeURIComponent(t.job_id)}`;
           const endpoint = new URL(pathWithQuery, shimUrl.replace(/\/+$/, '') + '/');
@@ -581,33 +730,79 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
                 platform: t.platform,
                 taskUrl: t.task_url,
               });
+              resolvedByRemote = true;
             }
           }
         } catch {
           // ignore network jitter
         }
-      }
-    } else {
-      // 未配置 shimUrl 时，将超过 15 分钟卡在 dispatched 的历史任务回收至 pending 等待客户端拉取
-      const now = nowUtc8();
-      for (const t of tasks) {
-        const startedMs = parseUtc8ToMs(t.updated_at);
-        const elapsedMs = isNaN(startedMs) ? 15 * 60 * 1000 + 1 : Date.now() - startedMs;
-        if (elapsedMs >= 15 * 60 * 1000) {
-          this.ctx.storage.sql.exec(
-            "UPDATE tasks SET status = 'pending', updated_at = ? WHERE job_id = ?",
-            now,
-            t.job_id
-          );
-          if (this.env.DB) {
-            await this.env.DB.prepare(
-              "UPDATE pending_tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'dispatched'"
-            )
-              .bind(now, t.job_id)
-              .run()
-              .catch(() => {});
+
+        if (!resolvedByRemote && t.status === 'submitting') {
+          const startedMs = parseUtc8ToMs(t.updated_at);
+          const elapsedMs = isNaN(startedMs) ? submittingTimeoutMs + 1 : nowMs - startedMs;
+          if (elapsedMs >= submittingTimeoutMs) {
+            await revertSubmittingTask(t.job_id, t.platform, 'shim_reconcile_timeout', { elapsedMs });
+          } else {
+            freshSubmittingIds.add(t.job_id);
           }
         }
+      }
+    } else {
+      // 未配置 shimUrl 时：
+      // - 将超过 15 分钟卡在 dispatched 的历史任务回收至 pending 等待客户端拉取
+      // - 将超时卡在 submitting 的任务回退至 draft_saved 并记录执行日志
+      for (const t of tasks) {
+        const startedMs = parseUtc8ToMs(t.updated_at);
+        if (t.status === 'submitting') {
+          const elapsedMs = isNaN(startedMs) ? submittingTimeoutMs + 1 : nowMs - startedMs;
+          if (elapsedMs >= submittingTimeoutMs) {
+            await revertSubmittingTask(t.job_id, t.platform, 'no_shim_timeout', { elapsedMs });
+          } else {
+            freshSubmittingIds.add(t.job_id);
+          }
+        } else if (t.status === 'dispatched') {
+          const elapsedMs = isNaN(startedMs) ? 15 * 60 * 1000 + 1 : nowMs - startedMs;
+          if (elapsedMs >= 15 * 60 * 1000) {
+            this.ctx.storage.sql.exec(
+              "UPDATE tasks SET status = 'pending', updated_at = ? WHERE job_id = ?",
+              now,
+              t.job_id
+            );
+            if (this.env.DB) {
+              await this.env.DB.prepare(
+                "UPDATE pending_tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'dispatched'"
+              )
+                .bind(now, t.job_id)
+                .run()
+                .catch(() => {});
+            }
+          }
+        }
+      }
+    }
+
+    // 兜底检查 D1 pending_tasks 中超时滞留在 submitting 的任务（例如历史写入或未经过 DO 队列的任务）
+    if (this.env.DB) {
+      try {
+        const d1Submitting = await this.env.DB.prepare(
+          "SELECT task_id, platform, updated_at FROM pending_tasks WHERE status = 'submitting' LIMIT 20"
+        ).all<{ task_id: string; platform?: string; updated_at?: string }>();
+
+        for (const row of d1Submitting.results || []) {
+          if (revertedIds.has(row.task_id) || freshSubmittingIds.has(row.task_id)) continue;
+          const startedMs = parseUtc8ToMs(row.updated_at);
+          const elapsedMs = isNaN(startedMs) ? submittingTimeoutMs + 1 : nowMs - startedMs;
+          if (elapsedMs >= submittingTimeoutMs) {
+            await revertSubmittingTask(
+              row.task_id,
+              row.platform || 'chaoxing',
+              shimUrl ? 'shim_reconcile_timeout' : 'no_shim_timeout',
+              { elapsedMs, source: 'd1_pending_tasks' }
+            );
+          }
+        }
+      } catch {
+        // ignore D1 query errors
       }
     }
 
