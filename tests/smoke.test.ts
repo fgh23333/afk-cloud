@@ -470,12 +470,14 @@ async function runAllTests() {
     console.log(' ✅ [Test 8/8 PASS] 超星 WebIM 信令监听解析与 Cloud Run 灾备契约验证通过');
   }
 
-  // --- Test 9: Gemini 4 Hydrogen 模型默认切换、UTC+8 解析防死锁与看板签到/拉取契约验证 ---
+  // --- Test 9: Gemini 4 Hydrogen 模型默认切换、agy JSON Schema 参数/信封解包、UTC+8 解析防死锁与看板签到/拉取契约验证 ---
   {
     const {
       DEFAULT_FLASH_MODEL,
       DEFAULT_PRO_MODEL,
       normalizeAgyModelName,
+      buildAgyArgs,
+      extractLastJsonObject,
     } = await import('../packages/core/agy-invoke');
     const { parseUtc8ToMs } = await import('../edge/src/store');
     const { getDashboardData } = await import('../edge/src/dashboard');
@@ -488,6 +490,39 @@ async function runAllTests() {
     assert.strictEqual(normalizeAgyModelName('gemini-4-hydrogen', 'flash'), 'gemini-4-hydrogen-medium');
     assert.strictEqual(normalizeAgyModelName('gemini-4-hydrogen', 'pro'), 'gemini-4-hydrogen-xhigh');
     assert.strictEqual(normalizeAgyModelName(undefined, 'pro'), 'gemini-4-hydrogen-xhigh');
+
+    // 1.1 验证 buildAgyArgs 传入 jsonSchema 时自动附加 --output-format json，且 extractLastJsonObject 正确解包 agy 信封
+    const agyArgs = buildAgyArgs({
+      prompt: 'test prompt',
+      timeoutMs: 60000,
+      jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    const outFmtIdx = agyArgs.indexOf('--output-format');
+    const schemaIdx = agyArgs.indexOf('--json-schema');
+    assert.ok(outFmtIdx >= 0 && agyArgs[outFmtIdx + 1] === 'json', '传入 jsonSchema 时必须携带 --output-format json');
+    assert.ok(schemaIdx > outFmtIdx, '--json-schema 应在 --output-format json 之后传入');
+
+    const envelopeWithStructured = JSON.stringify({
+      conversation_id: 'conv-123',
+      status: 'SUCCESS',
+      response: '{"status":"draft_saved","qa":[{"id":"1","type":"single","title":"题1","answer":"A"}],"summary":"ok"}\n',
+      structured_output: {
+        status: 'draft_saved',
+        qa: [{ id: '1', type: 'single', title: '题1', answer: 'A' }],
+        summary: 'ok',
+      },
+    });
+    const unwrapped1 = extractLastJsonObject(envelopeWithStructured);
+    assert.strictEqual(unwrapped1?.status, 'draft_saved', '应自动解包 structured_output 载荷');
+    assert.strictEqual(unwrapped1?.qa?.[0]?.answer, 'A', '解包后应保留内部 qa 数组');
+
+    const envelopeResponseOnly = JSON.stringify({
+      conversation_id: 'conv-456',
+      status: 'SUCCESS',
+      response: '{"answers":[{"id":"2","answer":"B"}]}',
+    });
+    const unwrapped2 = extractLastJsonObject(`日志前缀...\n${envelopeResponseOnly}`);
+    assert.strictEqual(unwrapped2?.answers?.[0]?.answer, 'B', '无 structured_output 时应从 response 字符串解包内部 JSON');
 
     // 2. 验证 UTC+8 时间戳字符串可被正确解析，避免 SolverAgent 队列耗时 NaN 死锁
     const parsedMs = parseUtc8ToMs('2026/11/12 14:48:18 (UTC+8)');

@@ -161,7 +161,7 @@ Environment=NODE_ENV=production
 Environment=PORT=8788
 Environment=NODE_OPTIONS=--max-old-space-size=384
 EnvironmentFile=${WORKSPACE_DIR}/.env
-ExecStart=$(command -v pnpm) shim
+ExecStart=$(command -v pnpm) run shim
 Restart=always
 RestartSec=5
 MemoryHigh=256M

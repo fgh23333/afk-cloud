@@ -114,6 +114,7 @@ export function resolveAgyBin(): string {
   if (process.env.AGY_BIN) return process.env.AGY_BIN;
   const candidates = [
     path.join(os.homedir(), '.local', 'bin', 'agy'),
+    '/usr/local/bin/agy',
     '/root/.local/bin/agy',
     '/home/Jimmy/.local/bin/agy',
   ];
@@ -149,7 +150,7 @@ export function buildAgyArgs(opts: AgyInvokeOptions): string[] {
   args.push('--print-timeout', `${timeoutSeconds}s`);
 
   if (opts.jsonSchema && process.env.AGY_JSON_SCHEMA !== 'false') {
-    args.push('--json-schema', JSON.stringify(opts.jsonSchema));
+    args.push('--output-format', 'json', '--json-schema', JSON.stringify(opts.jsonSchema));
   }
 
   if (opts.model) {
@@ -305,12 +306,29 @@ export const UNTRUSTED_CONTENT_RULES = [
 ].join('\n');
 
 /**
- * 从 agy 输出中稳健提取最后一个顶层 JSON 对象
+ * 若解析出的 JSON 是 `agy --output-format json` 的外层信封，自动解包 structured_output 或 response
+ */
+function unwrapAgyJsonEnvelope(obj: any): any {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return obj;
+  }
+  if ('structured_output' in obj && obj.structured_output && typeof obj.structured_output === 'object') {
+    return obj.structured_output;
+  }
+  if (typeof obj.conversation_id === 'string' && typeof obj.response === 'string' && obj.response.trim()) {
+    const inner = extractLastJsonObject(obj.response);
+    if (inner !== null) return inner;
+  }
+  return obj;
+}
+
+/**
+ * 从 agy 输出中稳健提取最后一个顶层 JSON 对象（自动解包 `--output-format json` 信封）
  */
 export function extractLastJsonObject(text: string): any | null {
   const trimmed = (text || '').trim();
   try {
-    return JSON.parse(trimmed);
+    return unwrapAgyJsonEnvelope(JSON.parse(trimmed));
   } catch {
     // 继续尝试从混合输出中提取
   }
@@ -346,5 +364,5 @@ export function extractLastJsonObject(text: string): any | null {
       }
     }
   }
-  return last;
+  return last !== null ? unwrapAgyJsonEnvelope(last) : null;
 }
