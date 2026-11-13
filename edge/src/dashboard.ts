@@ -626,7 +626,9 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     }));
 
     const discussionPendingCount = discussions.filter((d) => d.status === 'pending').length;
-    const discussionDraftCount = discussions.filter((d) => d.status === 'awaiting_approval').length;
+    const discussionDraftCount = discussions.filter(
+      (d) => d.status === 'awaiting_approval' || d.status === 'publishing'
+    ).length;
     const discussionSubmittedCount = discussions.filter(
       (d) => d.status === 'submitted' || d.status === 'replied_externally'
     ).length;
@@ -1116,7 +1118,7 @@ export function renderDashboardHtml(): string {
 
       const discList = state.discussions || [];
       const discPending = discList.filter(d => d.status === 'pending').length;
-      const discAwaiting = discList.filter(d => d.status === 'awaiting_approval').length;
+      const discAwaiting = discList.filter(d => d.status === 'awaiting_approval' || d.status === 'publishing').length;
       const discSubmitted = discList.filter(d => d.status === 'submitted' || d.status === 'replied_externally').length;
       const discIgnored = discList.filter(d => d.status === 'ignored').length;
       const badgeDisc = document.getElementById('badge-discussions');
@@ -1354,12 +1356,15 @@ export function renderDashboardHtml(): string {
       \`).join('');
     }
 
+    const publishingDiscussionIds = new Set();
+
     function renderDiscussions() {
       const container = document.getElementById('discussionList');
       if (!container) return;
       const allList = state.discussions || [];
       const list = allList.filter(d => {
         if (currentDiscussionFilter === 'all') return true;
+        if (currentDiscussionFilter === 'awaiting_approval') return d.status === 'awaiting_approval' || d.status === 'publishing';
         if (currentDiscussionFilter === 'submitted') return d.status === 'submitted' || d.status === 'replied_externally';
         return d.status === currentDiscussionFilter;
       });
@@ -1372,8 +1377,11 @@ export function renderDashboardHtml(): string {
       container.innerHTML = list.map(d => {
         const safeId = escapeHtml(d.discussionId);
         const safeDomId = String(d.discussionId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const isPublishing = d.status === 'publishing' || publishingDiscussionIds.has(d.discussionId);
         let badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">⏳ 待AI拟稿</span>';
-        if (d.status === 'awaiting_approval') {
+        if (isPublishing) {
+          badgeHtml = '<span data-discussion-status="publishing" class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 animate-pulse">⏳ 正在发布中 (publishing)</span>';
+        } else if (d.status === 'awaiting_approval') {
           badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">🛡️ AI已拟稿 · 待审批发布</span>';
         } else if (d.status === 'submitted') {
           badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">✅ 已由看板批准发布</span>';
@@ -1386,6 +1394,7 @@ export function renderDashboardHtml(): string {
         }
 
         const isClosed = d.status === 'submitted' || d.status === 'replied_externally';
+        const isLocked = isClosed || isPublishing;
         const replyValue = isClosed ? (d.postedReply || d.draftReply || '') : (d.draftReply || '');
         const metaPieces = [
           d.author ? '发起人: ' + escapeHtml(d.author) : '',
@@ -1410,15 +1419,15 @@ export function renderDashboardHtml(): string {
             \${d.prompt ? \`<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs text-slate-300 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">\${escapeHtml(d.prompt)}</div>\` : ''}
             <div class="space-y-2">
               <div class="flex items-center justify-between text-[11px] text-slate-400">
-                <span>\${isClosed ? '最终已发布回复内容' : 'AI 拟稿 / 手动编辑回复内容（点击发布前不会公开提交）'}</span>
+                <span>\${isClosed ? '最终已发布回复内容' : (isPublishing ? '正在提交回复至超星学习通，请勿重复操作...' : 'AI 拟稿 / 手动编辑回复内容（点击发布前不会公开提交）')}</span>
                 <span class="text-slate-500">\${escapeHtml(d.publishedAt || d.updatedAt || '')}</span>
               </div>
-              <textarea id="disc-draft-\${safeDomId}" rows="3" \${isClosed ? 'readonly' : ''} placeholder="等待运行 pnpm afk discuss 由 agy 结合课件生成草稿，或直接在此输入回复内容..." class="w-full rounded-xl bg-slate-950/80 border border-slate-700/80 focus:border-cyan-500 focus:outline-none p-2.5 text-xs text-slate-100 leading-relaxed resize-y">\${escapeHtml(replyValue)}</textarea>
+              <textarea id="disc-draft-\${safeDomId}" rows="3" \${isLocked ? 'readonly' : ''} placeholder="等待运行 pnpm afk discuss 由 agy 结合课件生成草稿，或直接在此输入回复内容..." class="w-full rounded-xl bg-slate-950/80 border border-slate-700/80 focus:border-cyan-500 focus:outline-none p-2.5 text-xs text-slate-100 leading-relaxed resize-y">\${escapeHtml(replyValue)}</textarea>
               \${isClosed ? '' : \`
                 <div class="flex flex-wrap items-center justify-end gap-2">
-                  <button onclick="ignoreDiscussionUI('\${safeId}')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">🚫 忽略</button>
-                  <button onclick="saveDiscussionDraftUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs transition">💾 保存草稿</button>
-                  <button onclick="publishDiscussionUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs shadow-md shadow-emerald-900/30 transition">✅ 批准并发布至学习通</button>
+                  <button id="disc-ignore-\${safeDomId}" \${isPublishing ? 'disabled' : ''} onclick="ignoreDiscussionUI('\${safeId}')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition disabled:opacity-50 disabled:cursor-not-allowed">🚫 忽略</button>
+                  <button id="disc-save-\${safeDomId}" \${isPublishing ? 'disabled' : ''} onclick="saveDiscussionDraftUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs transition disabled:opacity-50 disabled:cursor-not-allowed">💾 保存草稿</button>
+                  <button id="disc-pub-\${safeDomId}" \${isPublishing ? 'disabled' : ''} onclick="publishDiscussionUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs shadow-md shadow-emerald-900/30 transition disabled:opacity-50 disabled:cursor-not-allowed">\${isPublishing ? '⏳ 正在发布中...' : '✅ 批准并发布至学习通'}</button>
                 </div>
               \`}
             </div>
@@ -1496,6 +1505,7 @@ export function renderDashboardHtml(): string {
     }
 
     async function publishDiscussionUI(discussionId, textareaId) {
+      if (publishingDiscussionIds.has(discussionId)) return;
       const el = document.getElementById(textareaId);
       const draftReply = el ? el.value.trim() : '';
       if (!draftReply) {
@@ -1503,6 +1513,23 @@ export function renderDashboardHtml(): string {
         return;
       }
       if (!confirm('确认公开发布该回复到超星学习通讨论区？发布后同学与教师可见。')) return;
+
+      publishingDiscussionIds.add(discussionId);
+      const safeDomId = String(discussionId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const target = (state && Array.isArray(state.discussions))
+        ? state.discussions.find(d => d.discussionId === discussionId)
+        : null;
+      const prevStatus = target ? target.status : 'awaiting_approval';
+      if (target) {
+        target.status = 'publishing';
+        target.draftReply = draftReply;
+        renderDiscussions();
+      }
+      ['disc-pub-', 'disc-save-', 'disc-ignore-'].forEach(prefix => {
+        const b = document.getElementById(prefix + safeDomId);
+        if (b) b.disabled = true;
+      });
+
       try {
         showToast('正在安全提交回复至超星学习通...', true);
         const res = await fetch('/api/discussions/' + encodeURIComponent(discussionId) + '/publish', {
@@ -1515,10 +1542,20 @@ export function renderDashboardHtml(): string {
           showToast('已成功公开发布到学习通讨论区！✅');
           await refreshData();
         } else {
+          if (target) {
+            target.status = prevStatus === 'publishing' ? 'awaiting_approval' : (prevStatus || 'awaiting_approval');
+          }
           showToast('发布失败：' + (json.msg || json.error || '未知错误'), false);
+          await refreshData();
         }
       } catch (e) {
+        if (target) {
+          target.status = prevStatus === 'publishing' ? 'awaiting_approval' : (prevStatus || 'awaiting_approval');
+        }
         showToast('发布请求网络异常', false);
+        renderDiscussions();
+      } finally {
+        publishingDiscussionIds.delete(discussionId);
       }
     }
 

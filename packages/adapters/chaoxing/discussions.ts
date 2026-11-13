@@ -32,6 +32,33 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * 将本地检测到的已回复/已忽略状态安全同步回 Edge 看板 D1（严禁覆盖为 submitted）
+ */
+export async function syncDiscussionStatusToEdge(
+  discussionId: string,
+  status: 'replied_externally' | 'ignored'
+): Promise<boolean> {
+  const edgeUrl = process.env.AFK_EDGE_WORKER_URL;
+  if (!edgeUrl || !discussionId) return false;
+  const edgeToken = process.env.AFK_EDGE_BEARER_TOKEN;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (edgeToken) headers['Authorization'] = `Bearer ${edgeToken}`;
+  try {
+    const res = await fetch(
+      `${edgeUrl.replace(/\/+$/, '')}/api/discussions/${encodeURIComponent(discussionId)}/status`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ status }),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 本地直接扫描课程讨论区教师话题及详情
  */
 export async function scanCourseDiscussions(
@@ -193,8 +220,21 @@ export async function solvePendingDiscussions(
         realname
       );
 
-      if (detail.myReplied || !detail.canReply) {
-        console.log(yellow(`  ⏭️ 跳过 《${item.courseName}》"${item.title}" (本人已回复或已关闭回复)`));
+      if (detail.myReplied) {
+        const syncedStatus = edgeUrl
+          ? await syncDiscussionStatusToEdge(item.discussionId, 'replied_externally')
+          : false;
+        console.log(
+          yellow(
+            `  ⏭️ 跳过 《${item.courseName}》"${item.title}" (检测到本人已回复${syncedStatus ? '，已回写状态至云端' : ''})`
+          )
+        );
+        summary.skipped++;
+        continue;
+      }
+
+      if (!detail.canReply) {
+        console.log(yellow(`  ⏭️ 跳过 《${item.courseName}》"${item.title}" (话题已关闭回复)`));
         summary.skipped++;
         continue;
       }

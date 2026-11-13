@@ -12,6 +12,7 @@ import { getDashboardData, renderDashboardHtml } from './dashboard';
 import {
   approveAndPublishDiscussion,
   ensureChaoxingEdgeSession,
+  handleDiscussionStatusUpdate,
   scanDiscussionsBatch,
 } from './discussions';
 import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
@@ -1073,7 +1074,22 @@ export default {
         }
         const overrideReply = typeof body.draftReply === 'string' ? body.draftReply : undefined;
         const result = await approveAndPublishDiscussion(env, discussionId, overrideReply);
-        return corsJson({ ok: result.success, ...result, time: nowUtc8() }, result.success ? 200 : 400);
+        const failStatus = /重复|正在发布|已发布|已在该讨论帖回复|已回复/.test(result.msg) ? 409 : 400;
+        return corsJson({ ok: result.success, ...result, time: nowUtc8() }, result.success ? 200 : failStatus);
+      }
+
+      // 回写讨论安全状态（仅允许白名单状态如 replied_externally / ignored，严禁绕过发布门伪造 submitted）
+      const discStatusMatch = url.pathname.match(/^\/api\/discussions\/([^\/]+)\/status$/);
+      if (discStatusMatch && request.method === 'POST') {
+        const discussionId = decodeURIComponent(discStatusMatch[1]);
+        const body: any = await request.json().catch(() => ({}));
+        const res = await handleDiscussionStatusUpdate(
+          env,
+          discussionId,
+          typeof body.status === 'string' ? body.status : ''
+        );
+        const { statusCode, ...payload } = res;
+        return corsJson({ ...payload, time: nowUtc8() }, statusCode);
       }
 
       // 忽略某个话题讨论

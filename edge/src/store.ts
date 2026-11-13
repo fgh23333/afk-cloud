@@ -632,7 +632,15 @@ export interface DiscussionRecord {
   topicUrl: string;
   bbsUrl?: string;
   replyParams?: Record<string, unknown> | null;
-  status?: 'pending' | 'drafting' | 'awaiting_approval' | 'submitted' | 'replied_externally' | 'ignored' | 'failed';
+  status?:
+    | 'pending'
+    | 'drafting'
+    | 'awaiting_approval'
+    | 'publishing'
+    | 'submitted'
+    | 'replied_externally'
+    | 'ignored'
+    | 'failed';
   draftReply?: string;
   postedReply?: string;
   modelUsed?: string;
@@ -705,7 +713,7 @@ export async function upsertDiscoveredDiscussion(
 
     if (existing) {
       let nextStatus = existing.status;
-      if (item.myReplied && existing.status !== 'submitted') {
+      if (item.myReplied && existing.status !== 'submitted' && existing.status !== 'publishing') {
         nextStatus = 'replied_externally';
       }
 
@@ -799,7 +807,7 @@ export async function saveDiscussionDraft(
       `UPDATE discussions
        SET draft_reply = ?,
            model_used = COALESCE(?, model_used),
-           status = CASE WHEN status = 'submitted' THEN 'submitted' ELSE 'awaiting_approval' END,
+           status = CASE WHEN status IN ('submitted', 'publishing', 'replied_externally') THEN status ELSE 'awaiting_approval' END,
            updated_at = ?
        WHERE discussion_id = ?`
     )
@@ -829,6 +837,54 @@ export async function markDiscussionPublished(
        WHERE discussion_id = ?`
     )
       .bind(postedReply, postedReply, ts, ts, discussionId)
+      .run();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 原子抢占讨论帖发布锁：仅当状态既非 submitted、publishing 也非 replied_externally 时写入 publishing
+ */
+export async function claimDiscussionForPublishing(
+  env: EdgeEnv,
+  discussionId: string
+): Promise<boolean> {
+  if (!env.DB) return false;
+  try {
+    const res = (await env.DB.prepare(
+      `UPDATE discussions
+       SET status = 'publishing', updated_at = ?
+       WHERE discussion_id = ? AND status NOT IN ('submitted', 'publishing', 'replied_externally')`
+    )
+      .bind(nowUtc8(), discussionId)
+      .run()) as { success?: boolean; meta?: { changes?: number } } | undefined;
+
+    if (res?.meta && typeof res.meta.changes === 'number') {
+      return res.meta.changes > 0;
+    }
+    return res?.success !== false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 发布失败时安全回退状态至 awaiting_approval（仅回退仍处于 publishing 锁中的记录）
+ */
+export async function restoreDiscussionAfterPublishFailure(
+  env: EdgeEnv,
+  discussionId: string
+): Promise<boolean> {
+  if (!env.DB) return false;
+  try {
+    await env.DB.prepare(
+      `UPDATE discussions
+       SET status = 'awaiting_approval', updated_at = ?
+       WHERE discussion_id = ? AND status = 'publishing'`
+    )
+      .bind(nowUtc8(), discussionId)
       .run();
     return true;
   } catch {
