@@ -572,3 +572,273 @@ export async function getEnrolledCoursesFromD1(
     return [];
   }
 }
+
+export interface DiscussionRecord {
+  discussionId: string;
+  platform?: string;
+  topicId: string;
+  courseId: string;
+  classId: string;
+  courseName: string;
+  author?: string;
+  title: string;
+  prompt: string;
+  chapterLabel?: string;
+  topicUrl: string;
+  bbsUrl?: string;
+  replyParams?: Record<string, unknown> | null;
+  status?: 'pending' | 'drafting' | 'awaiting_approval' | 'submitted' | 'replied_externally' | 'ignored' | 'failed';
+  draftReply?: string;
+  postedReply?: string;
+  modelUsed?: string;
+  replyCount?: number;
+  isTeacherTopic?: boolean;
+  publishedAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * 检查 D1 pending_tasks 中该课程是否已有已知作业记录（用于避免对已暂存/已提交课程重复入队占位任务）
+ */
+export async function hasTrackedHomeworkForCourse(env: EdgeEnv, courseId: string): Promise<boolean> {
+  if (!env.DB || !courseId) return false;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT task_id FROM pending_tasks
+       WHERE course_id = ? AND status IN ('pending', 'dispatched', 'processing', 'draft_saved', 'awaiting_approval')
+       LIMIT 1`
+    )
+      .bind(courseId)
+      .first<{ task_id: string }>();
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 查询已登记的讨论帖轻量索引，避免 Cron 扫描时对未变动帖子重复抓取详情页消耗 Workers 子请求配额
+ */
+export async function getKnownDiscussionMetaMap(
+  env: EdgeEnv,
+  courseId?: string
+): Promise<Map<string, { status: string; replyCount: number }>> {
+  const map = new Map<string, { status: string; replyCount: number }>();
+  if (!env.DB) return map;
+  try {
+    const stmt = courseId
+      ? env.DB.prepare('SELECT topic_id, status, reply_count FROM discussions WHERE course_id = ?').bind(courseId)
+      : env.DB.prepare('SELECT topic_id, status, reply_count FROM discussions');
+    const res = await stmt.all<{ topic_id: string; status: string; reply_count: number }>();
+    for (const r of res.results || []) {
+      map.set(String(r.topic_id), { status: r.status, replyCount: Number(r.reply_count || 0) });
+    }
+  } catch {
+    // 迁移未就绪时容错
+  }
+  return map;
+}
+
+/**
+ * 写入或刷新探测到的课程讨论话题（绝不覆盖已拟稿/已提交/已忽略状态）
+ * @returns true 表示这是一条新发现的、尚未回复的教师讨论话题
+ */
+export async function upsertDiscoveredDiscussion(
+  env: EdgeEnv,
+  item: DiscussionRecord & { myReplied?: boolean }
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const ts = nowUtc8();
+  const replyParamsJson = item.replyParams ? JSON.stringify(item.replyParams) : null;
+
+  try {
+    const existing = await env.DB.prepare(
+      'SELECT status, draft_reply FROM discussions WHERE discussion_id = ?'
+    )
+      .bind(item.discussionId)
+      .first<{ status: string; draft_reply?: string }>();
+
+    if (existing) {
+      let nextStatus = existing.status;
+      if (item.myReplied && existing.status !== 'submitted') {
+        nextStatus = 'replied_externally';
+      }
+
+      await env.DB.prepare(
+        `UPDATE discussions SET
+           course_name = CASE WHEN ? != '' THEN ? ELSE course_name END,
+           author = COALESCE(NULLIF(?, ''), author),
+           title = CASE WHEN ? != '' THEN ? ELSE title END,
+           prompt = CASE WHEN ? != '' THEN ? ELSE prompt END,
+           chapter_label = COALESCE(?, chapter_label),
+           topic_url = COALESCE(NULLIF(?, ''), topic_url),
+           bbs_url = COALESCE(NULLIF(?, ''), bbs_url),
+           reply_params_json = COALESCE(?, reply_params_json),
+           reply_count = ?,
+           is_teacher_topic = ?,
+           status = ?,
+           updated_at = ?
+         WHERE discussion_id = ?`
+      )
+        .bind(
+          item.courseName || '',
+          item.courseName || '',
+          item.author || '',
+          item.title || '',
+          item.title || '',
+          item.prompt || '',
+          item.prompt || '',
+          item.chapterLabel || null,
+          item.topicUrl || '',
+          item.bbsUrl || '',
+          replyParamsJson,
+          Number(item.replyCount || 0),
+          item.isTeacherTopic === false ? 0 : 1,
+          nextStatus,
+          ts,
+          item.discussionId
+        )
+        .run();
+
+      return false;
+    }
+
+    const initialStatus = item.myReplied ? 'replied_externally' : item.status || 'pending';
+    await env.DB.prepare(
+      `INSERT INTO discussions (
+         discussion_id, platform, topic_id, course_id, class_id, course_name, author,
+         title, prompt, chapter_label, topic_url, bbs_url, reply_params_json,
+         status, draft_reply, model_used, reply_count, is_teacher_topic, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        item.discussionId,
+        item.platform || 'chaoxing',
+        item.topicId,
+        item.courseId,
+        item.classId,
+        item.courseName || `课程_${item.courseId}`,
+        item.author || '',
+        item.title,
+        item.prompt,
+        item.chapterLabel || '',
+        item.topicUrl,
+        item.bbsUrl || '',
+        replyParamsJson,
+        initialStatus,
+        item.draftReply || null,
+        item.modelUsed || null,
+        Number(item.replyCount || 0),
+        item.isTeacherTopic === false ? 0 : 1,
+        ts,
+        ts
+      )
+      .run();
+
+    return initialStatus === 'pending';
+  } catch {
+    return false;
+  }
+}
+
+export async function saveDiscussionDraft(
+  env: EdgeEnv,
+  discussionId: string,
+  draftReply: string,
+  modelUsed?: string
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const ts = nowUtc8();
+  try {
+    await env.DB.prepare(
+      `UPDATE discussions
+       SET draft_reply = ?,
+           model_used = COALESCE(?, model_used),
+           status = CASE WHEN status = 'submitted' THEN 'submitted' ELSE 'awaiting_approval' END,
+           updated_at = ?
+       WHERE discussion_id = ?`
+    )
+      .bind(draftReply, modelUsed || null, ts, discussionId)
+      .run();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function markDiscussionPublished(
+  env: EdgeEnv,
+  discussionId: string,
+  postedReply: string
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const ts = nowUtc8();
+  try {
+    await env.DB.prepare(
+      `UPDATE discussions
+       SET status = 'submitted',
+           posted_reply = ?,
+           draft_reply = ?,
+           published_at = ?,
+           updated_at = ?
+       WHERE discussion_id = ?`
+    )
+      .bind(postedReply, postedReply, ts, ts, discussionId)
+      .run();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function updateDiscussionStatus(
+  env: EdgeEnv,
+  discussionId: string,
+  status: NonNullable<DiscussionRecord['status']>
+): Promise<boolean> {
+  if (!env.DB) return false;
+  try {
+    await env.DB.prepare('UPDATE discussions SET status = ?, updated_at = ? WHERE discussion_id = ?')
+      .bind(status, nowUtc8(), discussionId)
+      .run();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getDiscussionById(env: EdgeEnv, discussionId: string): Promise<any | null> {
+  if (!env.DB) return null;
+  try {
+    return await env.DB.prepare('SELECT * FROM discussions WHERE discussion_id = ?')
+      .bind(discussionId)
+      .first<any>();
+  } catch {
+    return null;
+  }
+}
+
+export async function listDiscussions(
+  env: EdgeEnv,
+  statuses?: string[],
+  limit = 100
+): Promise<any[]> {
+  if (!env.DB) return [];
+  try {
+    if (statuses && statuses.length > 0) {
+      const placeholders = statuses.map(() => '?').join(',');
+      const res = await env.DB.prepare(
+        `SELECT * FROM discussions WHERE status IN (${placeholders}) ORDER BY updated_at DESC LIMIT ?`
+      )
+        .bind(...statuses, limit)
+        .all<any>();
+      return res.results || [];
+    }
+    const res = await env.DB.prepare('SELECT * FROM discussions ORDER BY updated_at DESC LIMIT ?')
+      .bind(limit)
+      .all<any>();
+    return res.results || [];
+  } catch {
+    return [];
+  }
+}

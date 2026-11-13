@@ -1,4 +1,20 @@
 import { desEcbPkcs7EncryptHex } from '../../packages/adapters/chaoxing/des';
+import {
+  scanCourseActivitiesShared,
+  type ParsedClassActivity,
+  type ParsedSignActivity,
+  type ScanActivitiesResult,
+} from '../../packages/adapters/chaoxing/activity-protocol';
+export {
+  fetchCourseBbsUrl,
+  fetchTopicDetail,
+  postTopicReply,
+  scanCourseBbsTopics,
+  type BbsReplyParams,
+  type BbsTopicCard,
+  type BbsTopicDetail,
+} from '../../packages/adapters/chaoxing/bbs-protocol';
+export type { ParsedClassActivity, ParsedSignActivity, ScanActivitiesResult };
 
 export interface UserSession {
   _uid: string;
@@ -210,96 +226,21 @@ export async function getCourses(session: UserSession): Promise<Course[]> {
 }
 
 /**
- * 扫描指定课程的签到活动（双通道：taskactivelist 移动接口抗封抗风控优先，student/activelist 兜底）
+ * 扫描指定课程的课堂活动（含签到与课堂讨论/问答元数据，具备频控熔断防放大风暴机制）
  */
-export async function scanCourseActivities(course: Course, session: UserSession): Promise<any[]> {
-  const activities: any[] = [];
-  const seenIds = new Set<string>();
+export async function scanCourseActivitiesWithMeta(
+  course: Course,
+  session: UserSession
+): Promise<ScanActivitiesResult> {
+  return scanCourseActivitiesShared(course, session.cookie, session._uid, CHAOXING_MOBILE_UA);
+}
 
-  // 1. 首选通道：taskactivelist 移动端原生接口（抗封控能力极强，完全规避“请勿频繁操作”，需携带完整 ChaoXingStudy 客户端标识）
-  try {
-    const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${session._uid}`;
-    const res = await fetch(url, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': CHAOXING_MOBILE_UA,
-      },
-    });
-    const json: any = await res.json().catch(() => ({}));
-    if (json?.result === 1 && Array.isArray(json?.activeList)) {
-      for (const item of json.activeList) {
-        const id = String(item.id);
-        if (seenIds.has(id)) continue;
-        const isSign =
-          item.activeType === 2 ||
-          item.type === 2 ||
-          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
-          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
-        if (isSign && item.status === 1) {
-          seenIds.add(id);
-          activities.push({
-            id,
-            name: item.nameOne || '签到',
-            nameOne: item.nameOne || '签到',
-            otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
-            status: item.status,
-            activeType: item.activeType || 2,
-            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : 0,
-          });
-        }
-      }
-      return activities;
-    }
-    if (json?.errorMsg) {
-      console.warn(`[scanCourseActivities] taskactivelist 响应提示: ${json.errorMsg} (课程: ${course.courseName})`);
-    }
-  } catch (err: any) {
-    console.warn(`[scanCourseActivities] taskactivelist 异常: ${err?.message || err}，尝试降级通道`);
-  }
-
-  // 2. 备选通道：student/activelist 接口兜底
-  try {
-    const url = `https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&courseId=${course.courseId}&classId=${course.classId}&_=${Date.now()}`;
-    const res = await fetch(url, {
-      headers: {
-        Cookie: session.cookie,
-        'User-Agent': CHAOXING_MOBILE_UA,
-      },
-    });
-    const json: any = await res.json().catch(() => ({}));
-    if (json?.result === 1 && Array.isArray(json?.data?.activeList)) {
-      for (const item of json.data.activeList) {
-        const id = String(item.id);
-        if (seenIds.has(id)) continue;
-        const isSign =
-          item.activeType === 2 ||
-          item.type === 2 ||
-          (item.nameOne && typeof item.nameOne === 'string' && item.nameOne.includes('签到')) ||
-          (item.otherId !== undefined && item.otherId !== null && String(item.otherId) !== '');
-        // status: 1 代表正在进行中
-        if (isSign && item.status === 1) {
-          seenIds.add(id);
-          activities.push({
-            id,
-            name: item.nameOne || '签到',
-            nameOne: item.nameOne || '签到',
-            otherId: item.otherId !== undefined ? Number(item.otherId) : 0,
-            status: item.status,
-            activeType: item.activeType || item.type || 2,
-            ifphoto: item.ifphoto !== undefined ? Number(item.ifphoto) : 0,
-          });
-        }
-      }
-      return activities;
-    }
-    if (json?.errorMsg) {
-      console.warn(`[scanCourseActivities] student/activelist 提示: ${json.errorMsg} (课程: ${course.courseName})`);
-    }
-  } catch (err: any) {
-    console.warn(`[scanCourseActivities] student/activelist 异常: ${err?.message || err}`);
-  }
-
-  return activities;
+/**
+ * 扫描指定课程的签到活动（向后兼容接口）
+ */
+export async function scanCourseActivities(course: Course, session: UserSession): Promise<ParsedSignActivity[]> {
+  const res = await scanCourseActivitiesWithMeta(course, session);
+  return res.activities;
 }
 
 /**

@@ -136,6 +136,31 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'discuss':
+    case 'discussions': {
+      const model = getFlagValue(args, '--model') || getFlagValue(args, '--pro-model');
+      const courseFilter = getFlagValue(args, '--course');
+      const regenerate = args.includes('--regenerate');
+      const realname = process.env.CHAOXING_REALNAME || '同学';
+
+      const res = await chaoxing.solveDiscussions({
+        realname,
+        autoSubmit,
+        regenerate,
+        courseFilter,
+        solveOptions: { proModel: model },
+      });
+      console.log(
+        green(
+          `\n💬 [讨论区处理完毕] 扫描=${res.scanned} | 已生成拟稿=${res.drafted} | 已发布=${res.submitted} | 跳过=${res.skipped}`
+        )
+      );
+      if (res.reportPath) {
+        console.log(blue(`📄 拟稿报告已保存: ${res.reportPath}`));
+      }
+      break;
+    }
+
     case 'web': {
       const platform = (getFlagValue(args, '--platform') || args[1] || 'pta') as PlatformName;
       const targetUrl = getFlagValue(args, '--url');
@@ -293,6 +318,13 @@ async function main(): Promise<void> {
         }
         await chaoxing.scanPendingHomework();
         await chaoxing.solveAllPendingHomework(autoSubmit, { flashModel, proModel });
+        await chaoxing
+          .solveDiscussions({
+            realname: process.env.CHAOXING_REALNAME || '同学',
+            autoSubmit: false, // 无人值守 pull/poll 永远只做讨论拟稿，必须由看板人工审批发布
+            solveOptions: { proModel },
+          })
+          .catch((e) => console.warn(yellow(`[Edge Pull] 讨论区拟稿同步提示: ${e?.message || e}`)));
       };
 
       await runOnce();

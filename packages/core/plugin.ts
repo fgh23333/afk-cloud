@@ -5,6 +5,7 @@ export type PluginCapability =
   | 'materials'
   | 'homework'
   | 'signin'
+  | 'discussions'
   | 'browser-cdp'
   | 'sandbox';
 

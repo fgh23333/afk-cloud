@@ -206,3 +206,94 @@ export async function triggerEdgeDigestNotification(): Promise<{ sent: boolean; 
   if (!res.ok) return { sent: false };
   return (await res.json()) as { sent: boolean; summary?: string };
 }
+
+export interface EdgeDiscussionItem {
+  discussion_id: string;
+  topic_id: string;
+  course_id: string;
+  class_id: string;
+  course_name: string;
+  author?: string;
+  title: string;
+  prompt: string;
+  chapter_label?: string;
+  topic_url: string;
+  bbs_url?: string;
+  status: string;
+  draft_reply?: string;
+  posted_reply?: string;
+  model_used?: string;
+  reply_count?: number;
+}
+
+function buildEdgeAuthHeaders(): { edgeUrl: string; headers: Record<string, string> } | null {
+  const edgeUrl = process.env.AFK_EDGE_WORKER_URL;
+  if (!edgeUrl) return null;
+  const edgeToken = process.env.AFK_EDGE_BEARER_TOKEN;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (edgeToken) headers['Authorization'] = `Bearer ${edgeToken}`;
+  return { edgeUrl: edgeUrl.replace(/\/+$/, ''), headers };
+}
+
+export async function triggerDiscussionScanOnEdge(
+  offset = 0,
+  limit = 9
+): Promise<{
+  ok: boolean;
+  scannedCourses?: number;
+  totalCourses?: number;
+  nextOffset?: number;
+  hasMore?: boolean;
+  topicsFound?: number;
+  newPendingTopics?: number;
+}> {
+  const conn = buildEdgeAuthHeaders();
+  if (!conn) return { ok: false };
+  try {
+    const res = await fetch(`${conn.edgeUrl}/api/discussions/scan`, {
+      method: 'POST',
+      headers: conn.headers,
+      body: JSON.stringify({ offset, limit }),
+    });
+    if (!res.ok) return { ok: false };
+    return (await res.json()) as any;
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function fetchDiscussionsFromEdge(statuses?: string[]): Promise<EdgeDiscussionItem[]> {
+  const conn = buildEdgeAuthHeaders();
+  if (!conn) return [];
+  try {
+    const query = statuses && statuses.length > 0 ? `?status=${encodeURIComponent(statuses.join(','))}` : '';
+    const res = await fetch(`${conn.edgeUrl}/api/discussions${query}`, {
+      method: 'GET',
+      headers: conn.headers,
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json();
+    return Array.isArray(data.discussions) ? data.discussions : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function pushDiscussionDraftToEdge(
+  discussionId: string,
+  draftReply: string,
+  modelUsed?: string
+): Promise<boolean> {
+  const conn = buildEdgeAuthHeaders();
+  if (!conn) return false;
+  try {
+    const res = await fetch(`${conn.edgeUrl}/api/discussions/${encodeURIComponent(discussionId)}/draft`, {
+      method: 'POST',
+      headers: conn.headers,
+      body: JSON.stringify({ draftReply, modelUsed }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

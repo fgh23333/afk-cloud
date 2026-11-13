@@ -1,30 +1,36 @@
 import { checkAuth, getExpectedAuthTokens, isAllowedTaskUrl, isAuthEnforced } from './auth';
 import { routeAgentRequest } from 'agents';
 import {
-  checkHomeworkPendingCourses,
   fetchNoticeList,
   getCourses,
   login,
   performSign,
-  resolveSignLocations,
   scanCourseActivities,
   UserSession,
 } from './chaoxing';
 import { getDashboardData, renderDashboardHtml } from './dashboard';
+import {
+  approveAndPublishDiscussion,
+  ensureChaoxingEdgeSession,
+  scanDiscussionsBatch,
+} from './discussions';
+import { runChaoxingInspectionCycle } from './inspection';
 import { ExtendedNotifyEnv, sendDigestNotification, sendNotification } from './notify';
 import { signRequest, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
 import { SolverAgent } from './solver-agent';
 import {
   getCachedSession,
+  listDiscussions,
   logExecution,
   lookupQuestionCache,
   nowUtc8,
   resolveCanonicalPendingTaskId,
   saveCachedSession,
+  saveDiscussionDraft,
   saveEnrolledCourses,
   saveNotices,
-  upsertPendingTask,
+  updateDiscussionStatus,
   upsertQuestionCache,
 } from './store';
 
@@ -200,7 +206,10 @@ export default {
         if (env.SIGN_AGENT) {
           try {
             const signStub = env.SIGN_AGENT.get(env.SIGN_AGENT.idFromName('default'));
-            await (signStub as any).checkInspection();
+            await (signStub as any).checkInspection({
+              checkHomework: shouldCheckHomework,
+              scanDiscussions: shouldCheckHomework,
+            });
           } catch (e: any) {
             console.warn(`[SignAgent scheduled 异常] ${e?.message || e}，回退至原生巡检`);
             await handleEdgeHeartbeat(env, shouldCheckHomework);
@@ -629,7 +638,27 @@ export default {
       if (!checkAuth(request, env)) {
         return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
-      const result = await handleEdgeHeartbeat(env, true);
+      const bypassCooldown = url.searchParams.get('bypassCooldown') === '1';
+      if (env.SIGN_AGENT) {
+        try {
+          const signStub = env.SIGN_AGENT.get(env.SIGN_AGENT.idFromName('default'));
+          const result = await (signStub as any).checkInspection({
+            force: true,
+            checkHomework: true,
+            scanDiscussions: true,
+            bypassCooldown,
+          });
+          return corsJson(result, result?.success ? 200 : 500);
+        } catch (e: any) {
+          console.warn(`[SignAgent /check 异常] ${e?.message || e}，回退至原生巡检`);
+        }
+      }
+      const result = await runChaoxingInspectionCycle(env, {
+        force: true,
+        checkHomework: true,
+        scanDiscussions: true,
+        bypassCooldown,
+      });
       return corsJson(result, result.success ? 200 : 500);
     }
 
@@ -939,6 +968,91 @@ export default {
         return corsJson({ count, time: nowUtc8() });
       }
 
+      // 查询课程讨论区话题与 AI 拟稿队列
+      if (url.pathname === '/api/discussions' && request.method === 'GET') {
+        const statusParam = url.searchParams.get('status') || '';
+        const statuses = statusParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 100)));
+        const discussions = await listDiscussions(env, statuses.length > 0 ? statuses : undefined, limit);
+        return corsJson({ ok: true, discussions, time: nowUtc8() });
+      }
+
+      // 分批扫描全课讨论区 (bbscircle)，避免超出 Workers 子请求上限
+      if (url.pathname === '/api/discussions/scan' && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const phone = env.CHAOXING_PHONE || env.PHONE || '';
+        const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
+
+        let session = await ensureChaoxingEdgeSession(env);
+        if (!session) {
+          return corsJson({ ok: false, error: '未配置或无法获取学习通登录态' }, 401);
+        }
+
+        let courses = await getCourses(session);
+        if (courses.length === 0 && phone && password) {
+          const freshSession = await login(phone, password);
+          if (freshSession) {
+            session = freshSession;
+            await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
+            courses = await getCourses(session);
+          }
+        }
+        if (courses.length > 0) {
+          await saveEnrolledCourses(env, courses);
+        }
+
+        const summary = await scanDiscussionsBatch(env, session, courses, {
+          realname: env.CHAOXING_REALNAME,
+          offset: Number(body.offset) || 0,
+          limit: Number(body.limit) || 9,
+          forceDetailRefresh: Boolean(body.forceDetailRefresh),
+          notifyOnNew: Boolean(body.notifyOnNew),
+        });
+        return corsJson({ ok: true, ...summary, time: nowUtc8() });
+      }
+
+      // 保存讨论拟稿（由本地 agy CLI 或看板编辑提交，进入 awaiting_approval 待审批态，绝不自动发布）
+      const discDraftMatch = url.pathname.match(/^\/api\/discussions\/([^\/]+)\/draft$/);
+      if ((discDraftMatch || url.pathname === '/api/discussions/draft') && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const discussionId = decodeURIComponent(discDraftMatch ? discDraftMatch[1] : String(body.discussionId || ''));
+        const draftReply = String(body.draftReply || '');
+        if (!discussionId || !draftReply.trim()) {
+          return corsJson({ ok: false, error: 'discussionId 或 draftReply 不能为空' }, 400);
+        }
+        const ok = await saveDiscussionDraft(
+          env,
+          discussionId,
+          draftReply,
+          typeof body.modelUsed === 'string' ? body.modelUsed : undefined
+        );
+        return corsJson({ ok, discussionId, status: 'awaiting_approval', time: nowUtc8() }, ok ? 200 : 500);
+      }
+
+      // 人工审批并公开发布回复到学习通讨论区 (/mooc-ans/bbscircle/addreply)
+      const discPublishMatch = url.pathname.match(/^\/api\/discussions\/([^\/]+)\/publish$/);
+      if ((discPublishMatch || url.pathname === '/api/discussions/publish') && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const discussionId = decodeURIComponent(discPublishMatch ? discPublishMatch[1] : String(body.discussionId || ''));
+        if (!discussionId) {
+          return corsJson({ ok: false, error: 'discussionId 不能为空' }, 400);
+        }
+        const overrideReply = typeof body.draftReply === 'string' ? body.draftReply : undefined;
+        const result = await approveAndPublishDiscussion(env, discussionId, overrideReply);
+        return corsJson({ ok: result.success, ...result, time: nowUtc8() }, result.success ? 200 : 400);
+      }
+
+      // 忽略某个话题讨论
+      const discIgnoreMatch = url.pathname.match(/^\/api\/discussions\/([^\/]+)\/ignore$/);
+      if (discIgnoreMatch && request.method === 'POST') {
+        const discussionId = decodeURIComponent(discIgnoreMatch[1]);
+        const ok = await updateDiscussionStatus(env, discussionId, 'ignored');
+        return corsJson({ ok, discussionId, status: 'ignored', time: nowUtc8() });
+      }
+
       // 获取边缘缓存的平台 Cookie / Browser Profile Session
       if (url.pathname === '/api/session' && request.method === 'GET') {
         const platform = url.searchParams.get('platform') || 'chaoxing';
@@ -964,135 +1078,11 @@ export default {
 };
 
 async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false) {
-  const phone = env.CHAOXING_PHONE || env.PHONE || '';
-  const password = env.CHAOXING_PASSWORD || env.PASSWORD || '';
-  const realname = env.CHAOXING_REALNAME || '同学';
-
-  if (!phone || !password) {
-    return {
-      success: false,
-      msg: '未配置 CHAOXING_PHONE 或 CHAOXING_PASSWORD (请运行 pnpm afk setup-cf 自动注入)',
-      time: nowUtc8(),
-    };
-  }
-
-  let session = await getCachedSession<UserSession>(env, 'chaoxing', phone);
-  let sessionFromCache = true;
-
-  if (!session) {
-    session = await login(phone, password);
-    sessionFromCache = false;
-    if (!session) {
-      await logExecution(env, 'error', 'chaoxing', '登录失败，请检查账号密码');
-      return { success: false, msg: '登录失败', time: nowUtc8() };
-    }
-    await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
-  }
-
-  let courses = await getCourses(session);
-  if (courses.length === 0 && sessionFromCache) {
-    const freshSession = await login(phone, password);
-    if (freshSession) {
-      session = freshSession;
-      sessionFromCache = false;
-      await saveCachedSession(env, 'chaoxing', phone, session, 6 * 3600);
-      courses = await getCourses(session);
-    }
-  }
-
-  if (courses.length > 0) {
-    await saveEnrolledCourses(env, courses);
-  }
-
-  const signsExecuted: string[] = [];
-  const homeworkCoursesDetected: string[] = [];
-  const locations = resolveSignLocations(env);
-
-  const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
-  const batchSize = 5;
-  for (let i = 0; i < targetCourses.length; i += batchSize) {
-    const chunk = targetCourses.slice(i, i + batchSize);
-    await Promise.all(
-      chunk.map(async (c) => {
-        try {
-          const activities = await scanCourseActivities(c, session);
-          for (const act of activities) {
-            const signRes = await performSign(act, c, session, realname, locations);
-            const summary = `《${c.courseName}》: ${signRes}`;
-            signsExecuted.push(summary);
-
-            await logExecution(env, 'signin', 'chaoxing', summary, {
-              courseId: c.courseId,
-              classId: c.classId,
-              activeId: act.id,
-            });
-            await sendNotification('afk-cloud 自动签到成功', `【${c.courseName}】\n${signRes}`, env);
-          }
-        } catch {
-          // 单门课容错
-        }
-      })
-    );
-  }
-
-  if (checkHomework && courses.length > 0) {
-    const pendingCourses = await checkHomeworkPendingCourses(courses, session);
-    for (const pc of pendingCourses) {
-      homeworkCoursesDetected.push(pc.courseName);
-      const isNew = await upsertPendingTask(env, {
-        taskId: `chaoxing-course-hw-${pc.courseId}-${pc.classId}`,
-        platform: 'chaoxing',
-        courseId: pc.courseId,
-        classId: pc.classId,
-        courseName: pc.courseName,
-        title: `《${pc.courseName}》检测到未交作业红点`,
-        computeTier: 'tier1-cloud-run',
-      });
-
-      if (isNew) {
-        const taskId = `chaoxing-course-hw-${pc.courseId}-${pc.classId}`;
-        await logExecution(
-          env,
-          'homework_detected',
-          'chaoxing',
-          `发现新待办作业：《${pc.courseName}》`,
-          pc
-        );
-        await sendNotification(
-          'afk-cloud 发现新待办作业',
-          `课程：《${pc.courseName}》\n检测到未交作业红点，已登记至 Cloudflare 看板队列。`,
-          env
-        );
-
-        // 探测到新待办作业，Cloudflare 立即主动派发给 agy 自主完成
-        if (env.AFK_SHIM_URL || env.SHIM_URL || env.SOLVER_AGENT) {
-          await dispatchSingleTask(env, taskId).catch((e) =>
-            console.warn(`[自动派发异常] ${e?.message || e}`)
-          );
-        }
-      }
-    }
-  }
-
-  let noticesCount = 0;
-  try {
-    const noticeList = await fetchNoticeList(session, 20);
-    if (noticeList.length > 0) {
-      noticesCount = await saveNotices(env, noticeList);
-    }
-  } catch (err: any) {
-    console.warn(`[handleEdgeHeartbeat] 抓取通知列表异常: ${err?.message || err}`);
-  }
-
-  return {
-    success: true,
-    time: nowUtc8(),
-    sessionFromCache,
-    coursesCount: courses.length,
-    signsExecuted,
-    homeworkCoursesDetected,
-    noticesCount,
-  };
+  return runChaoxingInspectionCycle(env, {
+    force: checkHomework,
+    checkHomework,
+    scanDiscussions: checkHomework,
+  });
 }
 
 /**

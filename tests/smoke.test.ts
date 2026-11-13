@@ -743,10 +743,361 @@ async function runAllTests() {
       edgeIndexCode.includes('suppressQueueLog: true'),
       'scheduled 自动派发必须抑制每 10 分钟重复写入 task_queued 日志'
     );
-    console.log(' ✅ [Test 10/10 PASS] 看板同 workId 去重合并、规范 taskId 解析与防队列噪音验证通过');
+    console.log(' ✅ [Test 10/12 PASS] 看板同 workId 去重合并、规范 taskId 解析与防队列噪音验证通过');
   }
 
-  console.log(`\n🎉 全部 10 项核心自检与安全链路测试 100% 通过！\n`);
+  // --- Test 11: 超星讨论区 HTML 解析、教师/学生帖识别与移动端频控即时熔断契约 ---
+  {
+    const {
+      cleanTopicText,
+      parseTopicCardsFromHtml,
+      parseTopicDetailFromHtml,
+    } = await import('../packages/adapters/chaoxing/bbs-protocol');
+    const {
+      isChaoxingRateLimitMessage,
+      scanCourseActivitiesShared,
+    } = await import('../packages/adapters/chaoxing/activity-protocol');
+    const { CHAOXING_MOBILE_UA } = await import('../edge/src/chaoxing');
+
+    const bbsHtml = `
+      <div class="content1118" id="topic_726151794">
+        <h3 class="bt"><em class="zdi_top">置顶</em>[空标题]
+          <a href="/mooc-ans/bbscircle/gettopicdetail?courseId=266874983&clazzid=154101446&topicid=726151794&chapterLabel=2.1&openc=abc123"
+             onclick="openDetail('/mooc-ans/bbscircle/gettopicdetail?courseId=266874983&clazzid=154101446&topicid=726151794&chapterLabel=2.1&openc=abc123')">[空标题]</a>
+        </h3>
+        <span class="fl photo18" title="其他"></span>
+        <span class="name">张老师</span>
+        <span class="danwei">11-13 12:33</span>
+        <a onclick="reportTopic(726151794, '_topicDiscuss')">举报</a>
+        <input id="reply_count726151794" value="12" />
+      </div>
+      <div class="content1118" id="topic_719690304">
+        <h3 class="bt">
+          <a href="/mooc-ans/bbscircle/gettopicdetail?courseId=266874983&clazzid=154101446&topicid=719690304">提取码是啥</a>
+        </h3>
+        <span class="fl photo18" title="2023水养4"></span>
+        <span class="name">李同学</span>
+      </div>
+    `;
+
+    const cards = parseTopicCardsFromHtml(
+      bbsHtml,
+      { courseId: '266874983', classId: '154101446', courseName: 'LabVIEW编程及应用' },
+      'https://mooc1-1.chaoxing.com/mooc-ans/bbscircle/grouptopic?courseId=266874983&clazzid=154101446'
+    );
+    assert.strictEqual(cards.length, 2, '应解析出 2 条不重复话题卡片');
+    assert.strictEqual(cards[0].isTeacherTopic, true, '含 _topicDiscuss / zdi_top 卡片必须识别为教师话题');
+    assert.strictEqual(cards[0].isPinned, true);
+    assert.strictEqual(cards[0].title, '', '卡片阶段 [空标题] 占位符必须被剔除');
+    assert.strictEqual(cards[0].chapterLabel, '2.1');
+    assert.strictEqual(cards[0].replyCount, 12);
+    assert.strictEqual(cards[1].isTeacherTopic, false, '带班级徽章且无 _topicDiscuss 的同学提问应过滤');
+
+    const detailHtml = `
+      <h3 class="bt">[空标题]LabVIEW 数据类型思考<a class="zan">赞0</a></h3>
+      <p id="topicContent">LabVIEW 中簇（Cluster）与数组（Array）的本质区别是什么？赞 0</p>
+      <span class="name">张老师</span>
+      <span class="name">王同学</span>
+      <input type="hidden" id="openc" value="openc_sig_123" />
+      <a onclick="form_rep_submit2(726151794, 154101446, '9988', 's', 'list_154101446')">发布</a>
+    `;
+
+    assert.strictEqual(cleanTopicText('[空标题]测试文本 赞 5'), '测试文本');
+    const detailNotMe = parseTopicDetailFromHtml(detailHtml, cards[0], '陈同学');
+    assert.strictEqual(detailNotMe.title, 'LabVIEW 数据类型思考');
+    assert.ok(detailNotMe.prompt.includes('簇（Cluster）与数组（Array）'));
+    assert.ok(!detailNotMe.prompt.includes('赞 0'), '必须清除尾部 赞0 按钮文本');
+    assert.strictEqual(detailNotMe.myReplied, false, '未回复同学不应误判为已回复');
+    assert.strictEqual(detailNotMe.canReply, true);
+    assert.deepStrictEqual(detailNotMe.replyParams, {
+      topicId: '726151794',
+      clazzid: '154101446',
+      cpi: '9988',
+      ut: 's',
+      showChooseClazzId: 'list_154101446',
+      openc: 'openc_sig_123',
+    });
+
+    const detailMe = parseTopicDetailFromHtml(detailHtml, cards[0], '王同学');
+    assert.strictEqual(detailMe.myReplied, true, '回复列表中存在本人姓名时必须标记 myReplied=true');
+
+    // 验证 taskactivelist 返回"请勿频繁操作"时立即熔断，绝不二次请求 student/activelist
+    assert.strictEqual(isChaoxingRateLimitMessage('请勿频繁操作'), true);
+    assert.strictEqual(isChaoxingRateLimitMessage('OK', 429), true);
+
+    const origFetch = globalThis.fetch;
+    try {
+      let callUrls: string[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const u = String(input);
+        callUrls.push(u);
+        return new Response(JSON.stringify({ result: 0, errorMsg: '请勿频繁操作' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+
+      const rateRes = await scanCourseActivitiesShared(
+        { courseId: '266874983', classId: '154101446', courseName: 'LabVIEW编程及应用' },
+        '_uid=149258490',
+        '149258490',
+        CHAOXING_MOBILE_UA
+      );
+      assert.strictEqual(callUrls.length, 1, '触发频控时严禁回退请求 student/activelist 加剧风控');
+      assert.strictEqual(rateRes.rateLimited, true, '应精确向上抛出 rateLimited=true');
+
+      // 验证签到活动与非签到课堂互动(activeType=4等)精确分离
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            result: 1,
+            activeList: [
+              { id: 1001, status: 1, activeType: 2, nameOne: '位置签到' },
+              { id: 2002, status: 1, activeType: 4, nameOne: '随堂抢答' },
+              { id: 3003, status: 2, activeType: 2, nameOne: '已结束签到' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )) as typeof fetch;
+
+      const mixedRes = await scanCourseActivitiesShared(
+        { courseId: '266874983', classId: '154101446', courseName: 'LabVIEW编程及应用' },
+        '_uid=149258490',
+        '149258490',
+        CHAOXING_MOBILE_UA
+      );
+      assert.strictEqual(mixedRes.rateLimited, false);
+      assert.strictEqual(mixedRes.activities.length, 1, '仅应将进行中签到归入 activities');
+      assert.strictEqual(mixedRes.activities[0].id, '1001');
+      assert.strictEqual(mixedRes.classActivities.length, 1, '进行中非签到互动应归入 classActivities');
+      assert.strictEqual(mixedRes.classActivities[0].id, '2002');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    console.log(' ✅ [Test 11/12 PASS] 超星讨论区解析与移动端频控熔断/课堂互动分离契约通过');
+  }
+
+  // --- Test 12: 讨论区审批发布闭环、看板 UI 与 Edge 15 分钟频控冷却退避验证 ---
+  {
+    const { getDashboardData, renderDashboardHtml } = await import('../edge/src/dashboard');
+    const { approveAndPublishDiscussion } = await import('../edge/src/discussions');
+    const { runChaoxingInspectionCycle } = await import('../edge/src/inspection');
+
+    let updatedDiscussionStatus = '';
+    let publishedReplySaved = '';
+    const replyParams = {
+      topicId: '726151794',
+      clazzid: '154101446',
+      cpi: '9988',
+      ut: 's',
+      showChooseClazzId: 'list_154101446',
+      openc: 'openc_sig_123',
+    };
+
+    const mockDiscDb: any = {
+      prepare(sql: string) {
+        const execAll = async () => {
+          if (sql.includes('FROM discussions') && !sql.includes('WHERE discussion_id = ?')) {
+            return {
+              results: [
+                {
+                  discussion_id: 'chaoxing-disc-726151794',
+                  topic_id: '726151794',
+                  course_id: '266874983',
+                  class_id: '154101446',
+                  course_name: 'LabVIEW编程及应用',
+                  author: '张老师',
+                  title: 'LabVIEW 数据类型思考',
+                  prompt: '簇和数组有何区别？',
+                  chapter_label: '2.1',
+                  topic_url: 'https://mooc1-1.chaoxing.com/mooc-ans/bbscircle/gettopicdetail?topicid=726151794',
+                  bbs_url: 'https://mooc1-1.chaoxing.com/mooc-ans/bbscircle/grouptopic?courseId=266874983',
+                  reply_params_json: JSON.stringify(replyParams),
+                  status: 'awaiting_approval',
+                  draft_reply: '数组要求所有元素数据类型一致，簇则允许封装不同数据类型。',
+                  posted_reply: '',
+                  model_used: 'gemini-4-hydrogen-xhigh',
+                  reply_count: 12,
+                  published_at: '',
+                  updated_at: '2026/11/13 13:00:00 (UTC+8)',
+                },
+                {
+                  discussion_id: 'chaoxing-disc-726151775',
+                  topic_id: '726151775',
+                  course_id: '266874983',
+                  class_id: '154101446',
+                  course_name: 'LabVIEW编程及应用',
+                  author: '张老师',
+                  title: '状态机模式设计',
+                  prompt: '如何使用移位寄存器构建状态机？',
+                  chapter_label: '3.2',
+                  topic_url: 'https://mooc1-1.chaoxing.com/mooc-ans/bbscircle/gettopicdetail?topicid=726151775',
+                  bbs_url: '',
+                  status: 'pending',
+                  draft_reply: '',
+                  posted_reply: '',
+                  reply_count: 5,
+                  updated_at: '2026/11/13 12:55:00 (UTC+8)',
+                },
+              ],
+            };
+          }
+          if (sql.includes('COUNT(*)')) {
+            return { results: [{ cnt: 0 }] };
+          }
+          return { results: [] };
+        };
+        const makeBound = (args: unknown[]) => ({
+          _all: execAll,
+          all: execAll,
+          first: async () => {
+            if (sql.includes('FROM sessions')) {
+              return {
+                cookie_json: JSON.stringify({
+                  _uid: '149258490',
+                  _d: 'd',
+                  vc3: 'vc3',
+                  uf: 'uf',
+                  fid: '2893',
+                  cookie: '_uid=149258490; vc3=vc3;',
+                }),
+                expires_at: Date.now() + 3600 * 1000,
+              };
+            }
+            if (sql.includes('FROM discussions WHERE discussion_id = ?')) {
+              return {
+                discussion_id: 'chaoxing-disc-726151794',
+                topic_id: '726151794',
+                course_id: '266874983',
+                class_id: '154101446',
+                course_name: 'LabVIEW编程及应用',
+                title: 'LabVIEW 数据类型思考',
+                topic_url: 'https://mooc1-1.chaoxing.com/mooc-ans/bbscircle/gettopicdetail?topicid=726151794',
+                reply_params_json: JSON.stringify(replyParams),
+                draft_reply: '数组元素类型同构，簇可组合异构数据。',
+              };
+            }
+            const res = await execAll();
+            return res.results?.[0] ?? null;
+          },
+          run: async () => {
+            if (sql.includes("SET status = 'submitted'") && sql.includes('UPDATE discussions')) {
+              updatedDiscussionStatus = 'submitted';
+              publishedReplySaved = String(args[0] || '');
+            }
+            return { success: true };
+          },
+        });
+        return {
+          _all: execAll,
+          bind: (...args: unknown[]) => makeBound(args),
+          all: execAll,
+          first: async () => {
+            const res = await execAll();
+            return res.results?.[0] ?? null;
+          },
+          run: async () => ({ success: true }),
+        };
+      },
+      async batch(stmts: any[]) {
+        const out = [];
+        for (const s of stmts) {
+          out.push(await s.all());
+        }
+        return out;
+      },
+    };
+
+    const dash = await getDashboardData({ DB: mockDiscDb });
+    assert.strictEqual(dash.discussions?.length, 2, 'getDashboardData 必须聚合返回 discussions 列表');
+    assert.strictEqual(dash.stats.discussionPendingCount, 1);
+    assert.strictEqual(dash.stats.discussionDraftCount, 1);
+
+    const html = renderDashboardHtml();
+    assert.ok(html.includes('tabBtn-discussions'), '看板 HTML 必须包含话题讨论标签页');
+    assert.ok(html.includes('publishDiscussionUI'), '看板 HTML 必须包含审批发布动作函数');
+    assert.ok(html.includes('function escapeHtml'), '看板 HTML 必须具备 XSS 转义函数');
+
+    const origFetch = globalThis.fetch;
+    try {
+      let postedBody = '';
+      let postedUrl = '';
+      let mobileScanCalls = 0;
+
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(input);
+        if (u.includes('/mooc-ans/bbscircle/addreply')) {
+          postedUrl = u;
+          postedBody = String(init?.body || '');
+          return new Response('success', { status: 200 });
+        }
+        if (u.includes('/visit/courselistdata')) {
+          return new Response(
+            '<li class="course" courseId="266874983" clazzId="154101446" personId="9988"><span class="course-name" title="LabVIEW编程及应用">LabVIEW编程及应用</span></li>',
+            { status: 200 }
+          );
+        }
+        if (u.includes('taskactivelist')) {
+          mobileScanCalls++;
+          return new Response(JSON.stringify({ result: 0, errorMsg: '请勿频繁操作' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (u.includes('bbs/get') || u.includes('grouptopic')) {
+          return new Response('', { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }) as typeof fetch;
+
+      const pubRes = await approveAndPublishDiscussion(
+        { DB: mockDiscDb, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' },
+        'chaoxing-disc-726151794'
+      );
+      assert.strictEqual(pubRes.success, true, `审批发布应成功提交到 addreply: ${pubRes.msg}`);
+      assert.ok(postedUrl.includes('/mooc-ans/bbscircle/addreply'));
+      assert.ok(postedBody.includes('topicId=726151794'));
+      assert.ok(postedBody.includes('openc=openc_sig_123'));
+      assert.strictEqual(updatedDiscussionStatus, 'submitted', '发布成功后必须标记讨论状态为 submitted');
+      assert.ok(publishedReplySaved.includes('异构数据'));
+
+      // 验证 Inspection 15 分钟冷却退避：首次触发请勿频繁操作后记录冷却时间戳，第二次跳过 mobilelearn 轮询
+      let savedAgentState: any = null;
+      const cycle1 = await runChaoxingInspectionCycle(
+        { DB: mockDiscDb, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' },
+        {
+          force: false,
+          checkHomework: false,
+          scanDiscussions: false,
+          onStateUpdate: (next) => {
+            savedAgentState = next;
+          },
+        }
+      );
+      assert.strictEqual(cycle1.rateLimited, true, '首次触发频控应回报 rateLimited=true');
+      assert.ok(savedAgentState && savedAgentState.rateLimitUntilMs > Date.now(), '应写入 15 分钟冷却到期时间戳');
+      assert.strictEqual(mobileScanCalls, 1, '触发频控后必须立即中断本轮剩余课程扫描');
+
+      const cycle2 = await runChaoxingInspectionCycle(
+        { DB: mockDiscDb, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' },
+        {
+          force: false,
+          checkHomework: false,
+          scanDiscussions: false,
+          state: savedAgentState,
+        }
+      );
+      assert.strictEqual(cycle2.cooldownActive, true, '冷却窗口期内必须进入 cooldownActive');
+      assert.strictEqual(mobileScanCalls, 1, '冷却期内绝不应再次请求 mobilelearn 触发风控');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    console.log(' ✅ [Test 12/12 PASS] 讨论区人工审批发布闭环与 15 分钟频控退避冷却验证通过');
+  }
+
+  console.log(`\n🎉 全部 12 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {
