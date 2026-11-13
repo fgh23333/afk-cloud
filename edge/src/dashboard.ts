@@ -156,35 +156,54 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     let submittedCount = 0;
     let failedCount = 0;
 
-    const homeworks: NonNullable<DashboardData['homeworks']> = [];
+    type HomeworkItem = NonNullable<DashboardData['homeworks']>[number];
+    const homeworkMap = new Map<string, HomeworkItem>();
     const courseMap = new Map<
       string,
       { courseName: string; courseId: string; classId: string; cpi?: string; teacherName?: string }
     >();
 
+    const getStatusPriority = (status: string): number => {
+      switch (status) {
+        case 'submitted':
+          return 6;
+        case 'draft_saved':
+          return 5;
+        case 'awaiting_approval':
+          return 4;
+        case 'processing':
+          return 3;
+        case 'dispatched':
+          return 2;
+        case 'failed':
+          return 1;
+        default:
+          return 0;
+      }
+    };
+
+    const isRealDeadline = (d?: string): boolean =>
+      Boolean(d && !['无截止限制', '无截止时间', '近期', '无', '未设置'].includes(d.trim()));
+    const isRealCourseName = (c?: string): boolean =>
+      Boolean(c && c.trim() !== '' && c !== '未命名课程' && c !== '未知课程');
+
     for (const t of tasks) {
       let statusLabel = '未派发';
       if (t.status === 'dispatched' || t.status === 'processing') {
-        dispatchedCount++;
         statusLabel = '已派发';
       } else if (t.status === 'draft_saved' || t.status === 'awaiting_approval') {
-        draftCount++;
         statusLabel = '做完暂存';
       } else if (t.status === 'submitted') {
-        submittedCount++;
         statusLabel = '已提交';
       } else if (t.status === 'failed') {
-        failedCount++;
         statusLabel = '求解失败';
-      } else {
-        pendingCount++;
-        statusLabel = '未派发';
       }
 
       const isPending = t.status === 'pending';
 
       let directUrl = '';
       let noticeUrl = '';
+      let payloadWorkId = '';
 
       if (t.payload_json) {
         try {
@@ -193,14 +212,17 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           if (parsed.idCode) {
             noticeUrl = `https://notice.chaoxing.com/pc/notice/${parsed.idCode}/detail`;
           }
+          if (parsed.workId) payloadWorkId = String(parsed.workId);
         } catch {
           // ignore
         }
       }
 
-      // 兜底提取 workId (如 chaoxing-notice-work-58213243-154423000)
-      const workIdMatch = t.task_id.match(/chaoxing-(?:notice-)?work-(\d+)/);
-      const rawWorkId = workIdMatch ? workIdMatch[1] : '';
+      // 兜底提取 workId（统一兼容 chaoxing-notice-work-<workId>-<classId> 与 chaoxing-hw-<workId>）
+      const workIdMatch =
+        t.task_id.match(/^chaoxing-(?:notice-)?work-(\d+)/) ||
+        t.task_id.match(/^chaoxing-hw-(\d+)$/);
+      const rawWorkId = workIdMatch ? workIdMatch[1] : payloadWorkId;
       if (!directUrl && rawWorkId && t.course_id && t.class_id) {
         directUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${t.course_id}&classId=${t.class_id}&cpi=&workId=${rawWorkId}`;
       }
@@ -214,8 +236,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       // 2. 若无通知入口，回退到 directUrl (intoexamorwork / dowork 链接)。
       // 3. 若无直接作业链接，回退到超星课程学生空间 courseUrl。
       const primaryUrl = noticeUrl || directUrl || courseUrl;
-
-      homeworks.push({
+      const candidate: HomeworkItem = {
         taskId: t.task_id,
         title: t.title,
         courseName: t.course_name || '未命名课程',
@@ -233,7 +254,54 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         directUrl,
         noticeUrl,
         courseUrl,
-      });
+      };
+
+      const dedupKey = rawWorkId ? `work_${rawWorkId}` : t.task_id;
+      const existing = homeworkMap.get(dedupKey);
+      if (!existing) {
+        homeworkMap.set(dedupKey, candidate);
+      } else {
+        const existingRank = getStatusPriority(existing.status);
+        const candidateRank = getStatusPriority(candidate.status);
+        const winner = candidateRank > existingRank ? candidate : existing;
+        const loser = candidateRank > existingRank ? existing : candidate;
+
+        const mergedNoticeUrl = existing.noticeUrl || candidate.noticeUrl || '';
+        const mergedDirectUrl = existing.directUrl || candidate.directUrl || '';
+        const mergedCourseUrl = existing.courseUrl || candidate.courseUrl || '';
+        const preferredTaskId = existing.taskId.startsWith('chaoxing-notice-work-')
+          ? existing.taskId
+          : candidate.taskId.startsWith('chaoxing-notice-work-')
+            ? candidate.taskId
+            : winner.taskId;
+
+        const mergedEndDate = isRealDeadline(winner.endDate)
+          ? winner.endDate
+          : isRealDeadline(loser.endDate)
+            ? loser.endDate
+            : winner.endDate;
+
+        const mergedCourseName = isRealCourseName(existing.courseName)
+          ? existing.courseName
+          : isRealCourseName(candidate.courseName)
+            ? candidate.courseName
+            : winner.courseName;
+
+        homeworkMap.set(dedupKey, {
+          ...winner,
+          taskId: preferredTaskId,
+          title: winner.title || loser.title,
+          courseName: mergedCourseName,
+          courseId: existing.courseId || candidate.courseId,
+          classId: existing.classId || candidate.classId,
+          endDate: mergedEndDate,
+          resultSummary: winner.resultSummary || loser.resultSummary || '',
+          noticeUrl: mergedNoticeUrl,
+          directUrl: mergedDirectUrl,
+          courseUrl: mergedCourseUrl,
+          url: mergedNoticeUrl || mergedDirectUrl || mergedCourseUrl,
+        });
+      }
 
       if (t.course_id && t.course_name && !courseMap.has(t.course_id)) {
         courseMap.set(t.course_id, {
@@ -241,6 +309,21 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           courseId: t.course_id,
           classId: t.class_id,
         });
+      }
+    }
+
+    const homeworks: NonNullable<DashboardData['homeworks']> = Array.from(homeworkMap.values());
+    for (const hw of homeworks) {
+      if (hw.status === 'dispatched' || hw.status === 'processing') {
+        dispatchedCount++;
+      } else if (hw.status === 'draft_saved' || hw.status === 'awaiting_approval') {
+        draftCount++;
+      } else if (hw.status === 'submitted') {
+        submittedCount++;
+      } else if (hw.status === 'failed') {
+        failedCount++;
+      } else {
+        pendingCount++;
       }
     }
 

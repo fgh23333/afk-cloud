@@ -567,10 +567,186 @@ async function runAllTests() {
     assert.ok(edgeIndexCode.includes("url.pathname === '/api/tasks/pull'"), 'Edge 必须提供 /api/tasks/pull 拉取接口');
     assert.ok(edgeIndexCode.includes('syncExternalTaskStatus'), 'Tasks Sync 必须同步解锁 SolverAgent 状态');
 
-    console.log(' ✅ [Test 9/9 PASS] Gemini 4 Hydrogen 默认模型、UTC+8 防死锁与看板签到/拉取契约验证通过');
+    console.log(' ✅ [Test 9/10 PASS] Gemini 4 Hydrogen 默认模型、UTC+8 防死锁与看板签到/拉取契约验证通过');
   }
 
-  console.log(`\n🎉 全部 9 项核心自检与安全链路测试 100% 通过！\n`);
+  // --- Test 10: 看板同 workId 作业去重合并、规范 taskId 解析与无 shim 防队列噪音契约 ---
+  {
+    const { getDashboardData } = await import('../edge/src/dashboard');
+    const { resolveCanonicalPendingTaskId, upsertPendingTask } = await import('../edge/src/store');
+
+    const insertedTaskIds: string[] = [];
+    const mockDedupDb: any = {
+      prepare(sql: string) {
+        const execAll = async () => {
+          if (sql.includes('FROM pending_tasks') && !sql.includes('SELECT task_id') && !sql.includes('COUNT(*)')) {
+            return {
+              results: [
+                {
+                  task_id: 'chaoxing-notice-work-58213243-154423000',
+                  platform: 'chaoxing',
+                  course_id: '268784111',
+                  class_id: '154423000',
+                  course_name: '计算机辅助测试与虚拟仪器(B)',
+                  title: 'VI创建及子VI的设计',
+                  status: 'pending',
+                  compute_tier: 'tier1-cloud-run',
+                  deadline: '2026-05-20 23:59',
+                  result_summary: null,
+                  payload_json: JSON.stringify({ idCode: 'NOTICE_ID_CODE_123' }),
+                  created_at: '2026/11/12 10:00:00 (UTC+8)',
+                  updated_at: '2026/11/12 10:00:00 (UTC+8)',
+                },
+                {
+                  task_id: 'chaoxing-hw-58213243',
+                  platform: 'chaoxing',
+                  course_id: '268784111',
+                  class_id: '154423000',
+                  course_name: '未命名课程',
+                  title: 'VI创建及子VI的设计',
+                  status: 'draft_saved',
+                  compute_tier: 'tier1-cloud-run',
+                  deadline: '近期',
+                  result_summary: '已暂存 8 题 (单选/判断)',
+                  payload_json: JSON.stringify({
+                    workId: '58213243',
+                    url: 'https://mooc1.chaoxing.com/mooc2/work/dowork?workId=58213243',
+                  }),
+                  created_at: '2026/11/12 10:05:00 (UTC+8)',
+                  updated_at: '2026/11/12 12:00:00 (UTC+8)',
+                },
+                {
+                  task_id: 'chaoxing-hw-268784887-158750280',
+                  platform: 'chaoxing',
+                  course_id: '268784887',
+                  class_id: '158750280',
+                  course_name: '高等数学(二)',
+                  title: '待办课程作业提示',
+                  status: 'pending',
+                  compute_tier: 'tier1-cloud-run',
+                  deadline: '近期',
+                  result_summary: null,
+                  payload_json: null,
+                  created_at: '2026/11/12 09:00:00 (UTC+8)',
+                  updated_at: '2026/11/12 09:00:00 (UTC+8)',
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT task_id FROM pending_tasks')) {
+            return {
+              results: [{ task_id: 'chaoxing-notice-work-58213243-154423000' }],
+            };
+          }
+          if (sql.includes('COUNT(*)')) {
+            return { results: [{ cnt: 0 }] };
+          }
+          return { results: [] };
+        };
+        const makeBound = (args: unknown[]) => ({
+          _all: execAll,
+          all: execAll,
+          first: async () => {
+            if (sql.includes('SELECT status, payload_json FROM pending_tasks')) {
+              return { status: 'pending', payload_json: JSON.stringify({ idCode: 'NOTICE_ID_CODE_123' }) };
+            }
+            const res = await execAll();
+            return res.results?.[0] ?? null;
+          },
+          run: async () => {
+            if (sql.includes('INSERT INTO pending_tasks') && typeof args[0] === 'string') {
+              insertedTaskIds.push(args[0]);
+            }
+            return { success: true };
+          },
+        });
+        return {
+          _all: execAll,
+          bind: (...args: unknown[]) => makeBound(args),
+          all: execAll,
+          first: async () => {
+            const res = await execAll();
+            return res.results?.[0] ?? null;
+          },
+          run: async () => ({ success: true }),
+        };
+      },
+      async batch(stmts: any[]) {
+        const out = [];
+        for (const s of stmts) {
+          out.push(await s.all());
+        }
+        return out;
+      },
+    };
+
+    const dash = await getDashboardData({ DB: mockDedupDb });
+    assert.strictEqual(dash.homeworks?.length, 2, '同 workId 的 notice-work 与 hw 两条记录应合并为 1 条');
+    assert.strictEqual(dash.stats.draftCount, 1, '合并后 draftCount 应为 1 而非重复计数');
+    assert.strictEqual(dash.stats.pendingCount, 1, '不同课程级占位任务不应误合并');
+
+    const merged = dash.homeworks?.find((h) => h.taskId === 'chaoxing-notice-work-58213243-154423000');
+    assert.ok(merged, '合并后应保留带 noticeUrl 的 chaoxing-notice-work-* taskId');
+    assert.strictEqual(merged?.status, 'draft_saved', '高优先级完成状态 draft_saved 应胜出');
+    assert.strictEqual(
+      merged?.noticeUrl,
+      'https://notice.chaoxing.com/pc/notice/NOTICE_ID_CODE_123/detail',
+      '必须保留 403-free noticeUrl'
+    );
+    assert.strictEqual(merged?.resultSummary, '已暂存 8 题 (单选/判断)', '必须保留暂存摘要');
+    assert.strictEqual(merged?.courseName, '计算机辅助测试与虚拟仪器(B)', '应保留非占位课程名');
+    assert.strictEqual(merged?.endDate, '2026-05-20 23:59', '应保留真实截止时间');
+
+    const resolvedId = await resolveCanonicalPendingTaskId(mockDedupDb, 'chaoxing-hw-58213243', '58213243');
+    assert.strictEqual(
+      resolvedId,
+      'chaoxing-notice-work-58213243-154423000',
+      '同步或入库时必须复用已存在的 notice-work 规范 task_id'
+    );
+
+    // 验证 courseId-classId 占位 ID 不会被误判成 workId 去重合并
+    const resolvedPlaceholder = await resolveCanonicalPendingTaskId(
+      mockDedupDb,
+      'chaoxing-hw-268784887-158750280'
+    );
+    assert.strictEqual(
+      resolvedPlaceholder,
+      'chaoxing-hw-268784887-158750280',
+      'chaoxing-hw-courseId-classId 占位 ID 应保持独立'
+    );
+
+    await upsertPendingTask(
+      { DB: mockDedupDb },
+      {
+        taskId: 'chaoxing-hw-58213243',
+        platform: 'chaoxing',
+        courseId: '268784111',
+        classId: '154423000',
+        courseName: '计算机辅助测试与虚拟仪器(B)',
+        title: 'VI创建及子VI的设计',
+        status: 'pending',
+        payload: { workId: '58213243' },
+      }
+    );
+    assert.deepStrictEqual(
+      insertedTaskIds,
+      ['chaoxing-notice-work-58213243-154423000'],
+      'upsertPendingTask 必须向规范 task_id 写入而非新增 chaoxing-hw-<id>'
+    );
+
+    const edgeIndexCode = fs.readFileSync(path.join(__dirname, '../edge/src/index.ts'), 'utf8');
+    assert.ok(
+      edgeIndexCode.includes('shouldCheckHomework && env.DB && (env.AFK_SHIM_URL || env.SHIM_URL)'),
+      'scheduled 自动派发仅应在配置常驻 shim 时触发'
+    );
+    assert.ok(
+      edgeIndexCode.includes('suppressQueueLog: true'),
+      'scheduled 自动派发必须抑制每 10 分钟重复写入 task_queued 日志'
+    );
+    console.log(' ✅ [Test 10/10 PASS] 看板同 workId 去重合并、规范 taskId 解析与防队列噪音验证通过');
+  }
+
+  console.log(`\n🎉 全部 10 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

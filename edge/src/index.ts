@@ -20,6 +20,7 @@ import {
   logExecution,
   lookupQuestionCache,
   nowUtc8,
+  resolveCanonicalPendingTaskId,
   saveCachedSession,
   saveEnrolledCourses,
   saveNotices,
@@ -218,15 +219,15 @@ export default {
           }
         }
 
-        // 自动巡检并派发待办作业给 agy (每轮最多派发 3 个，避免拥堵)
-        if (shouldCheckHomework && env.DB && (env.AFK_SHIM_URL || env.SHIM_URL || env.SOLVER_AGENT)) {
+        // 自动巡检并派发待办作业给 agy (仅在配置了常驻 shim 时由云端 Cron 主动推送，避免无 shim 时反复写入 task_queued 噪音)
+        if (shouldCheckHomework && env.DB && (env.AFK_SHIM_URL || env.SHIM_URL)) {
           try {
             const pending = await env.DB.prepare(
               "SELECT task_id FROM pending_tasks WHERE status = 'pending' ORDER BY created_at ASC LIMIT 3"
             ).all<{ task_id: string }>();
 
             for (const row of pending.results || []) {
-              await dispatchSingleTask(env, row.task_id);
+              await dispatchSingleTask(env, row.task_id, { force: false, suppressQueueLog: true });
             }
           } catch (e: any) {
             console.warn(`[scheduled 自动派发异常] ${e?.message || e}`);
@@ -773,8 +774,9 @@ export default {
 
         for (const t of tasks) {
           if (!t.workId && !t.taskId) continue;
-          const tid = t.taskId || `chaoxing-work-${t.workId}`;
-          const rawId = String(t.workId || tid.replace(/^chaoxing-(?:notice-)?(?:work|hw)-/, '').split('-')[0] || '');
+          const incomingTid = t.taskId || `chaoxing-work-${t.workId}`;
+          const tid = await resolveCanonicalPendingTaskId(env.DB, incomingTid, t.workId);
+          const rawId = String(t.workId || incomingTid.replace(/^chaoxing-(?:notice-)?(?:work|hw)-/, '').split('-')[0] || '');
           const nextStatus = t.status || (t.isPending ? 'pending' : 'submitted');
           const resultSummary = t.resultSummary || null;
 
@@ -1098,7 +1100,8 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
  */
 async function dispatchSingleTask(
   env: ExtendedNotifyEnv,
-  taskId: string
+  taskId: string,
+  options?: { force?: boolean; suppressQueueLog?: boolean }
 ): Promise<{ taskId: string; success: boolean; status: string; reason?: string }> {
   if (!env.DB) {
     return { taskId, success: false, status: 'error', reason: 'D1 数据库未连接' };
@@ -1151,7 +1154,7 @@ async function dispatchSingleTask(
         deadline: task.deadline,
         courseName: task.course_name,
         title: task.title,
-        force: true,
+        force: options?.force ?? true,
       });
       finalStatus = res?.status || 'dispatched';
       reasonMsg = res?.reason || (finalStatus === 'dispatched' ? '已安全派发至服务器 shim' : '已入队单例队列等待排队');
@@ -1217,7 +1220,7 @@ async function dispatchSingleTask(
       `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
       env
     );
-  } else {
+  } else if (!options?.suppressQueueLog) {
     await logExecution(
       env,
       'task_queued',
