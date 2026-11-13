@@ -147,6 +147,60 @@ export async function saveCachedSession(
 }
 
 /**
+ * 从 taskId 或显式 workId 提取超星唯一作业 ID，避免 notice-work / hw / work 前缀差异导致重复入库
+ */
+export function extractChaoxingWorkId(taskId: string, explicitWorkId?: string | number): string {
+  if (explicitWorkId !== undefined && explicitWorkId !== null) {
+    const clean = String(explicitWorkId).trim();
+    if (/^\d+$/.test(clean)) return clean;
+  }
+  const match =
+    String(taskId || '').match(/^chaoxing-(?:notice-)?work-(\d+)/) ||
+    String(taskId || '').match(/^chaoxing-hw-(\d+)$/);
+  return match ? match[1] : '';
+}
+
+/**
+ * 解析 D1 pending_tasks 中已存在的规范 task_id（优先保留携带 notice idCode 的 chaoxing-notice-work-* 行）
+ */
+export async function resolveCanonicalPendingTaskId(
+  db: D1DatabaseLike,
+  incomingTaskId: string,
+  explicitWorkId?: string | number
+): Promise<string> {
+  const workId = extractChaoxingWorkId(incomingTaskId, explicitWorkId);
+  if (!workId) return incomingTaskId;
+
+  try {
+    const res = await db
+      .prepare(
+        `SELECT task_id FROM pending_tasks
+         WHERE task_id = ?
+            OR task_id LIKE ?
+            OR task_id = ?
+            OR task_id = ?`
+      )
+      .bind(
+        incomingTaskId,
+        `chaoxing-notice-work-${workId}-%`,
+        `chaoxing-hw-${workId}`,
+        `chaoxing-work-${workId}`
+      )
+      .all<{ task_id: string }>();
+
+    const rows = res?.results || [];
+    if (rows.length === 0) return incomingTaskId;
+
+    const noticeRow = rows.find((r) => r.task_id.startsWith('chaoxing-notice-work-'));
+    if (noticeRow) return noticeRow.task_id;
+    const exactRow = rows.find((r) => r.task_id === incomingTaskId);
+    return exactRow ? exactRow.task_id : rows[0].task_id;
+  } catch {
+    return incomingTaskId;
+  }
+}
+
+/**
  * 写入或更新待办作业/评测任务（供 GCP 上 agy + Cloudflare Plugin 或 Cloud Run 消费）
  */
 export async function upsertPendingTask(
@@ -169,12 +223,33 @@ export async function upsertPendingTask(
   const payloadStr = task.payload ? JSON.stringify(task.payload) : null;
 
   try {
-    // 若已存在且状态为 submitted / draft_saved，则不覆盖其已完成状态
-    const existing = await env.DB.prepare('SELECT status FROM pending_tasks WHERE task_id = ?')
+    const canonicalTaskId = await resolveCanonicalPendingTaskId(
+      env.DB,
+      task.taskId,
+      task.payload && typeof task.payload === 'object' ? (task.payload as any).workId : undefined
+    );
+    task = { ...task, taskId: canonicalTaskId };
+
+    // 若已存在且状态为 submitted / draft_saved，则不覆盖其已完成状态；若新数据携带 notice idCode，仅补充合并 payload_json
+    const existing = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
       .bind(task.taskId)
-      .first<{ status: string }>();
+      .first<{ status: string; payload_json?: string }>();
 
     if (existing && (existing.status === 'submitted' || existing.status === 'draft_saved')) {
+      if (task.payload && typeof task.payload === 'object') {
+        try {
+          const prevPayload = existing.payload_json ? JSON.parse(existing.payload_json) : {};
+          const incomingPayload = task.payload as Record<string, unknown>;
+          if (incomingPayload.idCode && !prevPayload.idCode) {
+            const mergedPayload = JSON.stringify({ ...prevPayload, ...incomingPayload });
+            await env.DB.prepare('UPDATE pending_tasks SET payload_json = ?, updated_at = ? WHERE task_id = ?')
+              .bind(mergedPayload, ts, task.taskId)
+              .run();
+          }
+        } catch {
+          // ignore
+        }
+      }
       return false;
     }
 
