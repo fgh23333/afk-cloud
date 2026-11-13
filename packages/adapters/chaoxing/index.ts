@@ -19,8 +19,10 @@ import { ExamNoticeItem, fetchNoticeList, NoticeItem } from './notice';
 import { getOrUploadPhotoObject, submitPhotoSign } from './photo';
 import { ChaoxingCookies, chaoxingLogin, getChaoxingCourses } from './session';
 import { DEFAULT_SHOU_LOCATIONS, performChaoxingSign, scanCourseActivities, SignLocation } from './signin';
+import { DiscussionRunSummary, solvePendingDiscussions } from './discussions';
 
 export * from './des';
+export * from './discussions';
 export * from './homework';
 export * from './materials';
 export * from './notice';
@@ -34,9 +36,9 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly manifest: PluginManifest = {
     id: 'chaoxing',
     name: '超星学习通自适应插件 (Skill)',
-    version: '1.1.0',
-    description: '超星协议原生适配器，涵盖登录态缓存、全类型签到、18门课程课件RAG拉取、双轨作业求解与安全草稿暂存',
-    capabilities: ['courses', 'materials', 'homework', 'signin'],
+    version: '1.2.0',
+    description: '超星协议原生适配器，涵盖登录态缓存、全类型签到、18门课程课件RAG拉取、双轨作业求解、讨论区拟稿与安全草稿暂存',
+    capabilities: ['courses', 'materials', 'homework', 'signin', 'discussions'],
   };
 
   private phone: string;
@@ -319,5 +321,20 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
     }
 
     return results;
+  }
+
+  /**
+   * 扫描并生成课程话题讨论 AI 拟稿，推送至云端看板 awaiting_approval（默认绝不自动公开提交）
+   */
+  public async solveDiscussions(options?: {
+    realname?: string;
+    autoSubmit?: boolean;
+    regenerate?: boolean;
+    courseFilter?: string;
+    solveOptions?: SolveOptions;
+  }): Promise<DiscussionRunSummary> {
+    const cookies = await this.ensureAuth();
+    const courses = await getChaoxingCourses(cookies);
+    return solvePendingDiscussions(courses, cookies, options);
   }
 }

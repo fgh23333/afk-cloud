@@ -1,4 +1,4 @@
-import { EdgeEnv, nowUtc8 } from './store';
+import { EdgeEnv, listDiscussions, nowUtc8 } from './store';
 import { extractInfoFromContent, parseTimeToMs } from './chaoxing';
 
 export interface DashboardData {
@@ -13,6 +13,9 @@ export interface DashboardData {
     failedCount: number;
     signinCount: number;
     questionBankCount: number;
+    discussionPendingCount?: number;
+    discussionDraftCount?: number;
+    discussionSubmittedCount?: number;
   };
   sessions: Array<{
     platform: string;
@@ -83,6 +86,26 @@ export interface DashboardData {
     cpi?: string;
     teacherName?: string;
   }>;
+  discussions?: Array<{
+    discussionId: string;
+    topicId: string;
+    courseId: string;
+    classId: string;
+    courseName: string;
+    author: string;
+    title: string;
+    prompt: string;
+    chapterLabel: string;
+    topicUrl: string;
+    bbsUrl: string;
+    status: string;
+    draftReply: string;
+    postedReply: string;
+    modelUsed: string;
+    replyCount: number;
+    publishedAt: string;
+    updatedAt: string;
+  }>;
   logs: Array<{
     id: number;
     event_type: string;
@@ -109,6 +132,9 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       failedCount: 0,
       signinCount: 0,
       questionBankCount: 0,
+      discussionPendingCount: 0,
+      discussionDraftCount: 0,
+      discussionSubmittedCount: 0,
     },
     sessions: [],
     tasks: [],
@@ -117,6 +143,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     notices: [],
     signinHistory: [],
     courses: [],
+    discussions: [],
     logs: [],
   };
 
@@ -504,6 +531,34 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       }
     }
 
+    const rawDiscussions = await listDiscussions(env, undefined, 150);
+    const discussions = rawDiscussions.map((d: any) => ({
+      discussionId: String(d.discussion_id || ''),
+      topicId: String(d.topic_id || ''),
+      courseId: String(d.course_id || ''),
+      classId: String(d.class_id || ''),
+      courseName: String(d.course_name || ''),
+      author: String(d.author || ''),
+      title: String(d.title || ''),
+      prompt: String(d.prompt || ''),
+      chapterLabel: String(d.chapter_label || ''),
+      topicUrl: String(d.topic_url || ''),
+      bbsUrl: String(d.bbs_url || ''),
+      status: String(d.status || 'pending'),
+      draftReply: String(d.draft_reply || ''),
+      postedReply: String(d.posted_reply || ''),
+      modelUsed: String(d.model_used || ''),
+      replyCount: Number(d.reply_count || 0),
+      publishedAt: String(d.published_at || ''),
+      updatedAt: String(d.updated_at || ''),
+    }));
+
+    const discussionPendingCount = discussions.filter((d) => d.status === 'pending').length;
+    const discussionDraftCount = discussions.filter((d) => d.status === 'awaiting_approval').length;
+    const discussionSubmittedCount = discussions.filter(
+      (d) => d.status === 'submitted' || d.status === 'replied_externally'
+    ).length;
+
     return {
       time: currentTime,
       lastSync: currentTime,
@@ -516,6 +571,9 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         failedCount,
         signinCount,
         questionBankCount: qbCount,
+        discussionPendingCount,
+        discussionDraftCount,
+        discussionSubmittedCount,
       },
       sessions,
       tasks,
@@ -524,6 +582,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       notices,
       signinHistory,
       courses: Array.from(courseMap.values()),
+      discussions,
       logs,
     };
   } catch {
@@ -670,6 +729,10 @@ export function renderDashboardHtml(): string {
           <span>📝 作业与实验任务</span>
           <span id="badge-homework" class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300">0</span>
         </button>
+        <button onclick="switchTab('discussions')" id="tabBtn-discussions" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
+          <span>💬 话题讨论</span>
+          <span id="badge-discussions" class="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">0</span>
+        </button>
         <button onclick="switchTab('exams')" id="tabBtn-exams" class="tab-btn px-4 py-2 rounded-t-lg transition border-b-2 border-transparent hover:text-slate-200 flex items-center gap-1.5">
           <span>🚨 考试与随堂测验</span>
           <span id="badge-exams" class="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300">0</span>
@@ -706,6 +769,30 @@ export function renderDashboardHtml(): string {
 
         <div id="homeworkList" class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载作业与实验任务...</div>
+        </div>
+      </section>
+
+      <!-- Tab: 话题讨论 (人工审批后公开发布) -->
+      <section id="tab-discussions" class="space-y-3 hidden">
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+          <div class="flex items-center gap-1.5 overflow-x-auto py-0.5">
+            <button onclick="setDiscussionFilter('all')" id="disc-filter-all" class="disc-filter-btn px-2.5 py-1 rounded-lg bg-slate-800 text-white font-medium border border-slate-700 transition">全部 (<span id="disc-cnt-all">0</span>)</button>
+            <button onclick="setDiscussionFilter('pending')" id="disc-filter-pending" class="disc-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 hover:bg-slate-800 border border-transparent transition">⏳ 待AI拟稿 (<span id="disc-cnt-pending">0</span>)</button>
+            <button onclick="setDiscussionFilter('awaiting_approval')" id="disc-filter-awaiting_approval" class="disc-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-cyan-400 hover:bg-slate-800 border border-transparent transition">🛡️ 待审批发布 (<span id="disc-cnt-awaiting">0</span>)</button>
+            <button onclick="setDiscussionFilter('submitted')" id="disc-filter-submitted" class="disc-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-transparent transition">✅ 已回复 (<span id="disc-cnt-submitted">0</span>)</button>
+            <button onclick="setDiscussionFilter('ignored')" id="disc-filter-ignored" class="disc-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">🚫 已忽略 (<span id="disc-cnt-ignored">0</span>)</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="scanDiscussionsUI()" id="scanDiscussionsBtn" class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium text-xs shadow-md shadow-cyan-900/30 transition active:scale-95">
+              <span>⚡ 扫描全课讨论区</span>
+            </button>
+          </div>
+        </div>
+        <div class="p-2.5 rounded-xl bg-amber-950/30 border border-amber-500/20 text-[11px] text-amber-200/90 leading-relaxed">
+          🛡️ 话题讨论安全门：学习通讨论区 <code class="font-mono text-amber-300">addreply</code> 无官方草稿箱，因此 AI 生成的回复默认以「待审批」暂存至本看板；请确认或编辑修改后，手动点击【批准并发布至学习通】。可用 <code class="font-mono text-amber-300">pnpm afk discuss</code> 批量调用本地 agy 结合课件 RAG 生成拟稿。
+        </div>
+        <div id="discussionList" class="grid grid-cols-1 gap-3.5">
+          <div class="py-12 text-center text-slate-500 text-sm">正在加载课程话题讨论...</div>
         </div>
       </section>
 
@@ -819,6 +906,31 @@ export function renderDashboardHtml(): string {
       setTimeout(() => box.classList.add('hidden'), 4000);
     }
 
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    let currentDiscussionFilter = 'all';
+
+    function setDiscussionFilter(filter) {
+      currentDiscussionFilter = filter;
+      document.querySelectorAll('.disc-filter-btn').forEach(btn => {
+        btn.classList.remove('bg-slate-800', 'text-white', 'border-slate-700');
+        btn.classList.add('bg-slate-900', 'border-transparent');
+      });
+      const activeBtn = document.getElementById('disc-filter-' + filter);
+      if (activeBtn) {
+        activeBtn.classList.add('bg-slate-800', 'text-white', 'border-slate-700');
+        activeBtn.classList.remove('bg-slate-900', 'border-transparent');
+      }
+      renderDiscussions();
+    }
+
     let currentHomeworkFilter = 'all';
 
     function setHomeworkFilter(filter) {
@@ -904,7 +1016,26 @@ export function renderDashboardHtml(): string {
       const totalCourseEl = document.getElementById('totalCourseCount');
       if (totalCourseEl) totalCourseEl.innerText = courseCount;
 
+      const discList = state.discussions || [];
+      const discPending = discList.filter(d => d.status === 'pending').length;
+      const discAwaiting = discList.filter(d => d.status === 'awaiting_approval').length;
+      const discSubmitted = discList.filter(d => d.status === 'submitted' || d.status === 'replied_externally').length;
+      const discIgnored = discList.filter(d => d.status === 'ignored').length;
+      const badgeDisc = document.getElementById('badge-discussions');
+      if (badgeDisc) badgeDisc.innerText = discPending + discAwaiting;
+      const discAllEl = document.getElementById('disc-cnt-all');
+      if (discAllEl) discAllEl.innerText = discList.length;
+      const discPendEl = document.getElementById('disc-cnt-pending');
+      if (discPendEl) discPendEl.innerText = discPending;
+      const discWaitEl = document.getElementById('disc-cnt-awaiting');
+      if (discWaitEl) discWaitEl.innerText = discAwaiting;
+      const discSubEl = document.getElementById('disc-cnt-submitted');
+      if (discSubEl) discSubEl.innerText = discSubmitted;
+      const discIgnEl = document.getElementById('disc-cnt-ignored');
+      if (discIgnEl) discIgnEl.innerText = discIgnored;
+
       renderHomework();
+      renderDiscussions();
       renderExams();
       renderSignins();
       renderCourses();
@@ -1103,6 +1234,191 @@ export function renderDashboardHtml(): string {
       \`).join('');
     }
 
+    function renderDiscussions() {
+      const container = document.getElementById('discussionList');
+      if (!container) return;
+      const allList = state.discussions || [];
+      const list = allList.filter(d => {
+        if (currentDiscussionFilter === 'all') return true;
+        if (currentDiscussionFilter === 'submitted') return d.status === 'submitted' || d.status === 'replied_externally';
+        return d.status === currentDiscussionFilter;
+      });
+
+      if (list.length === 0) {
+        container.innerHTML = '<div class="py-12 text-center text-slate-500 text-sm">该分类下暂无课程话题讨论，可点击上方【⚡ 扫描全课讨论区】立即拉取。</div>';
+        return;
+      }
+
+      container.innerHTML = list.map(d => {
+        const safeId = escapeHtml(d.discussionId);
+        const safeDomId = String(d.discussionId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        let badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">⏳ 待AI拟稿</span>';
+        if (d.status === 'awaiting_approval') {
+          badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">🛡️ AI已拟稿 · 待审批发布</span>';
+        } else if (d.status === 'submitted') {
+          badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">✅ 已由看板批准发布</span>';
+        } else if (d.status === 'replied_externally') {
+          badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">✅ 检测到本人已回复</span>';
+        } else if (d.status === 'ignored') {
+          badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-700/60 text-slate-400 border border-slate-600">🚫 已忽略</span>';
+        } else if (d.status === 'failed') {
+          badgeHtml = '<span class="text-[11px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30">❌ 发布失败</span>';
+        }
+
+        const isClosed = d.status === 'submitted' || d.status === 'replied_externally';
+        const replyValue = isClosed ? (d.postedReply || d.draftReply || '') : (d.draftReply || '');
+        const metaPieces = [
+          d.author ? '发起人: ' + escapeHtml(d.author) : '',
+          d.chapterLabel ? '章节: ' + escapeHtml(d.chapterLabel) : '',
+          '总回帖: ' + Number(d.replyCount || 0) + ' 条',
+          d.modelUsed ? '模型: ' + escapeHtml(d.modelUsed) : ''
+        ].filter(Boolean).join(' · ');
+
+        return \`
+          <div class="glass-card rounded-2xl p-4 space-y-3 border border-slate-800/80 hover:border-slate-700 transition">
+            <div class="flex flex-wrap items-start justify-between gap-2">
+              <div class="space-y-1 min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-medium">\${escapeHtml(d.courseName || '未知课程')}</span>
+                  \${badgeHtml}
+                </div>
+                <h3 class="text-sm font-semibold text-white leading-snug">\${escapeHtml(d.title || '无标题讨论')}</h3>
+                <div class="text-[11px] text-slate-400">\${metaPieces}</div>
+              </div>
+              \${d.topicUrl ? \`<a href="\${escapeHtml(d.topicUrl)}" target="_blank" rel="noopener noreferrer" class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 shrink-0">打开原帖 ↗</a>\` : ''}
+            </div>
+            \${d.prompt ? \`<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs text-slate-300 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">\${escapeHtml(d.prompt)}</div>\` : ''}
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-[11px] text-slate-400">
+                <span>\${isClosed ? '最终已发布回复内容' : 'AI 拟稿 / 手动编辑回复内容（点击发布前不会公开提交）'}</span>
+                <span class="text-slate-500">\${escapeHtml(d.publishedAt || d.updatedAt || '')}</span>
+              </div>
+              <textarea id="disc-draft-\${safeDomId}" rows="3" \${isClosed ? 'readonly' : ''} placeholder="等待运行 pnpm afk discuss 由 agy 结合课件生成草稿，或直接在此输入回复内容..." class="w-full rounded-xl bg-slate-950/80 border border-slate-700/80 focus:border-cyan-500 focus:outline-none p-2.5 text-xs text-slate-100 leading-relaxed resize-y">\${escapeHtml(replyValue)}</textarea>
+              \${isClosed ? '' : \`
+                <div class="flex flex-wrap items-center justify-end gap-2">
+                  <button onclick="ignoreDiscussionUI('\${safeId}')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">🚫 忽略</button>
+                  <button onclick="saveDiscussionDraftUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs transition">💾 保存草稿</button>
+                  <button onclick="publishDiscussionUI('\${safeId}', 'disc-draft-\${safeDomId}')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs shadow-md shadow-emerald-900/30 transition">✅ 批准并发布至学习通</button>
+                </div>
+              \`}
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    async function scanDiscussionsUI() {
+      const btn = document.getElementById('scanDiscussionsBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '扫描中...';
+      }
+      try {
+        let offset = 0;
+        let hasMore = true;
+        let rounds = 0;
+        let totalTopics = 0;
+        let totalNew = 0;
+        while (hasMore && rounds < 10) {
+          rounds++;
+          const res = await fetch('/api/discussions/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ offset, limit: 9, forceDetailRefresh: false }),
+          });
+          const json = await res.json();
+          if (!res.ok || !json.ok) {
+            throw new Error(json.error || '扫描接口返回失败');
+          }
+          totalTopics += Number(json.topicsFound || 0);
+          totalNew += Number(json.newPendingTopics || 0);
+          hasMore = Boolean(json.hasMore);
+          offset = Number(json.nextOffset || 0);
+          if (hasMore) {
+            showToast(\`正在分批扫描讨论区... 已完成 \${rounds * 9}/\${json.totalCourses || '?'} 门课程\`);
+          }
+        }
+        showToast(\`全课讨论区扫描完成：捕获 \${totalTopics} 条教师话题（新增待拟稿 \${totalNew} 条）\`);
+        await refreshData();
+      } catch (e) {
+        showToast('扫描讨论区失败：' + (e.message || '网络异常'), false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '⚡ 扫描全课讨论区';
+        }
+      }
+    }
+
+    async function saveDiscussionDraftUI(discussionId, textareaId) {
+      const el = document.getElementById(textareaId);
+      const draftReply = el ? el.value.trim() : '';
+      if (!draftReply) {
+        showToast('请先填写回复草稿内容', false);
+        return;
+      }
+      try {
+        const res = await fetch('/api/discussions/' + encodeURIComponent(discussionId) + '/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ draftReply }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          showToast('草稿已保存至待审批状态');
+          await refreshData();
+        } else {
+          showToast('保存草稿失败：' + (json.error || '未知错误'), false);
+        }
+      } catch (e) {
+        showToast('保存草稿网络异常', false);
+      }
+    }
+
+    async function publishDiscussionUI(discussionId, textareaId) {
+      const el = document.getElementById(textareaId);
+      const draftReply = el ? el.value.trim() : '';
+      if (!draftReply) {
+        showToast('回复内容为空，无法发布', false);
+        return;
+      }
+      if (!confirm('确认公开发布该回复到超星学习通讨论区？发布后同学与教师可见。')) return;
+      try {
+        showToast('正在安全提交回复至超星学习通...', true);
+        const res = await fetch('/api/discussions/' + encodeURIComponent(discussionId) + '/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ draftReply }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          showToast('已成功公开发布到学习通讨论区！✅');
+          await refreshData();
+        } else {
+          showToast('发布失败：' + (json.msg || json.error || '未知错误'), false);
+        }
+      } catch (e) {
+        showToast('发布请求网络异常', false);
+      }
+    }
+
+    async function ignoreDiscussionUI(discussionId) {
+      try {
+        const res = await fetch('/api/discussions/' + encodeURIComponent(discussionId) + '/ignore', {
+          method: 'POST',
+        });
+        const json = await res.json();
+        if (json.ok) {
+          showToast('已忽略该话题');
+          await refreshData();
+        } else {
+          showToast('操作失败', false);
+        }
+      } catch (e) {
+        showToast('网络请求异常', false);
+      }
+    }
+
     function switchTab(name) {
       document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.classList.remove('border-brand-500', 'text-white', 'font-semibold');
@@ -1111,7 +1427,7 @@ export function renderDashboardHtml(): string {
       document.getElementById('tabBtn-' + name).classList.add('border-brand-500', 'text-white', 'font-semibold');
       document.getElementById('tabBtn-' + name).classList.remove('border-transparent');
 
-      ['homework', 'exams', 'signs', 'courses', 'settings'].forEach(t => {
+      ['homework', 'discussions', 'exams', 'signs', 'courses', 'settings'].forEach(t => {
         const el = document.getElementById('tab-' + t);
         if (el) el.classList.toggle('hidden', t !== name);
       });
