@@ -126,7 +126,7 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
           classId: pw.classId,
           courseName: pw.courseName || '',
           title: pw.title,
-          status: 'pending',
+          status: pw.statusText.includes('暂存') ? 'draft_saved' : 'pending',
           deadline: pw.endDate,
         }))
       );
@@ -193,7 +193,9 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
     for (const c of courses) {
       try {
         const works = await getCourseHomeworkList(c, cookies);
-        const pendingWorks = works.filter((w) => w.isPending);
+        const pendingWorks = works.filter(
+          (w) => w.isPending && (options?.force || !(w.statusText || '').includes('暂存'))
+        );
         if (pendingWorks.length === 0) continue;
 
         console.log(blue(`\n>>> 正在处理课程 《${c.courseName}》 的 ${pendingWorks.length} 个待做作业...`));
@@ -203,63 +205,80 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
         console.log(green(`[1/3 课件就绪] 已同步 ${downloaded.length} 个参考资料至: ${materialsDir}`));
 
         for (const hw of pendingWorks) {
-          console.log(blue(`\n[2/3 提取题目] 正在加载作业: 《${hw.title}》...`));
-          let detail;
           try {
-            detail = await getHomeworkDetail(hw, cookies);
-          } catch (err: any) {
-            console.log(yellow(`[作业跳过] 《${hw.title}》: ${err?.message || err}`));
-            continue;
+            console.log(blue(`\n[2/3 提取题目] 正在加载作业: 《${hw.title}》...`));
+            let detail;
+            try {
+              detail = await getHomeworkDetail(hw, cookies);
+            } catch (err: any) {
+              console.log(yellow(`[作业跳过] 《${hw.title}》: ${err?.message || err}`));
+              continue;
+            }
+
+            if (!detail.questions || detail.questions.length === 0) {
+              console.log(yellow(`[作业跳过] 《${hw.title}》未提取到在线表单题目`));
+              continue;
+            }
+
+            // 2. 双轨认知求解 (D1/本地缓存 -> Flash 批量客观题 -> Pro 复杂推理)
+            const solveRes = await solveHomeworkDualTrack(
+              hw,
+              detail.questions,
+              (keywords) => searchCourseMaterialsContext(keywords, materialsDir),
+              { ...options, platform: 'chaoxing', materialsDir }
+            );
+
+            // 3. 提交或暂存草稿
+            console.log(
+              blue(`[3/3 平台回写] 正在将答案写入学习通 (${isAutoSubmit ? '正式提交' : '草稿暂存'})...`)
+            );
+            const submitRes = await submitHomework(
+              hw,
+              solveRes.answers,
+              detail.formParams,
+              cookies,
+              !isAutoSubmit,
+              detail.formAction
+            );
+
+            if (submitRes.success) {
+              console.log(green(`🎉 作业 《${hw.title}》 ${submitRes.msg}`));
+            } else {
+              console.log(red(`❌ 作业 《${hw.title}》 响应异常: ${submitRes.msg}`));
+            }
+
+            await syncTasksToEdgeDashboard([
+              {
+                taskId: `chaoxing-hw-${hw.workId}`,
+                platform: 'chaoxing',
+                courseId: hw.courseId,
+                classId: hw.classId,
+                courseName: c.courseName,
+                title: hw.title,
+                status: submitRes.success ? (isAutoSubmit ? 'submitted' : 'draft_saved') : 'failed',
+                deadline: hw.endDate,
+                resultSummary: `共${solveRes.stats.total}题 (⚡缓存${solveRes.stats.cacheHits}/🚀Flash${solveRes.stats.flashSolved}/🧠Pro${solveRes.stats.proSolved})`,
+              },
+            ]);
+
+            console.log(blue(`📄 作答报告: ${solveRes.reportPath}`));
+            results.push(solveRes);
+          } catch (hwErr: any) {
+            console.log(red(`[作业处理异常] 《${hw.title}》: ${hwErr?.message || hwErr}`));
+            await syncTasksToEdgeDashboard([
+              {
+                taskId: `chaoxing-hw-${hw.workId}`,
+                platform: 'chaoxing',
+                courseId: hw.courseId,
+                classId: hw.classId,
+                courseName: c.courseName,
+                title: hw.title,
+                status: 'failed',
+                deadline: hw.endDate,
+                resultSummary: `处理异常: ${String(hwErr?.message || hwErr).slice(0, 120)}`,
+              },
+            ]).catch(() => {});
           }
-
-          if (!detail.questions || detail.questions.length === 0) {
-            console.log(yellow(`[作业跳过] 《${hw.title}》未提取到在线表单题目`));
-            continue;
-          }
-
-          // 2. 双轨认知求解 (D1/本地缓存 -> Flash 批量客观题 -> Pro 复杂推理)
-          const solveRes = await solveHomeworkDualTrack(
-            hw,
-            detail.questions,
-            (keywords) => searchCourseMaterialsContext(keywords, materialsDir),
-            { ...options, platform: 'chaoxing', materialsDir }
-          );
-
-          // 3. 提交或暂存草稿
-          console.log(
-            blue(`[3/3 平台回写] 正在将答案写入学习通 (${isAutoSubmit ? '正式提交' : '草稿暂存'})...`)
-          );
-          const submitRes = await submitHomework(
-            hw,
-            solveRes.answers,
-            detail.formParams,
-            cookies,
-            !isAutoSubmit,
-            detail.formAction
-          );
-
-          if (submitRes.success) {
-            console.log(green(`🎉 作业 《${hw.title}》 ${submitRes.msg}`));
-          } else {
-            console.log(red(`❌ 作业 《${hw.title}》 响应异常: ${submitRes.msg}`));
-          }
-
-          await syncTasksToEdgeDashboard([
-            {
-              taskId: `chaoxing-hw-${hw.workId}`,
-              platform: 'chaoxing',
-              courseId: hw.courseId,
-              classId: hw.classId,
-              courseName: c.courseName,
-              title: hw.title,
-              status: submitRes.success ? (isAutoSubmit ? 'submitted' : 'draft_saved') : 'failed',
-              deadline: hw.endDate,
-              resultSummary: `共${solveRes.stats.total}题 (⚡缓存${solveRes.stats.cacheHits}/🚀Flash${solveRes.stats.flashSolved}/🧠Pro${solveRes.stats.proSolved})`,
-            },
-          ]);
-
-          console.log(blue(`📄 作答报告: ${solveRes.reportPath}`));
-          results.push(solveRes);
         }
       } catch (err: any) {
         console.log(red(`[课程处理异常] 《${c.courseName}》: ${err?.message || err}`));

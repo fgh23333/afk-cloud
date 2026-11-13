@@ -83,7 +83,8 @@ if [ -n '${REPO_URL}' ]; then
   export CHAOXING_PASSWORD='${CHAOXING_PASSWORD:-}'
   export AFK_EDGE_WORKER_URL='${AFK_EDGE_WORKER_URL:-}'
   export AFK_EDGE_BEARER_TOKEN='${AFK_EDGE_BEARER_TOKEN:-}'
-  export AFK_FLASH_MODEL='${AFK_FLASH_MODEL:-gemini-3.8-flash}'
+  export AFK_FLASH_MODEL='${AFK_FLASH_MODEL:-gemini-4-hydrogen-medium}'
+  export AFK_PRO_MODEL='${AFK_PRO_MODEL:-gemini-4-hydrogen-xhigh}'
   npx --yes tsx packages/cli/src/index.ts ${TASK_CMD}
 fi
 "

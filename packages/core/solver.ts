@@ -1,7 +1,11 @@
-import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { promisify } from 'util';
+import {
+  DEFAULT_FLASH_MODEL,
+  DEFAULT_PRO_MODEL,
+  invokeAgy,
+  normalizeAgyModelName,
+} from './agy-invoke';
 import {
   CachedAnswerEntry,
   computeQuestionHash,
@@ -16,8 +20,6 @@ import {
   SolveResult,
   StandardQuestion,
 } from './types';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * 提取题干核心学科关键词（支持中文无空格长句切分与英文术语提取，用于课程资料库 RAG 检索）
@@ -145,21 +147,18 @@ async function invokeModelPrompt(
   options?: SolveOptions
 ): Promise<string> {
   const provider = (options?.provider || process.env.AFK_SOLVER_PROVIDER || 'agy').toLowerCase();
-  const flashModel = options?.flashModel || process.env.AFK_FLASH_MODEL || 'flash';
-  const proModel = options?.proModel || process.env.AFK_PRO_MODEL || 'pro';
+  const flashModel = normalizeAgyModelName(options?.flashModel || process.env.AFK_FLASH_MODEL || DEFAULT_FLASH_MODEL, 'flash');
+  const proModel = normalizeAgyModelName(options?.proModel || process.env.AFK_PRO_MODEL || DEFAULT_PRO_MODEL, 'pro');
   const targetModel = modelTier === 'flash' ? flashModel : proModel;
 
   const apiKey = options?.apiKey || process.env.OPENAI_API_KEY;
 
   if (provider === 'agy' || !apiKey) {
-    const args = ['-p', prompt, '--dangerously-skip-permissions'];
-    if (targetModel) {
-      args.push('--model', targetModel);
-    }
-    const { stdout } = await execFileAsync('agy', args, {
-      shell: true,
+    const stdout = await invokeAgy({
+      prompt,
+      model: targetModel,
+      timeoutMs: modelTier === 'flash' ? 120000 : 240000,
       maxBuffer: 10 * 1024 * 1024,
-      timeout: modelTier === 'flash' ? 120000 : 240000,
     });
     return (stdout || '').trim();
   }

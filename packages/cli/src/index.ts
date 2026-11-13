@@ -10,6 +10,7 @@ import {
   pushBrowserProfileToCloud,
   readLocalStorageState,
 } from '../../core/browser-profile';
+import { DEFAULT_FLASH_MODEL, DEFAULT_PRO_MODEL } from '../../core/agy-invoke';
 import { provisionCloudflareEdge } from '../../core/cf-provisioner';
 import { triggerEdgeDigestNotification } from '../../core/d1-bridge';
 import { triggerCloudBurst } from '../../core/sandbox';
@@ -68,8 +69,8 @@ async function runStatus(): Promise<void> {
   console.log(
     ` 🗄️  Edge D1    : ${process.env.AFK_EDGE_WORKER_URL ? green(process.env.AFK_EDGE_WORKER_URL) : yellow('仅本地缓存 (.cache/)')}`
   );
-  console.log(` ⚡ 主力模型   : ${green(process.env.AFK_FLASH_MODEL || 'flash')} (90% 批量客观题 JSON)`);
-  console.log(` 🧠 兜底模型   : ${green(process.env.AFK_PRO_MODEL || 'pro')} (10% 主观/编程题 + 沙箱自愈)`);
+  console.log(` ⚡ 主力模型   : ${green(process.env.AFK_FLASH_MODEL || DEFAULT_FLASH_MODEL)} (90% 批量客观题 JSON)`);
+  console.log(` 🧠 兜底模型   : ${green(process.env.AFK_PRO_MODEL || DEFAULT_PRO_MODEL)} (10% 主观/编程题 + 沙箱自愈)`);
   console.log(
     ` ☁️  GCP 项目   : ${process.env.GCP_PROJECT_ID || yellow('未显式设置 (使用 gcloud 默认上下文)')}`
   );
@@ -78,7 +79,9 @@ async function runStatus(): Promise<void> {
     try {
       const r = await fetch(`${process.env.AFK_EDGE_WORKER_URL.replace(/\/+$/, '')}/health`);
       const data: any = await r.json();
-      console.log(` 🟢 Edge 连通  : D1=${data.hasD1}, KV=${data.hasKV}, Time=${data.time}`);
+      const d1State = data.components?.d1?.status ?? data.hasD1;
+      const kvState = data.components?.kv?.configured ?? data.hasKV;
+      console.log(` 🟢 Edge 连通  : Status=${data.status || 'ok'}, D1=${d1State}, KV=${kvState}, Time=${data.timestamp || data.time}`);
     } catch (e: any) {
       console.log(` 🔴 Edge 连通异常: ${e?.message || e}`);
     }
@@ -262,6 +265,42 @@ async function main(): Promise<void> {
         const { execFileSync } = await import('child_process');
         execFileSync('bash', [iamScript], { stdio: 'inherit' });
         execFileSync('bash', [crScript], { stdio: 'inherit' });
+      }
+      break;
+    }
+
+    case 'pull':
+    case 'poll': {
+      const flashModel = getFlagValue(args, '--flash-model');
+      const proModel = getFlagValue(args, '--pro-model');
+      const loop = args.includes('--loop') || args.includes('--watch');
+      const intervalMin = Math.max(1, parseInt(getFlagValue(args, '--interval') || '10', 10));
+
+      const runOnce = async () => {
+        console.log(blue(`\n[Edge Pull] 正在检查云端 D1 队列与学习通最新待办作业...`));
+        if (process.env.AFK_EDGE_WORKER_URL && process.env.AFK_EDGE_BEARER_TOKEN) {
+          try {
+            const res = await fetch(`${process.env.AFK_EDGE_WORKER_URL.replace(/\/+$/, '')}/api/tasks/pull`, {
+              headers: { Authorization: `Bearer ${process.env.AFK_EDGE_BEARER_TOKEN}` },
+            });
+            if (res.ok) {
+              const data: any = await res.json();
+              console.log(blue(`[Edge Pull] 云端 D1 待处理队列任务数: ${(data.tasks || []).length}`));
+            }
+          } catch (e: any) {
+            console.warn(yellow(`[Edge Pull] 拉取云端队列提示: ${e?.message || e}`));
+          }
+        }
+        await chaoxing.scanPendingHomework();
+        await chaoxing.solveAllPendingHomework(autoSubmit, { flashModel, proModel });
+      };
+
+      await runOnce();
+      if (loop) {
+        console.log(green(`🔄 常驻轮询模式已开启 (间隔 ${intervalMin} 分钟)`));
+        setInterval(() => {
+          runOnce().catch((e) => console.error(red(`[轮询异常] ${e?.message || e}`)));
+        }, intervalMin * 60 * 1000);
       }
       break;
     }

@@ -72,6 +72,7 @@ export interface SolveOptions {
   materialsDir?: string;
   reportOutputDir?: string;
   enableSandboxTest?: boolean;
+  force?: boolean;
 }
 
 export interface SolveResult {

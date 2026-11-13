@@ -87,6 +87,44 @@ export function resolveAgyWorkdir(): string {
   return dir;
 }
 
+export const DEFAULT_FLASH_MODEL = 'gemini-4-hydrogen-medium';
+export const DEFAULT_PRO_MODEL = 'gemini-4-hydrogen-xhigh';
+
+/**
+ * 归一化模型别名，确保传给 `agy --model` 的 ID 与服务端注册列表严格一致
+ */
+export function normalizeAgyModelName(rawModel?: string, tier: 'flash' | 'pro' = 'pro'): string {
+  const trimmed = (rawModel || '').trim();
+  const fallback = tier === 'flash' ? DEFAULT_FLASH_MODEL : DEFAULT_PRO_MODEL;
+  if (!trimmed) return fallback;
+
+  const lower = trimmed.toLowerCase();
+  if (lower === 'flash') return DEFAULT_FLASH_MODEL;
+  if (lower === 'pro') return DEFAULT_PRO_MODEL;
+  if (lower === 'gemini-4-hydrogen') return fallback;
+  if (lower === 'gemini-3.8-flash') return 'gemini-3.8-flash-high';
+  if (lower === 'gemini-4-argon') return 'gemini-4-argon-high';
+  return trimmed;
+}
+
+/**
+ * 自动探测 agy 可执行路径 (兼容 systemd 精简 PATH)
+ */
+export function resolveAgyBin(): string {
+  if (process.env.AGY_BIN) return process.env.AGY_BIN;
+  const candidates = [
+    path.join(os.homedir(), '.local', 'bin', 'agy'),
+    '/root/.local/bin/agy',
+    '/home/Jimmy/.local/bin/agy',
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return 'agy';
+}
+
 export function buildAgyArgs(opts: AgyInvokeOptions): string[] {
   const args = ['-p', opts.prompt];
 
@@ -115,7 +153,7 @@ export function buildAgyArgs(opts: AgyInvokeOptions): string[] {
   }
 
   if (opts.model) {
-    args.push('--model', opts.model);
+    args.push('--model', normalizeAgyModelName(opts.model));
   }
   return args;
 }
@@ -168,7 +206,7 @@ export function cleanStaleAgyWorkspace(maxAgeMs = 24 * 3600 * 1000): void {
  * 以严格安全基线与独立进程组拉起 agy，支持强制超时回收与 PID 登记
  */
 export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
-  const bin = process.env.AGY_BIN || 'agy';
+  const bin = resolveAgyBin();
   const args = buildAgyArgs(opts);
   const cwd = resolveAgyWorkdir();
   const env = buildSanitizedEnv();

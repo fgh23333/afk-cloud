@@ -4,9 +4,11 @@ import os from 'os';
 import path from 'path';
 import {
   cleanStaleAgyWorkspace,
+  DEFAULT_PRO_MODEL,
   extractLastJsonObject,
   invokeAgy,
   killProcessGroup,
+  normalizeAgyModelName,
   UNTRUSTED_CONTENT_RULES,
   wrapUntrusted,
 } from '../../core/agy-invoke';
@@ -372,7 +374,7 @@ async function processDraftTask(job: TaskJob): Promise<void> {
   }
 
   // 2. 以安全基线调用 agy (无 shell、沙箱、最小环境变量、隔离工作目录、结构化输出)
-  const proModel = process.env.AFK_PRO_MODEL || process.env.AGY_MODEL || 'pro';
+  const proModel = normalizeAgyModelName(process.env.AFK_PRO_MODEL || process.env.AGY_MODEL || DEFAULT_PRO_MODEL, 'pro');
   console.log(`[Shim Runner] 调用 agy (Model: ${proModel})...`);
   const stdout = await invokeAgy({
     prompt: buildDraftPrompt(job),
@@ -424,7 +426,7 @@ async function processSubmitTask(job: TaskJob): Promise<void> {
     return;
   }
 
-  const proModel = process.env.AFK_PRO_MODEL || process.env.AGY_MODEL || 'pro';
+  const proModel = normalizeAgyModelName(process.env.AFK_PRO_MODEL || process.env.AGY_MODEL || DEFAULT_PRO_MODEL, 'pro');
   console.log(`[Shim Runner] 调用 agy 点提交...`);
   const stdout = await invokeAgy({
     prompt: buildSubmitPrompt(job),
@@ -524,22 +526,24 @@ export function reapStaleAgyProcesses(): void {
     }, 500);
   }
 
-  // 2. POSIX 环境下扫描可能遗留的孤儿 agy 进程
+  // 2. POSIX 环境下仅扫描 afk shim 遗留的无头 worker (agy -p ... --disable-slash-commands)，绝不误杀 remote-control / 交互会话
   if (process.platform !== 'win32' && !lock && !isWorkerRunning) {
     try {
-      const output = execSync('pgrep -f "agy"', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-      const pids = output
-        .trim()
-        .split('\n')
-        .map((p: string) => parseInt(p.trim(), 10))
-        .filter((p: number) => !isNaN(p) && p !== process.pid && p > 1);
-
-      for (const orphanPid of pids) {
-        console.warn(`[Shim Watchdog] ⚠️ 发现脱缰孤儿 agy 进程 (PID: ${orphanPid})，立即连带进程组执行 SIGKILL！`);
-        killProcessGroup(orphanPid);
+      const output = execSync('ps -eo pid=,args=', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const line of output.trim().split('\n')) {
+        const m = line.trim().match(/^(\d+)\s+(.+)$/);
+        if (!m) continue;
+        const orphanPid = parseInt(m[1], 10);
+        const cmd = m[2];
+        if (isNaN(orphanPid) || orphanPid <= 1 || orphanPid === process.pid) continue;
+        if (cmd.includes('remote-control') || cmd.includes('ps -eo')) continue;
+        if (/\bagy\b/.test(cmd) && cmd.includes('--disable-slash-commands') && /\s-p\s/.test(cmd)) {
+          console.warn(`[Shim Watchdog] ⚠️ 发现脱缰孤儿 agy worker (PID: ${orphanPid})，立即连带进程组执行 SIGKILL！`);
+          killProcessGroup(orphanPid);
+        }
       }
     } catch {
-      // pgrep 无匹配时退出码为 1，正常现象
+      // 无匹配时忽略
     }
   }
 

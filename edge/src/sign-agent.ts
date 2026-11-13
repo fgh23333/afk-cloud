@@ -16,11 +16,13 @@ export interface SignState {
   lastCheckedAt?: string;
   lastSignAt?: string;
   activeActivitiesCount: number;
+  recentSignedIds?: string[];
 }
 
 export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
   initialState = {
     activeActivitiesCount: 0,
+    recentSignedIds: [] as string[],
   };
 
   onStart(): void {
@@ -108,6 +110,7 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
     const customLocations = resolveSignLocations(this.env);
     const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
     const batchSize = 5;
+    const recentSigned = new Set(this.state.recentSignedIds || []);
 
     for (let i = 0; i < targetCourses.length; i += batchSize) {
       const chunk = targetCourses.slice(i, i + batchSize);
@@ -116,16 +119,25 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
           try {
             const activities = await scanCourseActivities(course, currentSession);
             for (const act of activities) {
+              const actIdStr = String(act.id);
+              if (recentSigned.has(actIdStr)) {
+                continue;
+              }
               console.log(`[SignAgent] 发现课程《${course.courseName}》签到活动: ${act.name} (ID: ${act.id})`);
               const signRes = await performSign(act, course, currentSession, realname, customLocations);
-              const success = signRes.includes('成功');
+              const success = signRes.includes('成功') || signRes.includes('已签');
               signsHandled++;
+
+              if (success) {
+                recentSigned.add(actIdStr);
+              }
 
               await logExecution(
                 this.env,
                 success ? 'sign_success' : 'sign_fail',
                 'chaoxing',
-                `课程《${course.courseName}》[${act.name}]: ${signRes}`
+                `课程《${course.courseName}》[${act.name}]: ${signRes}`,
+                { courseId: course.courseId, classId: course.classId, activeId: act.id }
               );
 
               await sendNotification(
@@ -193,6 +205,7 @@ export class SignAgent extends Agent<ExtendedNotifyEnv, SignState> {
       lastCheckedAt: nowUtc8(),
       lastSignAt: signsHandled > 0 ? nowUtc8() : this.state.lastSignAt,
       activeActivitiesCount: signsHandled,
+      recentSignedIds: Array.from(recentSigned).slice(-50),
     });
 
     return {

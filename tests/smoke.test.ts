@@ -470,7 +470,107 @@ async function runAllTests() {
     console.log(' ✅ [Test 8/8 PASS] 超星 WebIM 信令监听解析与 Cloud Run 灾备契约验证通过');
   }
 
-  console.log(`\n🎉 全部 8 项核心自检与安全链路测试 100% 通过！\n`);
+  // --- Test 9: Gemini 4 Hydrogen 模型默认切换、UTC+8 解析防死锁与看板签到/拉取契约验证 ---
+  {
+    const {
+      DEFAULT_FLASH_MODEL,
+      DEFAULT_PRO_MODEL,
+      normalizeAgyModelName,
+    } = await import('../packages/core/agy-invoke');
+    const { parseUtc8ToMs } = await import('../edge/src/store');
+    const { getDashboardData } = await import('../edge/src/dashboard');
+
+    // 1. 验证默认模型已切换为 Gemini 4 Hydrogen
+    assert.strictEqual(DEFAULT_FLASH_MODEL, 'gemini-4-hydrogen-medium', '默认 Flash 模型应为 gemini-4-hydrogen-medium');
+    assert.strictEqual(DEFAULT_PRO_MODEL, 'gemini-4-hydrogen-xhigh', '默认 Pro 模型应为 gemini-4-hydrogen-xhigh');
+    assert.strictEqual(normalizeAgyModelName('flash', 'flash'), 'gemini-4-hydrogen-medium');
+    assert.strictEqual(normalizeAgyModelName('pro', 'pro'), 'gemini-4-hydrogen-xhigh');
+    assert.strictEqual(normalizeAgyModelName('gemini-4-hydrogen', 'flash'), 'gemini-4-hydrogen-medium');
+    assert.strictEqual(normalizeAgyModelName('gemini-4-hydrogen', 'pro'), 'gemini-4-hydrogen-xhigh');
+    assert.strictEqual(normalizeAgyModelName(undefined, 'pro'), 'gemini-4-hydrogen-xhigh');
+
+    // 2. 验证 UTC+8 时间戳字符串可被正确解析，避免 SolverAgent 队列耗时 NaN 死锁
+    const parsedMs = parseUtc8ToMs('2026/11/12 14:48:18 (UTC+8)');
+    assert.strictEqual(Number.isFinite(parsedMs), true, 'UTC+8 时间字符串必须能解析为有限毫秒值');
+    assert.strictEqual(
+      parsedMs,
+      Date.parse('2026-11-12T14:48:18+08:00'),
+      'UTC+8 解析结果应与 ISO+08:00 完全一致'
+    );
+    assert.ok(Number.isNaN(parseUtc8ToMs('invalid-ts')), '非法时间戳应返回 NaN 以便上层判定过期');
+
+    // 3. 验证 Edge 看板签到统计包含 sign_success 与 sign_fail 历史
+    const mockDb: any = {
+      prepare(sql: string) {
+        const execAll = async () => {
+          if (sql.includes("IN ('signin', 'sign_success', 'sign_fail')")) {
+            return {
+              results: [
+                {
+                  id: 15,
+                  created_at: '2026/11/12 14:48:18 (UTC+8)',
+                  event_type: 'sign_success',
+                  platform: 'chaoxing',
+                  summary: '学习通主动签到成功: 《LabVIEW编程及应用》 [普通签到] (上海海洋大学)',
+                },
+                {
+                  id: 16,
+                  created_at: '2026/11/12 14:49:00 (UTC+8)',
+                  event_type: 'sign_fail',
+                  platform: 'chaoxing',
+                  summary: '签到尝试失败: 《LabVIEW编程及应用》 activeId=8000185468865 HTTP 500',
+                },
+              ],
+            };
+          }
+          if (sql.includes('COUNT(*) as cnt FROM execution_logs') && sql.includes('sign_success')) {
+            return { results: [{ cnt: 1 }] };
+          }
+          if (sql.includes('COUNT(*)')) {
+            return { results: [{ cnt: 0 }] };
+          }
+          return { results: [] };
+        };
+        const execFirst = async () => {
+          const allRes = await execAll();
+          return allRes.results?.[0] ?? null;
+        };
+        return {
+          _all: execAll,
+          bind() {
+            return { _all: execAll, all: execAll, first: execFirst, run: async () => ({ success: true }) };
+          },
+          all: execAll,
+          first: execFirst,
+          run: async () => ({ success: true }),
+        };
+      },
+      async batch(stmts: any[]) {
+        const out = [];
+        for (const s of stmts) {
+          out.push(await s.all());
+        }
+        return out;
+      },
+    };
+
+    const dash = await getDashboardData({ DB: mockDb });
+    assert.strictEqual(dash.stats.signinCount, 1, 'signinCount 必须计入 sign_success 记录');
+    assert.ok(dash.signinHistory && dash.signinHistory.length === 2, 'signinHistory 必须返回 sign_success 与 sign_fail 历史');
+    assert.strictEqual(dash.signinHistory[0].result, '签到成功', 'sign_success 应映射为 签到成功');
+    assert.strictEqual(dash.signinHistory[0].courseName, 'LabVIEW编程及应用');
+    assert.strictEqual(dash.signinHistory[0].address, '上海海洋大学');
+    assert.strictEqual(dash.signinHistory[1].result, '签到异常', 'sign_fail 应映射为 签到异常');
+
+    // 4. 验证 Edge /api/tasks/sync、/api/tasks/pull 与 SolverAgent 防死锁源码契约
+    const edgeIndexCode = fs.readFileSync(path.join(__dirname, '../edge/src/index.ts'), 'utf8');
+    assert.ok(edgeIndexCode.includes("url.pathname === '/api/tasks/pull'"), 'Edge 必须提供 /api/tasks/pull 拉取接口');
+    assert.ok(edgeIndexCode.includes('syncExternalTaskStatus'), 'Tasks Sync 必须同步解锁 SolverAgent 状态');
+
+    console.log(' ✅ [Test 9/9 PASS] Gemini 4 Hydrogen 默认模型、UTC+8 防死锁与看板签到/拉取契约验证通过');
+  }
+
+  console.log(`\n🎉 全部 9 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
 runAllTests().catch((err) => {

@@ -45,8 +45,8 @@ trigger: always_on
 
 - **Level 0（零 Token 题库缓存命中）**：
   - 求解任何题目前，必须先计算 `sha256(题干 + 规范化选项)` 查询 D1 / 本地 `question_bank` 缓存，命中即返，**0 Token 消耗、毫秒级响应**。
-- **Level 1（Gemini 3.8 Flash 极速批处理 · 配额护盾）**：
-  - 针对常规单选题、多选题、判断题、简单填空题与例行扫描，**推荐且默认切换至 Gemini 3.8 Flash (`gemini-3.8-flash`)** ，避免短时间过快烧干 Pro 配额。
+- **Level 1（Gemini 4 Hydrogen Medium 极速批处理 · 默认主力）**：
+  - 针对常规单选题、多选题、判断题、简单填空题与例行扫描，**默认切换至 Gemini 4 Hydrogen Medium (`gemini-4-hydrogen-medium`)** ，兼具极速低延迟与高精度，高难度压轴/主观编程升级至 `gemini-4-hydrogen-xhigh`。
   - **严禁逐题串行调用**！必须将整份作业的客观题打包为单次 JSON Batch Prompt，由 Flash 模型批量并发输出。
 - **Level 2（Gemini Pro 极限认知效益爆发 · 榨干 1M Context 与多模态）**：
   - **1M+ Token 超大上下文全量课件 RAG**：直接将全课程整学期 20~50 份 PPT、PDF 教材原文全量注入 Pro 上下文，彻底杜绝粗糙向量切块导致的语义断裂与幻觉，精准定位老师独门考点。

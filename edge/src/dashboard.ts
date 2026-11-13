@@ -123,18 +123,20 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
   if (!env.DB) return empty;
 
   try {
-    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes, enrolledCoursesRes] = await env.DB.batch([
+    const [tasksRes, logsRes, sessionsRes, qbRes, signinRes, noticesRes, enrolledCoursesRes, signinLogsRes] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM pending_tasks ORDER BY updated_at DESC LIMIT 100'),
       env.DB.prepare('SELECT id, event_type, platform, summary, created_at FROM execution_logs ORDER BY id DESC LIMIT 50'),
       env.DB.prepare('SELECT platform, account, expires_at, updated_at FROM sessions ORDER BY updated_at DESC'),
       env.DB.prepare('SELECT COUNT(*) as cnt FROM question_bank'),
-      env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type = 'signin'"),
+      env.DB.prepare("SELECT COUNT(*) as cnt FROM execution_logs WHERE event_type IN ('signin', 'sign_success')"),
       env.DB.prepare('SELECT id_code, title, creater_name, send_time, content, tag, source_type, raw_json FROM notices ORDER BY send_time DESC LIMIT 30'),
       env.DB.prepare('SELECT course_id, class_id, course_name, cpi, teacher_name FROM enrolled_courses ORDER BY course_name ASC'),
+      env.DB.prepare("SELECT id, event_type, platform, summary, created_at FROM execution_logs WHERE event_type IN ('signin', 'sign_success', 'sign_fail') ORDER BY id DESC LIMIT 30"),
     ]);
 
     const tasks = (tasksRes.results || []) as DashboardData['tasks'];
     const logs = (logsRes.results || []) as DashboardData['logs'];
+    const signinLogs = ((signinLogsRes?.results || []) as DashboardData['logs']);
     const rawNotices = (noticesRes?.results || []) as Array<any>;
     const now = Date.now();
     const sessions = ((sessionsRes.results || []) as Array<any>).map((s) => ({
@@ -259,16 +261,37 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     const notices: NonNullable<DashboardData['notices']> = [];
     const exams: NonNullable<DashboardData['exams']> = [];
 
-    for (const log of logs) {
-      if (log.event_type === 'signin') {
-        signinHistory.push({
-          time: log.created_at,
-          courseName: log.summary.split(':')[0] || '在线课程',
-          type: log.summary.includes('位置') ? '位置签到' : log.summary.includes('拍照') ? '拍照签到' : '通用签到',
-          address: log.summary.includes('(') ? log.summary.slice(log.summary.indexOf('(') + 1, -1) : '-',
-          result: log.summary.includes('成功') ? '签到成功' : '已提交',
-        });
-      }
+    for (const log of signinLogs) {
+      const isSuccess =
+        log.event_type === 'sign_success' ||
+        (log.event_type === 'signin' && !log.summary.includes('异常') && !log.summary.includes('失败')) ||
+        log.summary.includes('成功');
+      const courseMatch = log.summary.match(/《(.*?)》/);
+      const courseName = courseMatch ? courseMatch[1] : (log.summary.split(':')[0] || '在线课程');
+      const typeMatch = log.summary.match(/\[([^\]]*签到[^\]]*)\]/);
+      const signType = log.summary.includes('位置')
+        ? '位置签到'
+        : log.summary.includes('拍照')
+          ? '拍照签到'
+          : log.summary.includes('手势')
+            ? '手势签到'
+            : log.summary.includes('签到码')
+              ? '签到码签到'
+              : log.summary.includes('二维码')
+                ? '二维码签到'
+                : typeMatch
+                  ? typeMatch[1]
+                  : '通用签到';
+      const parenMatch = log.summary.match(/\(([^()]{1,60})\)\s*$/);
+      const address = parenMatch && !parenMatch[1].startsWith('ID:') ? parenMatch[1] : '-';
+
+      signinHistory.push({
+        time: log.created_at,
+        courseName,
+        type: signType,
+        address,
+        result: isSuccess ? '签到成功' : '签到异常',
+      });
     }
 
     const examMap = new Map<string, any>();

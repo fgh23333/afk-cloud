@@ -57,6 +57,21 @@ export function nowUtc8(): string {
 }
 
 /**
+ * 解析 UTC+8 格式化时间戳为毫秒数，避免在 V8 中出现 " (UTC+8)" 导致 Date.parse 返回 NaN
+ */
+export function parseUtc8ToMs(ts?: string | null): number {
+  if (!ts) return NaN;
+  const cleaned = ts.replace(/\s*\(UTC\+8\)\s*$/i, '').trim();
+  const match = cleaned.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+  if (match) {
+    const [, y, m, d, hh, mm, ss] = match;
+    const iso = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T${hh.padStart(2, '0')}:${mm.padStart(2, '0')}:${ss.padStart(2, '0')}+08:00`;
+    return Date.parse(iso);
+  }
+  return Date.parse(cleaned);
+}
+
+/**
  * 读取缓存的平台登录 Session (优先 D1，回退 KV，6 小时 TTL 免重复登录)
  */
 export async function getCachedSession<T>(env: EdgeEnv, platform: string, account: string): Promise<T | null> {
