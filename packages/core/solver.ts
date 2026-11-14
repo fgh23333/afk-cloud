@@ -245,12 +245,24 @@ ${itemsText}
 }
 
 /**
+ * 检测拒绝作答/信息缺口/占位模板，避免将低质量或失败文本写入题库缓存或误当作有效答案提交
+ */
+export function isPoisonedOrRefusalAnswer(answer: string): boolean {
+  const s = String(answer || '').trim();
+  if (!s) return true;
+  return /无法直接作答|当前题目信息不完整|主要信息缺口|信息缺口如下|无法完成任务|未声明任何浏览器|没有浏览器|遵循实验设计规范，结合课堂教学重点完成相应分析|未获取到具体题目/.test(
+    s
+  );
+}
+
+/**
  * 轨道 2 (兜底 10%)：Gemini Pro 深度求解主观论述题 / 算法编程题（含本地沙箱编译评测与多轮自愈反思回路）
  */
 async function solveComplexWithPro(
   question: StandardQuestion,
   context: string,
-  options?: SolveOptions
+  options?: SolveOptions,
+  homeworkContext?: { courseName?: string; homeworkTitle?: string }
 ): Promise<string> {
   const isProgramming =
     question.type === 'programming' ||
@@ -263,6 +275,7 @@ async function solveComplexWithPro(
     const prompt = `你是一个大学高阶算法与专业课助教 Agent（Gemini Pro 深度推理轨道）。
 请基于以下课程参考资料与专业知识解答这道${isProgramming ? '编程/算法题' : '主观论述题'}。
 
+【课程与作业背景】：${homeworkContext?.courseName ? `《${homeworkContext.courseName}》` : '未知课程'}${homeworkContext?.homeworkTitle ? ` / 作业《${homeworkContext.homeworkTitle}》` : ''}
 【课程参考资料】：
 ${context ? context.substring(0, 3000) : '（请基于大学专业学科权威知识作答）'}
 
@@ -336,10 +349,14 @@ export async function solveHomeworkDualTrack(
     fs.mkdirSync(reportDir, { recursive: true });
   }
 
-  // 计算每道题的 SHA-256 指纹与 RAG 上下文
+  // 计算每道题的 SHA-256 指纹与 RAG 上下文（短题干主观题按课程+作业隔离哈希，避免不同作业的 "1" 碰撞）
   const questionMeta = questions.map((q) => {
-    const hash = computeQuestionHash(q.type, q.title, q.options);
-    const context = contextRetriever(extractKeywords(q.title));
+    const isShortSubjective = (!q.options || q.options.length === 0) && q.title.replace(/\s+/g, '').length <= 24;
+    const hashTitle = isShortSubjective
+      ? `[${homework.courseName || homework.courseId}::${homework.title}] ${q.title}`
+      : q.title;
+    const hash = computeQuestionHash(q.type, hashTitle, q.options);
+    const context = contextRetriever(extractKeywords(`${homework.title} ${q.title}`));
     return { question: q, hash, context };
   });
 
@@ -362,7 +379,7 @@ export async function solveHomeworkDualTrack(
 
   for (const meta of questionMeta) {
     const hit = cacheHitsMap[meta.hash];
-    if (hit && hit.answer) {
+    if (hit && hit.answer && !isPoisonedOrRefusalAnswer(hit.answer)) {
       answers[meta.question.id] = hit.answer;
       meta.question.userAnswer = hit.answer;
       meta.question.solvedByTier = 'cache';
@@ -400,17 +417,19 @@ export async function solveHomeworkDualTrack(
         q.userAnswer = batchOut[q.id];
         q.solvedByTier = 'flash';
         stats.flashSolved++;
-        newCacheEntries.push({
-          questionHash: item.hash,
-          platform: options?.platform || 'chaoxing',
-          questionType: q.type,
-          title: q.title,
-          optionsJson: q.options ? JSON.stringify(q.options) : undefined,
-          answer: batchOut[q.id],
-          modelTier: 'flash',
-          confidence: 0.95,
-          updatedAt: formatUtc8Now(),
-        });
+        if (!isPoisonedOrRefusalAnswer(batchOut[q.id])) {
+          newCacheEntries.push({
+            questionHash: item.hash,
+            platform: options?.platform || 'chaoxing',
+            questionType: q.type,
+            title: q.title,
+            optionsJson: q.options ? JSON.stringify(q.options) : undefined,
+            answer: batchOut[q.id],
+            modelTier: 'flash',
+            confidence: 0.95,
+            updatedAt: formatUtc8Now(),
+          });
+        }
       } else {
         // Flash 未覆盖到的客观题，使用本地资料启发式兜底
         const fallbackAns = localHeuristicSolve(q, item.context);
@@ -425,22 +444,27 @@ export async function solveHomeworkDualTrack(
   // Step 2: Gemini Pro 逐题深度求解主观论述与编程压轴题
   for (const item of uncachedComplex) {
     const q = item.question;
-    const proAns = await solveComplexWithPro(q, item.context, options);
+    const proAns = await solveComplexWithPro(q, item.context, options, {
+      courseName: homework.courseName || cleanCourseName,
+      homeworkTitle: homework.title,
+    });
     answers[q.id] = proAns;
     q.userAnswer = proAns;
     q.solvedByTier = 'pro';
     stats.proSolved++;
 
-    newCacheEntries.push({
-      questionHash: item.hash,
-      platform: options?.platform || 'chaoxing',
-      questionType: q.type,
-      title: q.title,
-      answer: proAns,
-      modelTier: 'pro',
-      confidence: 0.98,
-      updatedAt: formatUtc8Now(),
-    });
+    if (!isPoisonedOrRefusalAnswer(proAns)) {
+      newCacheEntries.push({
+        questionHash: item.hash,
+        platform: options?.platform || 'chaoxing',
+        questionType: q.type,
+        title: q.title,
+        answer: proAns,
+        modelTier: 'pro',
+        confidence: 0.98,
+        updatedAt: formatUtc8Now(),
+      });
+    }
   }
 
   // Step 3: 异步将新题解写回本地与 Cloudflare D1 记忆库

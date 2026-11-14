@@ -259,11 +259,27 @@ export async function getHomeworkDetail(
     const scoreM = fullTitle.match(/（([\d\.]+)分）|\(([\d\.]+)分\)/);
     const score = scoreM ? parseFloat(scoreM[1] || scoreM[2]) : undefined;
 
+    const attachments: string[] = [];
+    titleEl.querySelectorAll('a[href]').forEach((a) => {
+      const href = (a.getAttribute('href') || '').trim();
+      const label = (a.textContent || '').trim();
+      if (href && !href.startsWith('javascript:')) {
+        attachments.push(`[附件: ${label || '文件'} (${href})]`);
+      }
+    });
+    titleEl.querySelectorAll('img[src]').forEach((img) => {
+      const src = (img.getAttribute('src') || '').trim();
+      if (src && !src.startsWith('data:')) {
+        attachments.push(`[图片: ${src}]`);
+      }
+    });
+    const enrichedTitle = attachments.length > 0 ? `${fullTitle}\n${attachments.join('\n')}` : fullTitle;
+
     questions.push({
       id: qId,
       type,
       typeName,
-      title: fullTitle,
+      title: enrichedTitle,
       options: options.length > 0 ? options : undefined,
       score,
     });
