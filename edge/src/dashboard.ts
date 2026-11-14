@@ -839,7 +839,7 @@ export function renderDashboardHtml(): string {
         <!-- 过滤器与批量派发操作栏 -->
         <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
           <div class="flex items-center gap-1.5 overflow-x-auto py-0.5">
-            <button onclick="setHomeworkFilter('all')" id="filter-all" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-800 text-white font-medium border border-slate-700 transition">全部 (<span id="cnt-all">0</span>)</button>
+            <button onclick="setHomeworkFilter('active')" id="filter-active" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-800 text-white font-medium border border-slate-700 transition">📌 有效待办 (<span id="cnt-active">0</span>)</button>
             <button onclick="setHomeworkFilter('pending')" id="filter-pending" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 hover:bg-slate-800 border border-transparent transition">⏳ 未派发 (<span id="cnt-pending">0</span>)</button>
             <button onclick="setHomeworkFilter('dispatched')" id="filter-dispatched" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-sky-400 hover:bg-slate-800 border border-transparent transition">🚀 已派发 (<span id="cnt-dispatched">0</span>)</button>
             <button onclick="setHomeworkFilter('draft_saved')" id="filter-draft_saved" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-transparent transition">🛡️ 做完暂存 (<span id="cnt-draft">0</span>)</button>
@@ -847,8 +847,12 @@ export function renderDashboardHtml(): string {
             <button onclick="setHomeworkFilter('submitted')" id="filter-submitted" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">✅ 已提交 (<span id="cnt-submitted">0</span>)</button>
             <button onclick="setHomeworkFilter('failed')" id="filter-failed" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-rose-400 hover:bg-slate-800 border border-transparent transition">⚠️ 失败 (<span id="cnt-failed">0</span>)</button>
             <button onclick="setHomeworkFilter('ignored')" id="filter-ignored" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-500 hover:bg-slate-800 border border-transparent transition">🚫 已忽略 (<span id="cnt-ignored">0</span>)</button>
+            <button onclick="setHomeworkFilter('all')" id="filter-all" class="hw-filter-btn px-2.5 py-1 rounded-lg bg-slate-900 text-slate-400 hover:bg-slate-800 border border-transparent transition">全部未归档 (<span id="cnt-all">0</span>)</button>
           </div>
           <div class="flex items-center gap-2">
+            <button onclick="archiveExpiredTasksUI()" id="archiveExpiredBtn" class="hidden flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs border border-slate-700 transition active:scale-95">
+              <span>🧹 清理过期</span>
+            </button>
             <button onclick="retryFailedTasksUI()" id="retryFailedBtn" class="hidden flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs shadow-md shadow-rose-900/30 transition active:scale-95">
               <span>🔁 一键重试失败任务</span>
             </button>
@@ -1030,7 +1034,7 @@ export function renderDashboardHtml(): string {
       renderDiscussions();
     }
 
-    let currentHomeworkFilter = 'all';
+    let currentHomeworkFilter = 'active';
 
     function setHomeworkFilter(filter) {
       currentHomeworkFilter = filter;
@@ -1067,6 +1071,11 @@ export function renderDashboardHtml(): string {
       return isNaN(ms) ? Date.parse(norm + ' GMT+0800') : ms;
     }
 
+    function isHomeworkExpired(endDate) {
+      const ms = parseClientTimeMs(endDate);
+      return ms !== null && !isNaN(ms) && ms < Date.now();
+    }
+
     function checkExamIsActive(e) {
       if (e.isExpired) return false;
       const ms = parseClientTimeMs(e.endTime);
@@ -1089,12 +1098,16 @@ export function renderDashboardHtml(): string {
       const submittedCount = hwList.filter(h => h.status === 'submitted').length;
       const failedCount = hwList.filter(h => h.status === 'failed').length;
       const ignoredCount = hwList.filter(h => h.status === 'ignored').length;
+      const activeCount = hwList.filter(h => h.status !== 'submitted' && h.status !== 'ignored').length;
+      const expiredCount = hwList.filter(h => h.status !== 'submitted' && h.status !== 'ignored' && isHomeworkExpired(h.endDate)).length;
 
       document.getElementById('pendingHomeworkCount').innerText = String(pendingCount);
       document.getElementById('solvedHomeworkCount').innerText = \`\${dispatchedCount} 已派发 · \${draftCount} 做完暂存 · \${submittingCount} 提交中 · \${submittedCount} 已提交\`;
 
+      const cntActive = document.getElementById('cnt-active');
+      if (cntActive) cntActive.innerText = String(activeCount);
       const cntAll = document.getElementById('cnt-all');
-      if (cntAll) cntAll.innerText = String(hwList.length);
+      if (cntAll) cntAll.innerText = String(hwList.filter(h => h.status !== 'ignored').length);
       const cntPending = document.getElementById('cnt-pending');
       if (cntPending) cntPending.innerText = String(pendingCount);
       const cntDispatched = document.getElementById('cnt-dispatched');
@@ -1116,6 +1129,15 @@ export function renderDashboardHtml(): string {
           retryFailedBtn.innerText = \`🔁 重试失败 (\${failedCount})\`;
         } else {
           retryFailedBtn.classList.add('hidden');
+        }
+      }
+      const archiveExpiredBtn = document.getElementById('archiveExpiredBtn');
+      if (archiveExpiredBtn) {
+        if (expiredCount > 0) {
+          archiveExpiredBtn.classList.remove('hidden');
+          archiveExpiredBtn.innerText = \`🧹 清理已过期 (\${expiredCount})\`;
+        } else {
+          archiveExpiredBtn.classList.add('hidden');
         }
       }
 
@@ -1174,7 +1196,8 @@ export function renderDashboardHtml(): string {
       const container = document.getElementById('homeworkList');
       const allList = state.homeworks || [];
       const list = allList.filter(hw => {
-        if (currentHomeworkFilter === 'all') return true;
+        if (currentHomeworkFilter === 'active') return hw.status !== 'submitted' && hw.status !== 'ignored';
+        if (currentHomeworkFilter === 'all') return hw.status !== 'ignored';
         if (currentHomeworkFilter === 'pending') return hw.status === 'pending';
         if (currentHomeworkFilter === 'dispatched') return hw.status === 'dispatched' || hw.status === 'processing';
         if (currentHomeworkFilter === 'draft_saved') return hw.status === 'draft_saved' || hw.status === 'awaiting_approval';
@@ -1226,6 +1249,9 @@ export function renderDashboardHtml(): string {
 
         const platformLabel = escapeHtml(hw.platform ? hw.platform.toUpperCase() : 'CHAOXING');
         const platformBadge = \`<span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">\${platformLabel}</span>\`;
+        const expiredBadge = (!isSubmitted && !isIgnored && isHomeworkExpired(hw.endDate))
+          ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-500/30">⏰ 已过截止</span>'
+          : '';
 
         const safeCourseName = escapeHtml(hw.courseName || '课程');
         const safeTitle = escapeHtml(hw.title);
@@ -1248,6 +1274,7 @@ export function renderDashboardHtml(): string {
                 <div class="flex items-center gap-1.5 flex-wrap">
                   \${badge}
                   \${platformBadge}
+                  \${expiredBadge}
                 </div>
                 \${courseLink}
               </div>
@@ -1753,6 +1780,30 @@ export function renderDashboardHtml(): string {
         }
       } catch (e) {
         showToast('归档请求异常', false);
+      }
+    }
+
+    async function archiveExpiredTasksUI() {
+      const expired = (state.homeworks || []).filter(h => h.status !== 'submitted' && h.status !== 'ignored' && isHomeworkExpired(h.endDate));
+      if (expired.length === 0) {
+        showToast('当前没有已过截止时间的作业');
+        return;
+      }
+      if (!confirm(\`确定将 \${expired.length} 份已过截止时间的无效作业一键归档至「已忽略」吗？\`)) return;
+      try {
+        let done = 0;
+        for (const hw of expired) {
+          const res = await fetch('/api/tasks/' + encodeURIComponent(hw.taskId) + '/ignore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskId: hw.taskId, resultSummary: '已过截止时间自动归档' })
+          });
+          if (res.ok) done++;
+        }
+        showToast(\`已清理归档 \${done} 份已过期无效作业 🧹\`);
+        await refreshData();
+      } catch (e) {
+        showToast('清理过期作业异常', false);
       }
     }
 

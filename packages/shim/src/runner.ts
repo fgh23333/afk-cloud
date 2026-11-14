@@ -349,6 +349,171 @@ function buildSubmitPrompt(job: TaskJob): string {
 }
 
 /**
+ * 从 jobId / taskUrl 提取超星 courseId / classId / workId
+ */
+function parseChaoxingTaskIdentifiers(job: TaskJob): { courseId: string; classId: string; workId: string } {
+  let courseId = '';
+  let classId = '';
+  let workId = '';
+  try {
+    const u = new URL(job.taskUrl);
+    courseId = u.searchParams.get('courseId') || '';
+    classId = u.searchParams.get('classId') || '';
+    workId = u.searchParams.get('workId') || u.searchParams.get('workAnswerId') || '';
+  } catch {
+    // ignore URL parse error
+  }
+  const noticeMatch = job.jobId.match(/^chaoxing-notice-work-(\d+)-(\d+)/);
+  if (noticeMatch) {
+    if (!workId) workId = noticeMatch[1];
+    if (!classId) classId = noticeMatch[2];
+  } else {
+    const hwMatch = job.jobId.match(/^chaoxing-(?:work|hw)-(\d+)(?:-(\d+))?/);
+    if (hwMatch && !workId) {
+      workId = hwMatch[1];
+    }
+  }
+  return { courseId, classId, workId };
+}
+
+/**
+ * 超星纯 HTTP 原生作答 / 提交链路（无需无头浏览器，自动识别已交/过期/无表单作业）
+ */
+async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Promise<void> {
+  const { chaoxingLogin, getChaoxingCourses, getCourseHomeworkList, getHomeworkDetail, submitHomework } =
+    await import('../../adapters/chaoxing/index');
+  const { downloadCourseMaterials, searchCourseMaterialsContext } = await import('../../adapters/chaoxing/materials');
+  const { solveHomeworkDualTrack } = await import('../../core/solver');
+
+  const phone = process.env.CHAOXING_PHONE || '';
+  const password = process.env.CHAOXING_PASSWORD || '';
+  if (!phone || !password) {
+    throw new Error('未配置 CHAOXING_PHONE / CHAOXING_PASSWORD，无法以超星原生协议登录作答');
+  }
+  const cookies = await chaoxingLogin(phone, password);
+  const { courseId, classId, workId } = parseChaoxingTaskIdentifiers(job);
+
+  const courses = await getChaoxingCourses(cookies);
+  let targetCourse = courses.find(
+    (c) => (courseId && c.courseId === courseId) || (classId && c.classId === classId)
+  );
+  if (!targetCourse && courseId && classId) {
+    targetCourse = { courseId, classId, courseName: '' };
+  }
+
+  let found: Awaited<ReturnType<typeof getCourseHomeworkList>>[number] | undefined;
+  let resolvedCourse = targetCourse;
+
+  if (targetCourse) {
+    const list = await getCourseHomeworkList(targetCourse, cookies);
+    found = list.find((w) => (workId && w.workId === workId)) || (workId ? undefined : list.find((w) => w.isPending));
+  }
+  if (!found && workId) {
+    for (const c of courses) {
+      if (targetCourse && c.courseId === targetCourse.courseId && c.classId === targetCourse.classId) continue;
+      try {
+        const list = await getCourseHomeworkList(c, cookies);
+        const hit = list.find((w) => w.workId === workId);
+        if (hit) {
+          found = hit;
+          resolvedCourse = c;
+          break;
+        }
+      } catch {
+        // skip course error
+      }
+    }
+  }
+
+  if (!found || !resolvedCourse) {
+    throw new Error('未在学习通课程作业列表中找到该有效作业（可能已截止、已删除或仅限课堂附件提交）');
+  }
+
+  const st = found.statusText || '';
+  if (!found.isPending && (st.includes('已交') || st.includes('待批') || st.includes('已批') || st.includes('完成'))) {
+    job.phase = 'submitted';
+    job.summary = `学习通平台已提交（状态: ${st}），已自动同步完成`;
+    job.updatedAt = formatUtc8Now();
+    console.log(`[Shim Runner] 检测到超星作业 [${job.jobId}] 已提交 (${st})，直接回传 submitted`);
+    await notifyEdgeCallback(job);
+    return;
+  }
+
+  if (mode === 'submit') {
+    if (!found.canEdit && !st.includes('暂存')) {
+      throw new Error(`超星作业当前状态 [${st || '未知'}] 不可提交，请打开学习通确认`);
+    }
+    const detail = await getHomeworkDetail(found, cookies);
+    const draftAnswers: Record<string, string> = {};
+    for (const item of job.qa || []) {
+      if (item.id && item.answer) draftAnswers[item.id] = item.answer;
+    }
+    for (const q of detail.questions) {
+      if (!draftAnswers[q.id] && detail.formParams[`answer${q.id}`]) {
+        draftAnswers[q.id] = detail.formParams[`answer${q.id}`];
+      }
+    }
+    if (Object.keys(draftAnswers).length === 0 && detail.questions.length > 0) {
+      const solveRes = await solveHomeworkDualTrack(found, detail.questions, () => '', { platform: 'chaoxing' });
+      Object.assign(draftAnswers, solveRes.answers);
+    }
+    const submitRes = await submitHomework(found, draftAnswers, detail.formParams, cookies, false, detail.formAction);
+    if (!submitRes.success) {
+      throw new Error(`学习通正式提交失败: ${submitRes.msg}`);
+    }
+    job.phase = 'submitted';
+    job.summary = `已通过超星原生协议完成正式提交：${submitRes.msg}`.slice(0, 2000);
+    job.updatedAt = formatUtc8Now();
+    await notifyEdgeCallback(job);
+    return;
+  }
+
+  // draft 模式
+  if (!found.isPending) {
+    throw new Error(`超星作业当前状态 [${st || '未知'}] 无需或无法作答`);
+  }
+
+  const detail = await getHomeworkDetail(found, cookies);
+  if (!detail.questions || detail.questions.length === 0) {
+    throw new Error('该作业无在线表单题目（可能为纯附件/实验报告上传类），请点击「打开作答界面」手动提交');
+  }
+
+  let materialsDir = '';
+  try {
+    const matRes = await downloadCourseMaterials(resolvedCourse, cookies);
+    materialsDir = matRes.dir;
+  } catch {
+    // 课件下载失败不阻断求解
+  }
+
+  const solveRes = await solveHomeworkDualTrack(
+    found,
+    detail.questions,
+    (keywords) => (materialsDir ? searchCourseMaterialsContext(keywords, materialsDir) : ''),
+    { platform: 'chaoxing', materialsDir }
+  );
+
+  const saveRes = await submitHomework(found, solveRes.answers, detail.formParams, cookies, true, detail.formAction);
+  if (!saveRes.success) {
+    throw new Error(`学习通草稿暂存失败: ${saveRes.msg}`);
+  }
+
+  const qaList = detail.questions.slice(0, 500).map((q) => ({
+    id: String(q.id).slice(0, 128),
+    type: String(q.type || 'single').slice(0, 32),
+    title: String(q.title || '').slice(0, 4000),
+    answer: String(solveRes.answers[q.id] || '').slice(0, 20000),
+    solvedBy: 'agy',
+  }));
+  job.qa = qaList;
+  job.phase = 'draft_saved';
+  job.summary = `已通过超星原生协议暂存 ${qaList.length} 道题草稿（${saveRes.msg}）`.slice(0, 2000);
+  job.updatedAt = formatUtc8Now();
+  console.log(`[Shim Runner] 超星作业 ${job.jobId} 已安全完成草稿暂存，包含 ${qaList.length} 道题`);
+  await notifyEdgeCallback(job);
+}
+
+/**
  * 模式 1: solve-draft
  * agy 打开真实作业页面，读题，逐题解答并保存草稿，【绝对不要点提交】
  */
@@ -360,6 +525,12 @@ async function processDraftTask(job: TaskJob): Promise<void> {
     job.summary = '测试模式草稿暂存成功';
     job.updatedAt = formatUtc8Now();
     await notifyEdgeCallback(job);
+    return;
+  }
+
+  // 超星作业直接走纯 HTTP 原生适配器（同步真实已交状态 + 提取题目 + 双轨求解 + 暂存草稿）
+  if (job.platform.toLowerCase() === 'chaoxing' || job.taskUrl.includes('chaoxing.com')) {
+    await processChaoxingTask(job, 'draft');
     return;
   }
 
@@ -403,6 +574,12 @@ async function processDraftTask(job: TaskJob): Promise<void> {
   if (/possible_prompt_injection/i.test(job.summary)) {
     throw new Error(`agy 报告疑似 Prompt Injection，已中止：${job.summary}`);
   }
+  if (
+    parsed.qa.length === 0 ||
+    /无法完成任务|未声明任何浏览器|没有浏览器|cannot access|no browser/i.test(job.summary)
+  ) {
+    throw new Error(`agy 未能成功作答或无可用浏览器工具：${job.summary}`);
+  }
 
   job.phase = 'draft_saved';
   job.updatedAt = formatUtc8Now();
@@ -423,6 +600,11 @@ async function processSubmitTask(job: TaskJob): Promise<void> {
     job.summary = '测试模式正式提交成功';
     job.updatedAt = formatUtc8Now();
     await notifyEdgeCallback(job);
+    return;
+  }
+
+  if (job.platform.toLowerCase() === 'chaoxing' || job.taskUrl.includes('chaoxing.com')) {
+    await processChaoxingTask(job, 'submit');
     return;
   }
 
