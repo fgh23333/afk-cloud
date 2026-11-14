@@ -383,7 +383,7 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
   const { chaoxingLogin, getChaoxingCourses, getCourseHomeworkList, getHomeworkDetail, submitHomework } =
     await import('../../adapters/chaoxing/index');
   const { downloadCourseMaterials, searchCourseMaterialsContext } = await import('../../adapters/chaoxing/materials');
-  const { solveHomeworkDualTrack } = await import('../../core/solver');
+  const { solveHomeworkDualTrack, isPoisonedOrRefusalAnswer } = await import('../../core/solver');
 
   const phone = process.env.CHAOXING_PHONE || '';
   const password = process.env.CHAOXING_PASSWORD || '';
@@ -422,6 +422,27 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
       } catch {
         // skip course error
       }
+    }
+  }
+
+  if (!found && workId && (courseId || resolvedCourse?.courseId) && (classId || resolvedCourse?.classId)) {
+    const cid = courseId || resolvedCourse!.courseId;
+    const clsid = classId || resolvedCourse!.classId;
+    found = {
+      workId,
+      workAnswerId: '0',
+      title: job.jobId,
+      statusText: '待做',
+      isPending: true,
+      canEdit: true,
+      startDate: '',
+      endDate: job.deadline || '',
+      courseId: cid,
+      classId: clsid,
+      courseName: resolvedCourse?.courseName || '',
+    };
+    if (!resolvedCourse) {
+      resolvedCourse = { courseId: cid, classId: clsid, courseName: '' };
     }
   }
 
@@ -492,6 +513,11 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
     (keywords) => (materialsDir ? searchCourseMaterialsContext(keywords, materialsDir) : ''),
     { platform: 'chaoxing', materialsDir }
   );
+
+  const validAnswerCount = detail.questions.filter((q) => !isPoisonedOrRefusalAnswer(solveRes.answers[q.id] || '')).length;
+  if (validAnswerCount === 0) {
+    throw new Error('题目信息不足或依赖外部附件内容，模型无法生成有效答案，已拒绝写入无效草稿');
+  }
 
   const saveRes = await submitHomework(found, solveRes.answers, detail.formParams, cookies, true, detail.formAction);
   if (!saveRes.success) {
