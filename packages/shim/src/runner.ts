@@ -22,7 +22,7 @@ export interface TaskJob {
   taskUrl: string;
   deadline?: string;
   mode: 'draft' | 'submit';
-  phase: 'pending' | 'running' | 'draft_saved' | 'submitted' | 'failed';
+  phase: 'pending' | 'running' | 'draft_saved' | 'submitted' | 'failed' | 'ignored';
   qa?: Array<{
     id: string;
     type: string;
@@ -219,7 +219,7 @@ function evictOldJobs() {
   if (jobStore.size <= MAX_JOBS_RETAINED) return;
   for (const [id, job] of jobStore) {
     if (jobStore.size <= MAX_JOBS_RETAINED) break;
-    if (job.phase === 'submitted' || job.phase === 'failed') {
+    if (job.phase === 'submitted' || job.phase === 'failed' || job.phase === 'ignored') {
       jobStore.delete(id);
     }
   }
@@ -349,21 +349,35 @@ function buildSubmitPrompt(job: TaskJob): string {
 }
 
 /**
- * 从 jobId / taskUrl 提取超星 courseId / classId / workId
+ * 从 jobId / taskUrl 提取超星 courseId / classId / workId 及测验标记
  */
-function parseChaoxingTaskIdentifiers(job: TaskJob): { courseId: string; classId: string; workId: string } {
+export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskUrl'>): {
+  courseId: string;
+  classId: string;
+  workId: string;
+  isExam: boolean;
+} {
   let courseId = '';
   let classId = '';
   let workId = '';
+  let isExam = /^chaoxing-notice-exam-/.test(job.jobId);
   try {
     const u = new URL(job.taskUrl);
     courseId = u.searchParams.get('courseId') || '';
     classId = u.searchParams.get('classId') || '';
-    workId = u.searchParams.get('workId') || u.searchParams.get('workAnswerId') || '';
+    workId =
+      u.searchParams.get('workId') ||
+      u.searchParams.get('workAnswerId') ||
+      u.searchParams.get('taskrefId') ||
+      u.searchParams.get('examId') ||
+      '';
+    if (u.pathname.includes('/exam/') || u.searchParams.has('taskrefId') || u.searchParams.has('examId')) {
+      isExam = true;
+    }
   } catch {
     // ignore URL parse error
   }
-  const noticeMatch = job.jobId.match(/^chaoxing-notice-work-(\d+)-(\d+)/);
+  const noticeMatch = job.jobId.match(/^chaoxing-notice-(?:work|exam)-(\d+)-(\d+)/);
   if (noticeMatch) {
     if (!workId) workId = noticeMatch[1];
     if (!classId) classId = noticeMatch[2];
@@ -373,7 +387,7 @@ function parseChaoxingTaskIdentifiers(job: TaskJob): { courseId: string; classId
       workId = hwMatch[1];
     }
   }
-  return { courseId, classId, workId };
+  return { courseId, classId, workId, isExam };
 }
 
 /**
@@ -391,7 +405,13 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
     throw new Error('未配置 CHAOXING_PHONE / CHAOXING_PASSWORD，无法以超星原生协议登录作答');
   }
   const cookies = await chaoxingLogin(phone, password);
-  const { courseId, classId, workId } = parseChaoxingTaskIdentifiers(job);
+  const { courseId, classId, workId, isExam } = parseChaoxingTaskIdentifiers(job);
+
+  if (isExam) {
+    throw new Error(
+      `该任务为学习通考试/随堂测验 (id=${workId || job.jobId})，不支持通过普通作业接口 getAllWork 自动代做，请在学习通客户端确认`
+    );
+  }
 
   const courses = await getChaoxingCourses(cookies);
   let targetCourse = courses.find(
@@ -406,7 +426,7 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
 
   if (targetCourse) {
     const list = await getCourseHomeworkList(targetCourse, cookies);
-    found = list.find((w) => (workId && w.workId === workId)) || (workId ? undefined : list.find((w) => w.isPending));
+    found = workId ? list.find((w) => w.workId === workId) : list.find((w) => w.isPending);
   }
   if (!found && workId) {
     for (const c of courses) {
@@ -447,6 +467,14 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
   }
 
   if (!found || !resolvedCourse) {
+    if (job.jobId.startsWith('chaoxing-notice-')) {
+      job.phase = 'ignored';
+      job.summary = '通知型任务已截止、已删除或非标准作业（如课堂测验/附件），已自动归档忽略';
+      job.updatedAt = formatUtc8Now();
+      console.log(`[Shim Runner] 通知型任务 [${job.jobId}] 未在作业列表中找到，自动归档为 ignored`);
+      await notifyEdgeCallback(job);
+      return;
+    }
     throw new Error('未在学习通课程作业列表中找到该有效作业（可能已截止、已删除或仅限课堂附件提交）');
   }
 
