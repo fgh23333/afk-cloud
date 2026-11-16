@@ -408,9 +408,12 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
   const { courseId, classId, workId, isExam } = parseChaoxingTaskIdentifiers(job);
 
   if (isExam) {
-    throw new Error(
-      `该任务为学习通考试/随堂测验 (id=${workId || job.jobId})，不支持通过普通作业接口 getAllWork 自动代做，请在学习通客户端确认`
-    );
+    job.phase = 'ignored';
+    job.summary = `该任务为学习通考试/随堂测验 (id=${workId || job.jobId})，不支持自动代做，已自动归档忽略（请在学习通客户端确认）`;
+    job.updatedAt = formatUtc8Now();
+    console.log(`[Shim Runner] 考试/随堂测验 [${job.jobId}] 不支持自动代做，已自动归档为 ignored`);
+    await notifyEdgeCallback(job);
+    return;
   }
 
   const courses = await getChaoxingCourses(cookies);
