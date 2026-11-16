@@ -785,6 +785,18 @@ export default {
         return corsJson({ success: true, summary, time: nowUtc8() });
       }
 
+      // 通用通知下发端点（供 agy-autopilot 等本地自主任务向用户推送进展/告警）
+      if (url.pathname === '/api/notify' && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const title = String(body.title || '').trim();
+        const content = String(body.content || '').trim();
+        if (!title || !content) {
+          return corsJson({ error: 'title and content are required' }, 400);
+        }
+        await sendNotification(title.slice(0, 120), content.slice(0, 1500), env);
+        return corsJson({ success: true, time: nowUtc8() });
+      }
+
       // 获取当前 D1 队列待办
       if (url.pathname === '/api/tasks' && request.method === 'GET') {
         if (!env.DB) return corsJson({ tasks: [] });
