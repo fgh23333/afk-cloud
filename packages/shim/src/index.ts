@@ -2,6 +2,7 @@ import http, { IncomingMessage, ServerResponse } from 'http';
 import { verifySignedRequest } from '../../core/request-signing';
 import { formatUtc8Now } from '../../core/types';
 import { getManagedBrowserStatus, startManagedBrowser, stopManagedBrowser } from './browser';
+import { handleAgentChatRequest } from './agent-chat';
 import { enqueueJob, getJob, listJobs, pendingQueueLength, releaseLock, startAgyWatchdog } from './runner';
 import {
   assertShimStartupSecurity,
@@ -206,6 +207,15 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
         const platform = validatePlatform(body.platform || 'pta');
         const ttl = Math.min(Math.max(Number(body.ttlMinutes) || 30, 1), 120);
         sendJson(res, 200, await startManagedBrowser(platform, ttl));
+        return;
+      }
+
+      // 7. POST /agent-chat (Telegram 个人助理双向指令与对话)
+      if (pathname === '/agent-chat' && method === 'POST') {
+        const body = parseJson<Record<string, unknown>>(raw);
+        const text = typeof body.text === 'string' ? body.text : '';
+        const resData = await handleAgentChatRequest(text);
+        sendJson(res, 200, resData);
         return;
       }
 
