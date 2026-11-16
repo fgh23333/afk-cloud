@@ -16,7 +16,7 @@ import {
   scanDiscussionsBatch,
 } from './discussions';
 import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
-import { ExtendedNotifyEnv, sendDigestNotification, sendNotification } from './notify';
+import { ExtendedNotifyEnv, sendDigestNotification, sendNotification, sendTelegramReply } from './notify';
 import { signRequest, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
 import { SolverAgent } from './solver-agent';
@@ -262,7 +262,7 @@ export default {
   /**
    * HTTP 路由安全控制
    */
-  async fetch(request: Request, env: ExtendedNotifyEnv): Promise<Response> {
+  async fetch(request: Request, env: ExtendedNotifyEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // 0. CORS 跨域预检快速通道
@@ -392,6 +392,108 @@ export default {
       };
 
       return corsJson(healthData, isHealthy ? 200 : 503);
+    }
+
+    // 4.5 Telegram Bot Webhook（通过 Secret Token + TELEGRAM_CHAT_ID 严格单人鉴权）
+    if (url.pathname === '/api/tg/webhook' && request.method === 'POST') {
+      const expectedSecret = env.TELEGRAM_WEBHOOK_SECRET;
+      const gotSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
+      if (!expectedSecret || gotSecret !== expectedSecret) {
+        return corsJson({ error: 'Forbidden' }, 403);
+      }
+
+      const update: any = await request.json().catch(() => null);
+      const msg = update?.message;
+      const text = typeof msg?.text === 'string' ? msg.text.trim() : '';
+      const chatId = msg?.chat?.id;
+      if (!text || !env.TELEGRAM_CHAT_ID || String(chatId) !== String(env.TELEGRAM_CHAT_ID)) {
+        return corsJson({ ok: true });
+      }
+
+      if (text === '/start' || text === '/help') {
+        await sendTelegramReply(
+          [
+            '🤖 Personal Agent 已就绪！你可以直接发自然语言，或使用快捷指令：',
+            '/status — 查看学习通队列与服务状态',
+            '/tasks — 查看当前待处理作业',
+            '/todos — 查看个人待办清单',
+            '/todo <内容> — 新增个人待办',
+            '/done <编号或关键词> — 完成待办',
+            '/news — 获取最新精选资讯',
+            '/activity — 查看近期自主活动日志',
+            '/evolve — 立即触发一次自主优化',
+          ].join('\n'),
+          env
+        );
+        return corsJson({ ok: true });
+      }
+
+      if (text === '/status' || text === '状态') {
+        const data = await getDashboardData(env);
+        const s = data.stats;
+        await sendTelegramReply(
+          [
+            `📊 当前状态 (${nowUtc8()})`,
+            `• 待办作业: ${s.pendingCount} | 草稿: ${s.draftCount} | 已交: ${s.submittedCount} | 失败: ${s.failedCount}`,
+            `• 讨论区: 待回复 ${s.discussionPendingCount} | 草稿 ${s.discussionDraftCount}`,
+          ].join('\n'),
+          env
+        );
+        return corsJson({ ok: true });
+      }
+
+      if (text === '/tasks' || text === '作业') {
+        const data = await getDashboardData(env);
+        const active = (data.tasks || []).filter((t: any) => t.status === 'pending' || t.status === 'draft_saved').slice(0, 8);
+        const lines = active.length
+          ? active.map((t: any, i: number) => `${i + 1}. [${t.status}] ${t.course_name || ''} - ${t.title || t.task_id}`)
+          : ['当前没有 pending 或 draft_saved 作业！'];
+        await sendTelegramReply(`📚 活跃作业列表：\n${lines.join('\n')}`, env);
+        return corsJson({ ok: true });
+      }
+
+      // 其余个人指令与自然语言交由本地 Shim (/agent-chat) 异步处理并回传
+      const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+      const shimSecret = env.AFK_SHIM_SECRET;
+      if (!shimUrl || !shimSecret) {
+        await sendTelegramReply('⚠️ 未配置 AFK_SHIM_URL / AFK_SHIM_SECRET，无法转发到本机 AGY。', env);
+        return corsJson({ ok: true });
+      }
+
+      const forwardTask = (async () => {
+        try {
+          const endpoint = new URL('/agent-chat', shimUrl.replace(/\/+$/, '') + '/');
+          const body = JSON.stringify({ text });
+          const signed = await signRequest({
+            secret: shimSecret,
+            method: 'POST',
+            pathWithQuery: endpoint.pathname + endpoint.search,
+            body,
+          });
+          const res = await fetch(endpoint.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-AFK-Timestamp': signed.timestamp,
+              'X-AFK-Nonce': signed.nonce,
+              'X-AFK-Signature': signed.signature,
+            },
+            body,
+          });
+          if (!res.ok) {
+            await sendTelegramReply(`⚠️ 本机 Shim 返回 HTTP ${res.status}`, env);
+            return;
+          }
+          const data: any = await res.json().catch(() => ({}));
+          if (data?.immediateReply) {
+            await sendTelegramReply(String(data.immediateReply), env);
+          }
+        } catch (err: any) {
+          await sendTelegramReply(`⚠️ 无法连接本机 AGY：${err?.message || err}`, env);
+        }
+      })();
+      ctx.waitUntil(forwardTask);
+      return corsJson({ ok: true });
     }
 
     // 5. 监控指标接口 (必须通过鉴权)

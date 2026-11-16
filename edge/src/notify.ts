@@ -4,6 +4,19 @@ export interface ExtendedNotifyEnv extends EdgeEnv {
   PUSHPLUS_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+}
+
+export async function sendTelegramReply(text: string, env: ExtendedNotifyEnv): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: env.TELEGRAM_CHAT_ID,
+      text: text.slice(0, 3800),
+    }),
+  }).catch((e) => console.error('Telegram reply error:', e));
 }
 
 /**
