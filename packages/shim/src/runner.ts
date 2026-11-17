@@ -542,7 +542,7 @@ async function processDraftTask(job: TaskJob): Promise<void> {
   const stdout = await invokeAgy({
     prompt: buildDraftPrompt(job),
     model: proModel,
-    timeoutMs: 10 * 60 * 1000,
+    timeoutMs: 15 * 60 * 1000,
     jsonSchema: DRAFT_OUTPUT_SCHEMA,
     maxBuffer: 20 * 1024 * 1024,
     onSpawn: (pid) => updateLockAgyPid(job.jobId, pid),
@@ -605,7 +605,7 @@ async function processSubmitTask(job: TaskJob): Promise<void> {
   const stdout = await invokeAgy({
     prompt: buildSubmitPrompt(job),
     model: proModel,
-    timeoutMs: 5 * 60 * 1000,
+    timeoutMs: 15 * 60 * 1000,
     jsonSchema: SUBMIT_OUTPUT_SCHEMA,
     onSpawn: (pid) => updateLockAgyPid(job.jobId, pid),
   });
@@ -679,9 +679,9 @@ export function reapStaleAgyProcesses(): void {
   const lock = getActiveLock();
   const now = Date.now();
 
-  // 1. 检查锁是否已超时 (>15分钟)
-  if (lock && now - lock.timestamp > 15 * 60 * 1000) {
-    console.warn(`[Shim Watchdog] ⚠️ 检测到超期硬件单例锁 (>15m, Job: ${lock.jobId})，立即强制回收！`);
+  // 1. 检查锁是否已超时 (>18分钟，预留于 15m 任务超时优雅收尾)
+  if (lock && now - lock.timestamp > 18 * 60 * 1000) {
+    console.warn(`[Shim Watchdog] ⚠️ 检测到超期硬件单例锁 (>18m, Job: ${lock.jobId})，立即强制回收！`);
     if (lock.agyPid) {
       killProcessGroup(lock.agyPid);
     }
@@ -689,7 +689,7 @@ export function reapStaleAgyProcesses(): void {
     const job = jobStore.get(lock.jobId);
     if (job && job.phase === 'running') {
       job.phase = 'failed';
-      job.error = '执行超时 (>15m)，宿主机看门狗已强制杀死 agy 进程并回收单例锁';
+      job.error = '执行超时 (>18m)，宿主机看门狗已强制杀死 agy 进程并回收单例锁';
       job.lastFailedAtMs = Date.now();
       job.updatedAt = formatUtc8Now();
       saveJobsToDisk();

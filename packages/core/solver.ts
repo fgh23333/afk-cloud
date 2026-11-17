@@ -157,7 +157,7 @@ async function invokeModelPrompt(
     const stdout = await invokeAgy({
       prompt,
       model: targetModel,
-      timeoutMs: modelTier === 'flash' ? 120000 : 240000,
+      timeoutMs: 15 * 60 * 1000,
       maxBuffer: 10 * 1024 * 1024,
     });
     return (stdout || '').trim();

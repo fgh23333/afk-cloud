@@ -183,7 +183,7 @@ function tryStartAgyChat(userText: string): boolean {
         invokeAgy({
           prompt,
           model,
-          timeoutMs: 300_000,
+          timeoutMs: 15 * 60 * 1000,
           outputFormat: 'json',
           addDirs,
           cwd: fs.existsSync(workdir) ? workdir : undefined,
