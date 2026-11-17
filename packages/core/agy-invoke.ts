@@ -55,7 +55,7 @@ export interface AgyQuotaState {
   reason?: string;
 }
 
-const LOCK_TTL_MS = 15 * 60 * 1000;
+const LOCK_TTL_MS = 18 * 60 * 1000;
 const activeLockJobStorage = new AsyncLocalStorage<string>();
 
 function getLockFilePath(): string {
