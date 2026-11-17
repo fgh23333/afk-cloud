@@ -15,7 +15,9 @@ export interface CachedAnswerEntry {
   updatedAt: string;
 }
 
-const LOCAL_CACHE_FILE = path.resolve(process.cwd(), '.cache', 'question_bank.json');
+function getLocalCacheFile(): string {
+  return path.resolve(process.cwd(), '.cache', 'question_bank.json');
+}
 
 /**
  * 计算题目的确定性 SHA-256 指纹 (归一化空白符与标点，确保跨学期/跨班级同题 100% 命中)
@@ -41,8 +43,9 @@ export function computeQuestionHash(
 
 function readLocalCacheMap(): Record<string, CachedAnswerEntry> {
   try {
-    if (fs.existsSync(LOCAL_CACHE_FILE)) {
-      return JSON.parse(fs.readFileSync(LOCAL_CACHE_FILE, 'utf8'));
+    const cacheFile = getLocalCacheFile();
+    if (fs.existsSync(cacheFile)) {
+      return JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     }
   } catch {
     // ignore
@@ -52,11 +55,12 @@ function readLocalCacheMap(): Record<string, CachedAnswerEntry> {
 
 function writeLocalCacheMap(map: Record<string, CachedAnswerEntry>): void {
   try {
-    const dir = path.dirname(LOCAL_CACHE_FILE);
+    const cacheFile = getLocalCacheFile();
+    const dir = path.dirname(cacheFile);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(LOCAL_CACHE_FILE, JSON.stringify(map, null, 2), 'utf8');
+    fs.writeFileSync(cacheFile, JSON.stringify(map, null, 2), 'utf8');
   } catch {
     // ignore
   }

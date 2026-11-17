@@ -350,10 +350,13 @@ async function main(): Promise<void> {
 
     case 'shim': {
       const { createShimServer } = await import('../../shim/src/index');
-      const port = parseInt(getFlagValue(args, '--port') || process.env.SHIM_PORT || '8788', 10);
-      const server = createShimServer();
-      server.listen(port, '0.0.0.0', () => {
-        console.log(green(`✅ afk-cloud Server Shim (Pet Node) 已在端口 ${port} 启动`));
+      const { loadShimSecurityConfig } = await import('../../shim/src/security');
+      const cfg = loadShimSecurityConfig();
+      const host = getFlagValue(args, '--host') || cfg.host;
+      const port = parseInt(getFlagValue(args, '--port') || String(cfg.port), 10);
+      const server = createShimServer({ host, port });
+      server.listen(port, host, () => {
+        console.log(green(`✅ afk-cloud Server Shim (Pet Node) 已在 http://${host}:${port} 启动`));
       });
       break;
     }

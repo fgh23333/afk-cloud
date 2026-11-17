@@ -1,4 +1,5 @@
 import http, { IncomingMessage, ServerResponse } from 'http';
+import { getAgyQuotaState } from '../../core/agy-invoke';
 import { verifySignedRequest } from '../../core/request-signing';
 import { formatUtc8Now } from '../../core/types';
 import { getManagedBrowserStatus, startManagedBrowser, stopManagedBrowser } from './browser';
@@ -147,7 +148,30 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
           // 正式提交只能走 /submit，且只能作用于已存在的草稿任务
           throw new ValidationError('/task 仅接受 draft 模式');
         }
-        if (pendingQueueLength() >= cfg.maxQueueLength && !getJob(jobId)) {
+
+        const existing = getJob(jobId);
+        if (existing?.phase === 'submitted') {
+          throw new HttpError(409, `Job [${jobId}] 已正式提交，拒绝重复作答`);
+        }
+        const maxJobAttempts = Math.max(1, parseInt(process.env.SHIM_MAX_JOB_ATTEMPTS || '8', 10));
+        if (existing && (existing.attemptCount || 0) >= maxJobAttempts) {
+          throw new HttpError(429, `Job [${jobId}] 已达到最大重试次数上限 (${maxJobAttempts})`);
+        }
+        const failedCooldownMs = parseInt(process.env.SHIM_FAILED_COOLDOWN_MS || '30000', 10);
+        if (
+          existing?.phase === 'failed' &&
+          existing.lastFailedAtMs &&
+          Date.now() - existing.lastFailedAtMs < failedCooldownMs
+        ) {
+          throw new HttpError(429, `Job [${jobId}] 刚失败处于冷却期，请稍后再试`);
+        }
+        if (process.env.NODE_ENV !== 'test' || Boolean(process.env.AFK_AGY_QUOTA_FILE)) {
+          const quota = getAgyQuotaState();
+          if (!quota.allowed) {
+            throw new HttpError(429, quota.reason || 'AGY quota exceeded');
+          }
+        }
+        if (pendingQueueLength() >= cfg.maxQueueLength && !existing) {
           throw new HttpError(429, 'Queue is full, retry later');
         }
 
@@ -213,7 +237,10 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
       // 7. POST /agent-chat (Telegram 个人助理双向指令与对话)
       if (pathname === '/agent-chat' && method === 'POST') {
         const body = parseJson<Record<string, unknown>>(raw);
-        const text = typeof body.text === 'string' ? body.text : '';
+        const text = typeof body.text === 'string' ? body.text.trim() : '';
+        if (!text || text.length > 4000) {
+          throw new ValidationError('text 不能为空且长度不得超过 4000');
+        }
         const resData = await handleAgentChatRequest(text);
         sendJson(res, 200, resData);
         return;

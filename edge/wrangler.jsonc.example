@@ -14,8 +14,7 @@
   "vars": {
     "CHAOXING_REALNAME": "同学",
     "AUTO_SUBMIT_HOMEWORK": "false",
-    "HOMEWORK_SCAN_INTERVAL_MINUTES": "10",
-    "SYNC_SECRET": "chaoxing_secure_sync_key"
+    "HOMEWORK_SCAN_INTERVAL_MINUTES": "10"
   },
   "d1_databases": [
     {

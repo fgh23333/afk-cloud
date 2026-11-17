@@ -1,4 +1,4 @@
-import { checkAuth, getExpectedAuthTokens, isAllowedTaskUrl, isAuthEnforced } from './auth';
+import { checkAuth, isAllowedTaskUrl, isAuthEnforced, isValidAuthToken } from './auth';
 import { routeAgentRequest } from 'agents';
 import {
   fetchNoticeList,
@@ -17,7 +17,7 @@ import {
 } from './discussions';
 import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
 import { ExtendedNotifyEnv, sendDigestNotification, sendNotification, sendTelegramReply } from './notify';
-import { signRequest, verifySignedRequest } from './request-signing';
+import { signRequest, timingSafeEqualString, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
 import { SolverAgent } from './solver-agent';
 import {
@@ -39,10 +39,28 @@ export { SignAgent, SolverAgent, checkAuth };
 
 function corsHeaders(): Record<string, string> {
   return {
-    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AFK-Timestamp, X-AFK-Nonce, X-AFK-Signature',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
   };
+}
+
+function applyScopedCors(request: Request, env: ExtendedNotifyEnv, res: Response): Response {
+  const origin = request.headers.get('Origin');
+  if (!origin) return res;
+  const reqOrigin = new URL(request.url).origin;
+  const extraOrigins = String((env as any).AFK_CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (origin === reqOrigin || extraOrigins.includes(origin)) {
+    const next = new Response(res.body, res);
+    next.headers.set('Access-Control-Allow-Origin', origin);
+    next.headers.set('Vary', 'Origin');
+    return next;
+  }
+  return res;
 }
 
 function corsJson(data: any, status = 200): Response {
@@ -159,7 +177,6 @@ function renderAuthRequiredHtml(): string {
         });
 
         if (res.ok) {
-          document.cookie = 'afk_token=' + encodeURIComponent(token) + '; path=/; max-age=2592000; SameSite=Lax; Secure';
           window.location.href = '/';
         } else {
           err.classList.remove('hidden');
@@ -263,6 +280,19 @@ export default {
    * HTTP 路由安全控制
    */
   async fetch(request: Request, env: ExtendedNotifyEnv, ctx: ExecutionContext): Promise<Response> {
+    const response = await handleEdgeFetch(request, env, ctx);
+    if (response.status === 101 || (response as any).webSocket) {
+      return response;
+    }
+    return applyScopedCors(request, env, response);
+  },
+};
+
+async function handleEdgeFetch(
+  request: Request,
+  env: ExtendedNotifyEnv,
+  ctx: ExecutionContext
+): Promise<Response> {
     const url = new URL(request.url);
 
     // 0. CORS 跨域预检快速通道
@@ -276,9 +306,22 @@ export default {
       });
     }
 
-    // 1. Cloudflare Agents SDK 原生路由派发
+    // 1. Cloudflare Agents SDK 原生路由派发（强制 Cookie / Bearer 鉴权拦截未认证 WebSocket RPC）
+    const denyUnauthenticatedAgent = (req: Request): Response | undefined => {
+      if (!checkAuth(req, env, { allowQueryToken: false })) {
+        return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      }
+      return undefined;
+    };
+    if (url.pathname === '/agents' || url.pathname.startsWith('/agents/')) {
+      const denied = denyUnauthenticatedAgent(request);
+      if (denied) return denied;
+    }
     try {
-      const agentRes = await routeAgentRequest(request, env);
+      const agentRes = await routeAgentRequest(request, env, {
+        onBeforeConnect: (req) => denyUnauthenticatedAgent(req),
+        onBeforeRequest: (req) => denyUnauthenticatedAgent(req),
+      });
       if (agentRes) return agentRes;
     } catch (e: any) {
       console.warn(`[routeAgentRequest 提示] ${e?.message || e}`);
@@ -288,8 +331,7 @@ export default {
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const body: any = await request.json().catch(() => ({}));
       const token = String(body?.token || '').trim();
-      const validTokens = getExpectedAuthTokens(env);
-      if (!token || validTokens.length === 0 || !validTokens.includes(token)) {
+      if (!isValidAuthToken(token, env)) {
         return corsJson({ ok: false, error: '口令无效或未配置' }, 401);
       }
       return new Response(JSON.stringify({ ok: true, message: '认证成功' }), {
@@ -317,8 +359,7 @@ export default {
     if ((url.pathname === '/' || url.pathname === '/dashboard') && request.method === 'GET') {
       // 若带有有效 ?token= 参数，自动注入 Cookie 并 302 重定向消除 URL 栏敏感信息
       const queryToken = url.searchParams.get('token');
-      const validTokens = getExpectedAuthTokens(env);
-      if (queryToken && validTokens.includes(queryToken)) {
+      if (queryToken && isValidAuthToken(queryToken, env)) {
         return new Response(null, {
           status: 302,
           headers: {
@@ -396,9 +437,9 @@ export default {
 
     // 4.5 Telegram Bot Webhook（通过 Secret Token + TELEGRAM_CHAT_ID 严格单人鉴权）
     if (url.pathname === '/api/tg/webhook' && request.method === 'POST') {
-      const expectedSecret = env.TELEGRAM_WEBHOOK_SECRET;
+      const expectedSecret = env.TELEGRAM_WEBHOOK_SECRET || '';
       const gotSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
-      if (!expectedSecret || gotSecret !== expectedSecret) {
+      if (!expectedSecret || !gotSecret || !(await timingSafeEqualString(gotSecret, expectedSecret))) {
         return corsJson({ error: 'Forbidden' }, 403);
       }
 
@@ -463,7 +504,7 @@ export default {
       const forwardTask = (async () => {
         try {
           const endpoint = new URL('/agent-chat', shimUrl.replace(/\/+$/, '') + '/');
-          const body = JSON.stringify({ text });
+          const body = JSON.stringify({ text: text.slice(0, 4000) });
           const signed = await signRequest({
             secret: shimSecret,
             method: 'POST',
@@ -474,9 +515,7 @@ export default {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-AFK-Timestamp': signed.timestamp,
-              'X-AFK-Nonce': signed.nonce,
-              'X-AFK-Signature': signed.signature,
+              ...signed,
             },
             body,
           });
@@ -498,7 +537,7 @@ export default {
 
     // 5. 监控指标接口 (必须通过鉴权)
     if (url.pathname === '/metrics' || url.pathname === '/api/metrics') {
-      if (!checkAuth(request, env)) {
+      if (!checkAuth(request, env, { allowQueryToken: false })) {
         return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
 
@@ -551,7 +590,7 @@ export default {
 
     // 6. 超星业务代理接口 (全部强制 checkAuth 鉴权)
     if (url.pathname === '/login' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const phone = body.phone || '';
       const password = body.password || '';
@@ -576,7 +615,7 @@ export default {
     }
 
     if (url.pathname === '/activity' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -612,7 +651,7 @@ export default {
     }
 
     if (url.pathname === '/general' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -632,7 +671,7 @@ export default {
     }
 
     if (url.pathname === '/location' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -660,7 +699,7 @@ export default {
     }
 
     if (url.pathname === '/qrcode' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -689,7 +728,7 @@ export default {
     }
 
     if (url.pathname === '/photo' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const session: UserSession = {
         _uid: body.uid || body._uid || '',
@@ -712,7 +751,7 @@ export default {
     }
 
     if (url.pathname === '/uvtoken' && request.method === 'POST') {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       const body: any = await request.json().catch(() => ({}));
       const cookie = `_uid=${body.uid || body._uid}; UID=${body.uid || body._uid}; _d=${body._d}; vc3=${body.vc3}; uf=${body.uf}`;
       const tokenRes = await fetch('https://pan-yz.chaoxing.com/api/token/uservalid', {
@@ -723,22 +762,22 @@ export default {
     }
 
     if (url.pathname.startsWith('/monitor/status')) {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 200, msg: 'Cloudflare Edge 24/7 Heartbeat Active' });
     }
 
     if (url.pathname.startsWith('/monitor/start')) {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 200, msg: 'Started Successfully' });
     }
 
     if (url.pathname.startsWith('/monitor/stop')) {
-      if (!checkAuth(request, env)) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
+      if (!checkAuth(request, env, { allowQueryToken: false })) return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       return corsJson({ code: 201, msg: 'Suspended' });
     }
 
     if (url.pathname === '/check' || url.pathname === '/run') {
-      if (!checkAuth(request, env)) {
+      if (!checkAuth(request, env, { allowQueryToken: false })) {
         return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
       const bypassCooldown = url.searchParams.get('bypassCooldown') === '1';
@@ -765,12 +804,12 @@ export default {
       return corsJson(result, result.success ? 200 : 500);
     }
 
-    // 7. /api/agent/callback 专用回调通道（具备 HMAC 签名防篡改）
+    // 7. /api/agent/callback 专用回调通道（具备 HMAC 签名 + Nonce 防重放）
     if (url.pathname === '/api/agent/callback' && request.method === 'POST') {
       const rawBody = await request.text();
       const shimSecret = env.AFK_SHIM_SECRET;
 
-      // 强制签名校验：若配置了 AFK_SHIM_SECRET，必须通过 HMAC-SHA256 签名校验
+      // 强制签名校验：若配置了 AFK_SHIM_SECRET，必须通过 HMAC-SHA256 签名与 Nonce 防重放校验
       if (shimSecret) {
         const verifyRes = await verifySignedRequest({
           secret: shimSecret,
@@ -778,14 +817,34 @@ export default {
           pathWithQuery: url.pathname + url.search,
           body: rawBody,
           getHeader: (name) => request.headers.get(name),
+          seenNonce: async (nonce, timestamp) => {
+            if (env.SOLVER_AGENT) {
+              try {
+                const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+                if (typeof (solverStub as any).consumeCallbackNonce === 'function') {
+                  return await (solverStub as any).consumeCallbackNonce(nonce, timestamp);
+                }
+              } catch {
+                // fall back to KV check if DO fails
+              }
+            }
+            const kv = env.CHAOXING_KV || env.KV;
+            if (kv) {
+              const key = `cb_nonce:${nonce}`;
+              const seen = await kv.get(key);
+              if (seen) return true;
+              await kv.put(key, '1', { expirationTtl: 600 });
+            }
+            return false;
+          },
         });
         if (!verifyRes.ok) {
           console.warn(`[Edge Security] /api/agent/callback 验签失败: ${verifyRes.reason}`);
           return corsJson({ error: 'Unauthorized: Bad or expired signature' }, 401);
         }
       } else {
-        // 回退：若未配置 AFK_SHIM_SECRET，检查 Bearer Token / SYNC_SECRET
-        if (!checkAuth(request, env)) {
+        // 回退：若未配置 AFK_SHIM_SECRET，检查强 Bearer Token
+        if (!checkAuth(request, env, { allowQueryToken: false })) {
           return corsJson({ error: 'Unauthorized: Missing or invalid token' }, 401);
         }
       }
@@ -805,9 +864,9 @@ export default {
       return corsJson({ handled: false, reason: 'SOLVER_AGENT not configured' });
     }
 
-    // 8. 其他所有 /api/* 接口必须通过 checkAuth 鉴权
+    // 8. 其他所有 /api/* 接口必须通过 checkAuth 鉴权（禁止通过 URL ?token= 传递凭据）
     if (url.pathname.startsWith('/api/')) {
-      if (!checkAuth(request, env)) {
+      if (!checkAuth(request, env, { allowQueryToken: false })) {
         return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
 
@@ -1041,7 +1100,7 @@ export default {
 
         const results: Array<{ taskId: string; success: boolean; status: string; reason?: string }> = [];
         for (const tid of taskIds) {
-          const res = await dispatchSingleTask(env, tid);
+          const res = await dispatchSingleTask(env, tid, { force: body.force === true });
           results.push(res);
         }
 
@@ -1297,8 +1356,7 @@ export default {
 
     // 默认兜底：未匹配路由返回 404
     return corsJson({ error: 'Endpoint Not Found' }, 404);
-  },
-};
+}
 
 async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false) {
   return runChaoxingInspectionCycle(env, {
@@ -1368,8 +1426,16 @@ async function dispatchSingleTask(
         deadline: task.deadline,
         courseName: task.course_name,
         title: task.title,
-        force: options?.force ?? true,
+        force: options?.force ?? false,
       });
+      if (res && res.accepted === false) {
+        return {
+          taskId,
+          success: false,
+          status: res.status || task.status,
+          reason: res.reason || '任务已跳过（去重/冷却或触发限流保护）',
+        };
+      }
       finalStatus = res?.status || 'dispatched';
       reasonMsg = res?.reason || (finalStatus === 'dispatched' ? '已安全派发至服务器 shim' : '已入队单例队列等待排队');
     } catch (e: any) {

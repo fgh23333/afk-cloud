@@ -1,4 +1,8 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { JSDOM } from 'jsdom';
+import { resolveAgyWorkdir } from '../../core/agy-invoke';
 import {
   CourseInfo,
   HomeworkDetail,
@@ -11,6 +15,54 @@ import { ChaoxingCookies, CourseSessionInfo, fetchCourseSession } from './sessio
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const CHAOXING_REFERER = 'https://mooc1-1.chaoxing.com/';
+const MAX_QUESTION_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * 预下载超星防盗链题面图片（携带 Cookie 与 Referer: https://mooc1-1.chaoxing.com/）至 agy 沙箱可读目录
+ */
+export async function downloadChaoxingQuestionImage(
+  imgUrl: string,
+  courseCookie: string,
+  workId: string
+): Promise<string | null> {
+  if (!imgUrl || !/^https?:\/\//i.test(imgUrl) || process.env.NODE_ENV === 'test') {
+    return null;
+  }
+  try {
+    const safeWorkDir = String(workId || 'common').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const assetDir = path.join(resolveAgyWorkdir(), 'homework_assets', safeWorkDir);
+    fs.mkdirSync(assetDir, { recursive: true });
+    const extMatch = new URL(imgUrl).pathname.match(/\.(png|jpe?g|gif|webp|bmp|svg)$/i);
+    const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
+    const hash = crypto.createHash('sha1').update(imgUrl).digest('hex').slice(0, 12);
+    const localPath = path.join(assetDir, `img_${hash}${ext}`);
+    if (fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
+      return localPath;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(imgUrl, {
+        headers: {
+          Cookie: courseCookie,
+          Referer: CHAOXING_REFERER,
+          'User-Agent': BROWSER_UA,
+        },
+        signal: controller.signal,
+      });
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0 || buf.length > MAX_QUESTION_IMAGE_BYTES) return null;
+      fs.writeFileSync(localPath, buf);
+      return localPath;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 获取单门课程的全部作业列表（含待做、重新编辑、已交状态）
@@ -284,6 +336,18 @@ export async function getHomeworkDetail(
       score,
     });
   });
+
+  // 预下载超星题干图片至本地，附上本地路径供多模态读取（规避 p.ananas.chaoxing.com 403 防盗链）
+  for (const q of questions) {
+    const imgMatches = Array.from(q.title.matchAll(/\[图片:\s*(https?:\/\/[^\]\s]+)\]/g));
+    for (const m of imgMatches) {
+      const imgUrl = m[1];
+      const localPath = await downloadChaoxingQuestionImage(imgUrl, session.courseCookie, homework.workId);
+      if (localPath) {
+        q.title = q.title.replace(`[图片: ${imgUrl}]`, `[图片: ${imgUrl} (本地已缓存: ${localPath})]`);
+      }
+    }
+  }
 
   if (questions.length > 0) {
     formParams['answerwqbid'] = `${questions.map((q) => q.id).join(',')},`;

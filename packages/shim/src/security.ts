@@ -1,3 +1,6 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { isStrongSecret, MIN_SECRET_LENGTH } from '../../core/request-signing';
 
 /**
@@ -64,11 +67,49 @@ export function assertShimStartupSecurity(cfg: ShimSecurityConfig): void {
 }
 
 /**
- * 进程内 Nonce 去重缓存 (单进程 Shim 足够；条目按签名时间窗口自动过期)
+ * 持久化 + 内存 Nonce 去重缓存 (防重启后在 300s 时间窗口内被重放)
  */
 export class NonceCache {
   private seen = new Map<string, number>();
-  constructor(private ttlSeconds = 600, private maxEntries = 10000) {}
+  private persistPath?: string;
+
+  constructor(private ttlSeconds = 600, private maxEntries = 10000, persistPath?: string) {
+    const resolvedPath =
+      persistPath !== undefined
+        ? persistPath
+        : process.env.SHIM_NONCE_FILE ||
+          (process.env.NODE_ENV !== 'test' ? path.join(os.homedir(), '.cache', 'afk-shim-nonces.json') : undefined);
+    this.persistPath = resolvedPath || undefined;
+    this.loadFromDisk();
+  }
+
+  private loadFromDisk() {
+    if (!this.persistPath) return;
+    try {
+      if (!fs.existsSync(this.persistPath)) return;
+      const raw = JSON.parse(fs.readFileSync(this.persistPath, 'utf8'));
+      const now = Math.floor(Date.now() / 1000);
+      if (raw && typeof raw === 'object') {
+        for (const [k, exp] of Object.entries(raw)) {
+          if (typeof exp === 'number' && exp > now) {
+            this.seen.set(k, exp);
+          }
+        }
+      }
+    } catch {
+      // ignore corrupted cache
+    }
+  }
+
+  private flushToDisk() {
+    if (!this.persistPath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.persistPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.persistPath, JSON.stringify(Object.fromEntries(this.seen)), 'utf8');
+    } catch {
+      // ignore
+    }
+  }
 
   /** 已存在返回 true；不存在则登记并返回 false */
   checkAndRemember(nonce: string): boolean {
@@ -76,6 +117,7 @@ export class NonceCache {
     this.gc(now);
     if (this.seen.has(nonce)) return true;
     this.seen.set(nonce, now + this.ttlSeconds);
+    this.flushToDisk();
     return false;
   }
 

@@ -360,7 +360,7 @@ export async function runChaoxingInspectionCycle(
 
         if ((env.AFK_SHIM_URL || env.SHIM_URL) && env.SOLVER_AGENT) {
           const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
-          const jobId = `chaoxing-hw-${pc.courseId}-${pc.classId || Date.now()}`;
+          const jobId = `chaoxing-hw-${pc.courseId}-${pc.classId || 'default'}`;
           const taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${pc.courseId}&classId=${pc.classId}&cpi=${pc.cpi || ''}&workId=`;
           const title = `《${pc.courseName}》待办作业`;
 

@@ -3,18 +3,28 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
+  acquireLock,
+  AgyLockData,
   cleanStaleAgyWorkspace,
   DEFAULT_PRO_MODEL,
   extractLastJsonObject,
+  getActiveLock,
+  getLinuxMemAvailableMb,
   invokeAgy,
+  isProcessAlive,
   killProcessGroup,
   normalizeAgyModelName,
+  releaseLock,
+  runWithAgyLock,
   UNTRUSTED_CONTENT_RULES,
+  updateLockAgyPid,
   wrapUntrusted,
 } from '../../core/agy-invoke';
 import { signRequest } from '../../core/request-signing';
 import { formatUtc8Now } from '../../core/types';
 import { startManagedBrowser, touchBrowser } from './browser';
+
+export { acquireLock, AgyLockData, getActiveLock, isProcessAlive, releaseLock, updateLockAgyPid };
 
 export interface TaskJob {
   jobId: string;
@@ -32,20 +42,12 @@ export interface TaskJob {
   }>;
   summary?: string;
   error?: string;
+  attemptCount?: number;
+  lastFailedAtMs?: number;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface AgyLockData {
-  jobId: string;
-  shimPid: number;
-  agyPid?: number;
-  startedAt: string;
-  timestamp: number;
-}
-
-/** 硬件单例互斥锁文件路径 */
-const LOCK_FILE_PATH = process.env.AFK_LOCK_FILE || path.join(os.tmpdir(), 'afk-agy-active.lock');
 /** 本地任务持久化文件，服务重启状态不丢失 */
 const JOBS_PERSIST_PATH = process.env.AFK_JOBS_FILE || path.join(os.homedir(), '.cache', 'afk-shim-jobs.json');
 
@@ -58,85 +60,6 @@ let isWorkerRunning = false;
 
 // 启动时从磁盘加载历史任务状态
 loadJobsFromDisk();
-
-export function getActiveLock(): AgyLockData | null {
-  try {
-    if (!fs.existsSync(LOCK_FILE_PATH)) return null;
-    const raw = fs.readFileSync(LOCK_FILE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.timestamp === 'number') {
-      return parsed as AgyLockData;
-    }
-  } catch {}
-  return null;
-}
-
-export function isProcessAlive(pid: number): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e: any) {
-    return e?.code === 'EPERM';
-  }
-}
-
-export function acquireLock(jobId: string): boolean {
-  const existing = getActiveLock();
-  const now = Date.now();
-  if (existing) {
-    const isAlive = existing.agyPid ? isProcessAlive(existing.agyPid) : isProcessAlive(existing.shimPid);
-    const isExpired = now - existing.timestamp > 15 * 60 * 1000;
-
-    if (isAlive && !isExpired) {
-      if (existing.jobId === jobId) return true;
-      return false; // 锁正被另一个活跃任务持有
-    }
-
-    console.warn(
-      `[Shim Lock] 检测到残留/过期硬件锁 (Job: ${existing.jobId}, isAlive: ${isAlive}, isExpired: ${isExpired})，执行清理与接管`
-    );
-    if (existing.agyPid && isAlive) {
-      killProcessGroup(existing.agyPid);
-    }
-    releaseLock();
-  }
-
-  const data: AgyLockData = {
-    jobId,
-    shimPid: process.pid,
-    startedAt: formatUtc8Now(),
-    timestamp: now,
-  };
-  try {
-    fs.writeFileSync(LOCK_FILE_PATH, JSON.stringify(data, null, 2), 'utf8');
-    return true;
-  } catch (err: any) {
-    console.error(`[Shim Lock] 写入锁文件失败: ${err?.message || err}`);
-    return false;
-  }
-}
-
-export function updateLockAgyPid(jobId: string, agyPid: number): void {
-  try {
-    const lock = getActiveLock();
-    if (lock && lock.jobId === jobId) {
-      lock.agyPid = agyPid;
-      fs.writeFileSync(LOCK_FILE_PATH, JSON.stringify(lock, null, 2), 'utf8');
-    }
-  } catch {}
-}
-
-export function releaseLock(jobId?: string): void {
-  try {
-    const lock = getActiveLock();
-    if (lock && (!jobId || lock.jobId === jobId)) {
-      if (fs.existsSync(LOCK_FILE_PATH)) {
-        fs.unlinkSync(LOCK_FILE_PATH);
-      }
-    }
-  } catch {}
-}
 
 function saveJobsToDisk(): void {
   try {
@@ -294,18 +217,24 @@ async function triggerQueueDrain(): Promise<void> {
 
   try {
     currentJob.phase = 'running';
+    currentJob.attemptCount = (currentJob.attemptCount || 0) + 1;
     currentJob.updatedAt = formatUtc8Now();
     saveJobsToDisk();
-    console.log(`[Shim Runner] 🔒 获取硬件单例互斥锁成功，开始执行任务: ${currentJob.jobId} (模式: ${currentJob.mode})`);
+    console.log(
+      `[Shim Runner] 🔒 获取硬件单例互斥锁成功，开始执行任务: ${currentJob.jobId} (模式: ${currentJob.mode}, 第 ${currentJob.attemptCount} 次)`
+    );
 
-    if (currentJob.mode === 'submit') {
-      await processSubmitTask(currentJob);
-    } else {
-      await processDraftTask(currentJob);
-    }
+    await runWithAgyLock(currentJob.jobId, async () => {
+      if (currentJob.mode === 'submit') {
+        await processSubmitTask(currentJob);
+      } else {
+        await processDraftTask(currentJob);
+      }
+    });
   } catch (err: any) {
     currentJob.phase = 'failed';
     currentJob.error = err?.message || String(err);
+    currentJob.lastFailedAtMs = Date.now();
     currentJob.updatedAt = formatUtc8Now();
     console.error(`[Shim Runner] 任务失败: ${currentJob.jobId}`, err);
     await notifyEdgeCallback(currentJob);
@@ -360,6 +289,7 @@ export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskU
   let courseId = '';
   let classId = '';
   let workId = '';
+  const isWorkJobId = /^chaoxing-(?:notice-work|work|hw)-/.test(job.jobId);
   let isExam = /^chaoxing-notice-exam-/.test(job.jobId);
   try {
     const u = new URL(job.taskUrl);
@@ -371,7 +301,7 @@ export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskU
       u.searchParams.get('taskrefId') ||
       u.searchParams.get('examId') ||
       '';
-    if (u.pathname.includes('/exam/') || u.searchParams.has('taskrefId') || u.searchParams.has('examId')) {
+    if (!isWorkJobId && (u.pathname.includes('/exam/') || u.searchParams.has('examId'))) {
       isExam = true;
     }
   } catch {
@@ -591,8 +521,13 @@ async function processDraftTask(job: TaskJob): Promise<void> {
     return;
   }
 
-  // 1. 若为 Web 平台 (PTA / 智慧树等需要真机渲染的平台)，先确认浏览器就绪 (超星走纯 HTTP 原生，不拉起重型浏览器)
+  // 1. 若为 Web 平台 (PTA / 智慧树等需要真机渲染的平台)，先检查可用内存并确认浏览器就绪 (超星走纯 HTTP 原生，不拉起重型浏览器)
   if (['pta', 'zhihuishu'].includes(job.platform.toLowerCase())) {
+    const memMb = getLinuxMemAvailableMb();
+    const minBrowserMemMb = parseInt(process.env.AFK_MIN_BROWSER_MEM_MB || '150', 10);
+    if (memMb > 0 && memMb < minBrowserMemMb) {
+      throw new Error(`主机可用内存不足 (${memMb} MB < ${minBrowserMemMb} MB)，暂缓拉起 Chromium 以防止 OOM`);
+    }
     try {
       await startManagedBrowser(job.platform, 10);
       touchBrowser(10);
@@ -755,6 +690,7 @@ export function reapStaleAgyProcesses(): void {
     if (job && job.phase === 'running') {
       job.phase = 'failed';
       job.error = '执行超时 (>15m)，宿主机看门狗已强制杀死 agy 进程并回收单例锁';
+      job.lastFailedAtMs = Date.now();
       job.updatedAt = formatUtc8Now();
       saveJobsToDisk();
       notifyEdgeCallback(job).catch(() => {});

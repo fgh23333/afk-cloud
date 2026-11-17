@@ -22,7 +22,7 @@
     "edge:migrate:remote": "pnpm --filter @afk-cloud/edge migrate:remote",
     "preview": "tsx scripts/preview-server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts"
+    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts && tsx tests/security-hardening.test.ts"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",

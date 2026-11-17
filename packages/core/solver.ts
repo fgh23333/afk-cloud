@@ -282,6 +282,7 @@ ${context ? context.substring(0, 3000) : '（请基于大学专业学科权威�
 【题目类型】：${question.typeName}
 【题目内容】：${question.title}
 ${question.sampleInput ? `【样例输入】：\n${question.sampleInput}\n` : ''}${question.sampleOutput ? `【样例输出】：\n${question.sampleOutput}\n` : ''}${feedbackHistory ? `\n【上一轮沙箱测试报错反馈（请反思并修复代码）】：\n${feedbackHistory}\n` : ''}
+【沙箱与识图约束】：当前处于无人值守 --sandbox 模式，严禁调用 BypassSandbox: true 或通过网络命令抓取外部链接。若【题目内容】中包含“(本地已缓存: /...)”路径，请直接调用 read_file 工具读取该本地图片进行多模态识图后再作答。
 ${
   isProgramming
     ? '如果是纯代码评测题，请提供完整可运行的源码；如果是简答论述中包含算法设计，请给出完整代码实现、核心注释与复杂度分析。'
@@ -441,9 +442,23 @@ export async function solveHomeworkDualTrack(
     }
   }
 
-  // Step 2: Gemini Pro 逐题深度求解主观论述与编程压轴题
-  for (const item of uncachedComplex) {
+  // Step 2: Gemini Pro 逐题深度求解主观论述与编程压轴题（限制单次作业 Pro 最大调用数以防配额被刷）
+  const maxProPerHomework = Math.max(1, parseInt(process.env.AFK_MAX_PRO_PER_HOMEWORK || '12', 10));
+  for (let idx = 0; idx < uncachedComplex.length; idx++) {
+    const item = uncachedComplex[idx];
     const q = item.question;
+    if (idx >= maxProPerHomework) {
+      console.warn(
+        `[Solver Guard] 单份作业 Pro 深度推理题目数 (${uncachedComplex.length}) 超过上限 ${maxProPerHomework}，第 ${idx + 1} 题起降级为本地启发式兜底`
+      );
+      const fallbackAns = localHeuristicSolve(q, item.context);
+      answers[q.id] = fallbackAns;
+      q.userAnswer = fallbackAns;
+      q.solvedByTier = 'heuristic';
+      stats.heuristicFallback++;
+      continue;
+    }
+
     const proAns = await solveComplexWithPro(q, item.context, options, {
       courseName: homework.courseName || cleanCourseName,
       homeworkTitle: homework.title,

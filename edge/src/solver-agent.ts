@@ -8,6 +8,9 @@ import { logExecution, nowUtc8, parseUtc8ToMs, upsertPendingTask, upsertQuestion
 export { computeQuestionHash, isAllowedTaskUrl };
 
 export const SUBMITTING_TIMEOUT_MS = 15 * 60 * 1000;
+export const MAX_TASK_ATTEMPTS = 5;
+export const MAX_DO_PENDING_QUEUE = 25;
+export const FAILED_RETRY_COOLDOWN_MS = 60 * 1000;
 
 export interface SolverState {
   initialized: boolean;
@@ -39,6 +42,10 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         title TEXT,
         answer TEXT,
         updated_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS seen_nonces (
+        nonce TEXT PRIMARY KEY,
+        expires_at INTEGER
       );
     `);
 
@@ -166,7 +173,28 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   }
 
   /**
-   * 任务入队：去重、SQLite 登记、D1 镜像同步与单例队列调度
+   * 原子校验并记录回调 Nonce（防 300s 签名窗口内的重放攻击）
+   * @returns true 表示该 Nonce 已出现过（重放攻击），false 表示首次出现并已登记
+   */
+  async consumeCallbackNonce(nonce: string, timestampSeconds: number): Promise<boolean> {
+    if (!nonce) return true;
+    const nowSec = Math.floor(Date.now() / 1000);
+    this.ctx.storage.sql.exec('DELETE FROM seen_nonces WHERE expires_at < ?', nowSec);
+    const existing = [...this.ctx.storage.sql.exec('SELECT nonce FROM seen_nonces WHERE nonce = ?', nonce)];
+    if (existing.length > 0) {
+      return true;
+    }
+    const expiresAt = Math.max(nowSec, timestampSeconds) + 600;
+    this.ctx.storage.sql.exec(
+      'INSERT OR IGNORE INTO seen_nonces (nonce, expires_at) VALUES (?, ?)',
+      nonce,
+      expiresAt
+    );
+    return false;
+  }
+
+  /**
+   * 任务入队：URL 白名单校验、防重/冷却/最大重试上限、SQLite 登记、D1 镜像同步与单例队列调度
    */
   @callable()
   async enqueue(task: {
@@ -178,17 +206,81 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     title?: string;
     force?: boolean;
   }): Promise<{ accepted: boolean; jobId: string; status: string; reason?: string }> {
+    if (!isAllowedTaskUrl(task.taskUrl, this.env.AFK_TASK_HOST_ALLOWLIST)) {
+      return {
+        accepted: false,
+        jobId: task.jobId,
+        status: 'rejected',
+        reason: '任务 URL 非法或不在安全白名单内',
+      };
+    }
+
     const cursor = this.ctx.storage.sql.exec('SELECT * FROM tasks WHERE job_id = ?', task.jobId);
     const existing = [...cursor];
+    const maxAttempts = Math.max(
+      1,
+      parseInt((this.env as any).AFK_MAX_TASK_ATTEMPTS || String(MAX_TASK_ATTEMPTS), 10)
+    );
+    let preservedAttempts = 0;
 
-    if (existing.length > 0 && !task.force) {
+    if (existing.length > 0) {
       const row = existing[0] as any;
-      if (['dispatched', 'draft_saved', 'awaiting_approval', 'submitted', 'submitting'].includes(row.status)) {
+      preservedAttempts = Number(row.attempts || 0);
+
+      if (row.status === 'ignored' && !task.force) {
+        return {
+          accepted: false,
+          jobId: task.jobId,
+          status: 'ignored',
+          reason: '任务已归档忽略，如需恢复请显式强制重试',
+        };
+      }
+
+      if (!task.force) {
+        if (['dispatched', 'draft_saved', 'awaiting_approval', 'submitted', 'submitting'].includes(row.status)) {
+          return {
+            accepted: false,
+            jobId: task.jobId,
+            status: row.status,
+            reason: `任务已存在且处于 [${row.status}] 状态，已自动去重跳过`,
+          };
+        }
+        if (row.status === 'failed') {
+          if (preservedAttempts >= maxAttempts) {
+            return {
+              accepted: false,
+              jobId: task.jobId,
+              status: 'failed',
+              reason: `任务连续失败已达上限 (${preservedAttempts}/${maxAttempts})，已触发防刷熔断`,
+            };
+          }
+          const lastFailedMs = parseUtc8ToMs(row.updated_at);
+          if (!isNaN(lastFailedMs) && Date.now() - lastFailedMs < FAILED_RETRY_COOLDOWN_MS) {
+            return {
+              accepted: false,
+              jobId: task.jobId,
+              status: 'failed',
+              reason: '任务刚执行失败处于 60s 冷却期内，请稍后再试',
+            };
+          }
+        }
+      } else if (preservedAttempts >= maxAttempts * 2) {
         return {
           accepted: false,
           jobId: task.jobId,
           status: row.status,
-          reason: `任务已存在且处于 [${row.status}] 状态，已自动去重跳过`,
+          reason: `任务累计调度次数已达硬上限 (${preservedAttempts}/${maxAttempts * 2})，拒绝继续重跑`,
+        };
+      }
+    } else {
+      const pendingCur = this.ctx.storage.sql.exec("SELECT count(*) as cnt FROM tasks WHERE status = 'pending'");
+      const pendingCount = Number(([...pendingCur][0] as any)?.cnt || 0);
+      if (pendingCount >= MAX_DO_PENDING_QUEUE) {
+        return {
+          accepted: false,
+          jobId: task.jobId,
+          status: 'queue_full',
+          reason: `等待队列已满 (${pendingCount}/${MAX_DO_PENDING_QUEUE})，拒绝继续入队`,
         };
       }
     }
@@ -204,6 +296,13 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       task.deadline || '',
       now
     );
+    if (preservedAttempts > 0) {
+      this.ctx.storage.sql.exec(
+        'UPDATE tasks SET attempts = ? WHERE job_id = ?',
+        preservedAttempts,
+        task.jobId
+      );
+    }
 
     // 同步到 D1 待办表供前端看板高频读 (初始记为 pending)
     await upsertPendingTask(this.env, {
@@ -242,6 +341,20 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     const shimUrl = this.env.AFK_SHIM_URL || this.env.SHIM_URL;
     const shimSecret = this.env.AFK_SHIM_SECRET;
     const shimToken = this.env.AFK_SHIM_TOKEN || this.env.SHIM_TOKEN;
+
+    const maxHardAttempts =
+      Math.max(1, parseInt((this.env as any).AFK_MAX_TASK_ATTEMPTS || String(MAX_TASK_ATTEMPTS), 10)) * 2;
+    if (Number(task.attempts || 0) >= maxHardAttempts) {
+      console.warn(`[SolverAgent Guard] 任务 [${jobId}] 调度次数已达硬上限 (${task.attempts}/${maxHardAttempts})，熔断终止`);
+      this.ctx.storage.sql.exec(
+        'UPDATE tasks SET status = ?, summary = ?, updated_at = ? WHERE job_id = ?',
+        'failed',
+        `任务调度次数已达硬上限 (${maxHardAttempts})，已熔断终止`,
+        nowUtc8(),
+        jobId
+      );
+      return false;
+    }
 
     // 安全防线 1：URL 域名白名单与 HTTPS 校验
     if (!isAllowedTaskUrl(task.task_url, this.env.AFK_TASK_HOST_ALLOWLIST)) {

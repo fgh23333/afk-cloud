@@ -1,7 +1,9 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import { execFile, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { formatUtc8Now } from './types';
 
 /**
  * agy (Antigravity CLI) 安全调用与生命周期单例管理
@@ -21,9 +23,227 @@ export interface AgyInvokeOptions {
   timeoutMs: number;
   /** 约束最终输出的 JSON Schema（通过 --json-schema 传入） */
   jsonSchema?: Record<string, unknown>;
+  /** 显式输出格式（若传入 jsonSchema 则自动启用 json） */
+  outputFormat?: 'text' | 'json';
+  /** 附加允许读取的工作目录（通过重复 --add-dir 传入） */
+  addDirs?: string[];
+  /** 显式工作目录覆盖（默认使用隔离空工作区） */
+  cwd?: string;
+  /** 锁标识（未处于 runWithAgyLock 上下文时自动抢占单例锁） */
+  lockJobId?: string;
+  /** 是否跳过小时/每日调用配额熔断检查 */
+  bypassQuota?: boolean;
   maxBuffer?: number;
   /** 子进程拉起时的回调，用于记录 PID 到系统锁 */
   onSpawn?: (pid: number) => void;
+}
+
+export interface AgyLockData {
+  jobId: string;
+  shimPid: number;
+  agyPid?: number;
+  startedAt: string;
+  timestamp: number;
+}
+
+export interface AgyQuotaState {
+  hourCount: number;
+  dayCount: number;
+  maxPerHour: number;
+  maxPerDay: number;
+  allowed: boolean;
+  reason?: string;
+}
+
+const LOCK_TTL_MS = 15 * 60 * 1000;
+const activeLockJobStorage = new AsyncLocalStorage<string>();
+
+function getLockFilePath(): string {
+  return process.env.AFK_LOCK_FILE || path.join(os.tmpdir(), 'afk-agy-active.lock');
+}
+
+function getQuotaFilePath(): string {
+  return process.env.AFK_AGY_QUOTA_FILE || path.join(os.homedir(), '.cache', 'afk-agy-quota.json');
+}
+
+export function getActiveLock(): AgyLockData | null {
+  try {
+    const lockPath = getLockFilePath();
+    if (!fs.existsSync(lockPath)) return null;
+    const raw = fs.readFileSync(lockPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.timestamp === 'number') {
+      return parsed as AgyLockData;
+    }
+  } catch {
+    // ignore corrupted lock read
+  }
+  return null;
+}
+
+export function isProcessAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: any) {
+    return e?.code === 'EPERM';
+  }
+}
+
+export function releaseLock(jobId?: string): void {
+  try {
+    const lockPath = getLockFilePath();
+    const lock = getActiveLock();
+    if (lock && (!jobId || lock.jobId === jobId)) {
+      if (fs.existsSync(lockPath)) {
+        fs.unlinkSync(lockPath);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function acquireLock(jobId: string): boolean {
+  const lockPath = getLockFilePath();
+  const existing = getActiveLock();
+  const now = Date.now();
+  if (existing) {
+    const isAlive = existing.agyPid ? isProcessAlive(existing.agyPid) : isProcessAlive(existing.shimPid);
+    const isExpired = now - existing.timestamp > LOCK_TTL_MS;
+
+    if (isAlive && !isExpired) {
+      return existing.jobId === jobId;
+    }
+
+    console.warn(
+      `[Agy Lock] 检测到残留/过期硬件锁 (Job: ${existing.jobId}, isAlive: ${isAlive}, isExpired: ${isExpired})，执行清理与接管`
+    );
+    if (existing.agyPid && isAlive) {
+      killProcessGroup(existing.agyPid);
+    }
+    releaseLock();
+  }
+
+  const data: AgyLockData = {
+    jobId,
+    shimPid: process.pid,
+    startedAt: formatUtc8Now(),
+    timestamp: now,
+  };
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify(data, null, 2), { encoding: 'utf8', flag: 'wx' });
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'EEXIST') {
+      const winner = getActiveLock();
+      return winner?.jobId === jobId;
+    }
+    console.error(`[Agy Lock] 写入锁文件失败: ${err?.message || err}`);
+    return false;
+  }
+}
+
+export function updateLockAgyPid(jobId: string, agyPid: number): void {
+  try {
+    const lock = getActiveLock();
+    if (lock && lock.jobId === jobId) {
+      lock.agyPid = agyPid;
+      fs.writeFileSync(getLockFilePath(), JSON.stringify(lock, null, 2), 'utf8');
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function runWithAgyLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+  return activeLockJobStorage.run(jobId, fn);
+}
+
+export function getLinuxMemAvailableMb(): number {
+  if (process.platform !== 'linux') return 0;
+  try {
+    const info = fs.readFileSync('/proc/meminfo', 'utf8');
+    const availMatch = info.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+    if (availMatch) return Math.round(Number(availMatch[1]) / 1024);
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+function readQuotaTimestamps(): number[] {
+  try {
+    const quotaPath = getQuotaFilePath();
+    if (!fs.existsSync(quotaPath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(quotaPath, 'utf8'));
+    if (!Array.isArray(parsed?.timestamps)) return [];
+    return parsed.timestamps.filter((t: unknown): t is number => typeof t === 'number' && Number.isFinite(t));
+  } catch {
+    return [];
+  }
+}
+
+function writeQuotaTimestamps(timestamps: number[]): void {
+  try {
+    const quotaPath = getQuotaFilePath();
+    fs.mkdirSync(path.dirname(quotaPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(quotaPath, JSON.stringify({ timestamps }, null, 2), 'utf8');
+  } catch {
+    // ignore disk write failures so legitimate runs aren't blocked solely by cache dir perms
+  }
+}
+
+export function getAgyQuotaState(nowMs = Date.now()): AgyQuotaState {
+  const maxPerHour = parseInt(process.env.AFK_AGY_MAX_PER_HOUR || '25', 10);
+  const maxPerDay = parseInt(process.env.AFK_AGY_MAX_PER_DAY || '100', 10);
+  const dayStartMs = (() => {
+    const utc8Now = new Date(nowMs + 8 * 3600 * 1000);
+    return Date.UTC(utc8Now.getUTCFullYear(), utc8Now.getUTCMonth(), utc8Now.getUTCDate()) - 8 * 3600 * 1000;
+  })();
+  const hourAgoMs = nowMs - 3600 * 1000;
+  const timestamps = readQuotaTimestamps().filter((ts) => ts >= dayStartMs && ts <= nowMs + 60_000);
+  const hourCount = timestamps.filter((ts) => ts >= hourAgoMs).length;
+  const dayCount = timestamps.length;
+
+  if (maxPerHour > 0 && hourCount >= maxPerHour) {
+    return {
+      hourCount,
+      dayCount,
+      maxPerHour,
+      maxPerDay,
+      allowed: false,
+      reason: `已触及 agy 每小时调用上限 (${hourCount}/${maxPerHour})，触发防刷熔断保护`,
+    };
+  }
+  if (maxPerDay > 0 && dayCount >= maxPerDay) {
+    return {
+      hourCount,
+      dayCount,
+      maxPerHour,
+      maxPerDay,
+      allowed: false,
+      reason: `已触及 agy 每日 (UTC+8) 调用上限 (${dayCount}/${maxPerDay})，触发配额熔断保护`,
+    };
+  }
+  return { hourCount, dayCount, maxPerHour, maxPerDay, allowed: true };
+}
+
+function consumeAgyQuotaSlot(nowMs = Date.now()): AgyQuotaState {
+  const state = getAgyQuotaState(nowMs);
+  if (!state.allowed) return state;
+  const utc8Now = new Date(nowMs + 8 * 3600 * 1000);
+  const dayStartMs = Date.UTC(utc8Now.getUTCFullYear(), utc8Now.getUTCMonth(), utc8Now.getUTCDate()) - 8 * 3600 * 1000;
+  const recent = readQuotaTimestamps().filter((ts) => ts >= dayStartMs && ts <= nowMs + 60_000);
+  recent.push(nowMs);
+  writeQuotaTimestamps(recent);
+  return {
+    ...state,
+    hourCount: state.hourCount + 1,
+    dayCount: state.dayCount + 1,
+  };
 }
 
 /** 允许透传给 agy 子进程的环境变量（精确匹配） */
@@ -151,6 +371,16 @@ export function buildAgyArgs(opts: AgyInvokeOptions): string[] {
 
   if (opts.jsonSchema && process.env.AGY_JSON_SCHEMA !== 'false') {
     args.push('--output-format', 'json', '--json-schema', JSON.stringify(opts.jsonSchema));
+  } else if (opts.outputFormat === 'json') {
+    args.push('--output-format', 'json');
+  }
+
+  if (Array.isArray(opts.addDirs)) {
+    for (const dir of opts.addDirs) {
+      if (dir && fs.existsSync(dir)) {
+        args.push('--add-dir', dir);
+      }
+    }
   }
 
   if (opts.model) {
@@ -204,12 +434,61 @@ export function cleanStaleAgyWorkspace(maxAgeMs = 24 * 3600 * 1000): void {
 }
 
 /**
- * 以严格安全基线与独立进程组拉起 agy，支持强制超时回收与 PID 登记
+ * 以严格安全基线与独立进程组拉起 agy，支持跨进程单例锁、配额熔断与强制超时回收
  */
 export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
+  // 防止单元测试未显式 mock 时意外触发真实 agy 配额消耗
+  if (process.env.NODE_ENV === 'test' && !process.env.AGY_BIN && process.env.AGY_ALLOW_IN_TEST !== 'true') {
+    return Promise.reject(
+      new Error('test 模式下已拦截真实 agy 调用（如需测试请配置 AGY_BIN 或 AGY_ALLOW_IN_TEST=true）')
+    );
+  }
+
+  if (process.env.NODE_ENV !== 'test') {
+    const minMemMb = Math.max(0, parseInt(process.env.AFK_MIN_MEM_MB || '120', 10));
+    const availMb = getLinuxMemAvailableMb();
+    if (minMemMb > 0 && availMb > 0 && availMb < minMemMb) {
+      return Promise.reject(
+        new Error(`主机可用内存不足 (${availMb} MB < ${minMemMb} MB)，拒绝启动 agy 以防止 OOM 崩溃循环`)
+      );
+    }
+  }
+
+  const contextJobId = activeLockJobStorage.getStore();
+  let ownedLockJobId: string | undefined;
+  if (!contextJobId) {
+    const candidateJobId = opts.lockJobId || `agy-cli-${Date.now()}-${process.pid}`;
+    if (!acquireLock(candidateJobId)) {
+      const holder = getActiveLock();
+      return Promise.reject(
+        new Error(
+          `agy 单例硬件锁已被占用 (Holder: ${holder?.jobId || 'unknown'})，拒绝并发拉起以避免配额与磁盘死锁`
+        )
+      );
+    }
+    ownedLockJobId = candidateJobId;
+  }
+
+  const releaseOwnedLock = () => {
+    if (ownedLockJobId) {
+      releaseLock(ownedLockJobId);
+      ownedLockJobId = undefined;
+    }
+  };
+
+  const enforceQuota =
+    !opts.bypassQuota && (process.env.NODE_ENV !== 'test' || Boolean(process.env.AFK_AGY_QUOTA_FILE));
+  if (enforceQuota) {
+    const quota = consumeAgyQuotaSlot();
+    if (!quota.allowed) {
+      releaseOwnedLock();
+      return Promise.reject(new Error(quota.reason || '已触发 agy 调用配额上限'));
+    }
+  }
+
   const bin = resolveAgyBin();
   const args = buildAgyArgs(opts);
-  const cwd = resolveAgyWorkdir();
+  const cwd = opts.cwd && fs.existsSync(opts.cwd) ? opts.cwd : resolveAgyWorkdir();
   const env = buildSanitizedEnv();
   const maxBuffer = opts.maxBuffer ?? 20 * 1024 * 1024;
   const isWindows = process.platform === 'win32';
@@ -232,8 +511,14 @@ export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    if (opts.onSpawn && child.pid) {
-      opts.onSpawn(child.pid);
+    if (child.pid) {
+      const lockOwner = contextJobId || ownedLockJobId;
+      if (lockOwner) {
+        updateLockAgyPid(lockOwner, child.pid);
+      }
+      if (opts.onSpawn) {
+        opts.onSpawn(child.pid);
+      }
     }
 
     const timer = setTimeout(() => {
@@ -262,6 +547,7 @@ export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      releaseOwnedLock();
       reject(new Error(`启动 agy 失败: ${err.message}`));
     });
 
@@ -269,6 +555,7 @@ export function invokeAgy(opts: AgyInvokeOptions): Promise<string> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      releaseOwnedLock();
 
       const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
       const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();

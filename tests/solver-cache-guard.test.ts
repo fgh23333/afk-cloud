@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isPoisonedOrRefusalAnswer, solveHomeworkDualTrack } from '../packages/core/solver';
 import { computeQuestionHash } from '../packages/core/d1-bridge';
+import { parseChaoxingTaskIdentifiers } from '../packages/shim/src/runner';
 
 async function runTests() {
   console.log('\n🧪 开始运行题库防投毒与短题干隔离测试...\n');
@@ -33,6 +34,8 @@ async function runTests() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-solver-cache-'));
   const origCwd = process.cwd();
   const origMode = process.env.NODE_ENV;
+  const origAgyBin = process.env.AGY_BIN;
+  process.env.AGY_BIN = '/nonexistent-agy-bin-for-unit-test';
   process.env.NODE_ENV = 'test';
   try {
     const cacheDir = path.join(tmpDir, '.cache');
@@ -46,7 +49,7 @@ async function runTests() {
     // 在本地缓存写入一条毒化答案，验证 solveHomeworkDualTrack 绝不命中它
     const rawGlobalHash = computeQuestionHash('essay', '1');
     fs.writeFileSync(
-      path.join(cacheDir, 'question-bank.json'),
+      path.join(cacheDir, 'question_bank.json'),
       JSON.stringify({
         [rawGlobalHash]: {
           questionHash: rawGlobalHash,
@@ -109,19 +112,39 @@ async function runTests() {
     process.chdir(origCwd);
     if (origMode === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = origMode;
+    if (origAgyBin === undefined) delete process.env.AGY_BIN;
+    else process.env.AGY_BIN = origAgyBin;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
-  // Test 3: 验证 packages/adapters/chaoxing/homework.ts 包含附件与图片链接提取
+  // Test 3: 验证 packages/adapters/chaoxing/homework.ts 包含附件与图片链接提取与防盗链预下载
   const hwSource = fs.readFileSync(
     path.join(__dirname, '../packages/adapters/chaoxing/homework.ts'),
     'utf8'
   );
   assert.ok(
-    hwSource.includes('[附件:') && hwSource.includes('[图片:') && hwSource.includes('enrichedTitle'),
-    'getHomeworkDetail 必须提取题干中的附件与图片上下文'
+    hwSource.includes('[附件:') &&
+      hwSource.includes('[图片:') &&
+      hwSource.includes('enrichedTitle') &&
+      hwSource.includes('downloadChaoxingQuestionImage'),
+    'getHomeworkDetail 必须提取题干中的附件与图片上下文并支持防盗链图片预下载'
   );
-  console.log(' ✅ [Test 3/3 PASS] 超星题目附件/图片提取契约验证通过');
+  const examIdRes = parseChaoxingTaskIdentifiers({
+    jobId: 'chaoxing-notice-exam-11193458-154651310',
+    taskUrl: 'https://mooc1-1.chaoxing.com/exam/test?courseId=261306801&classId=154651310&taskrefId=11193458',
+  });
+  assert.strictEqual(examIdRes.workId, '11193458');
+  assert.strictEqual(examIdRes.classId, '154651310');
+  assert.strictEqual(examIdRes.isExam, true);
+
+  const workWithTaskrefRes = parseChaoxingTaskIdentifiers({
+    jobId: 'chaoxing-notice-work-58501530-158750280',
+    taskUrl: 'https://mooc1-2.chaoxing.com/mooc-ans/llas/work/index?courseId=260303705&classId=158750280&taskrefId=58501530&ut=s',
+  });
+  assert.strictEqual(workWithTaskrefRes.workId, '58501530');
+  assert.strictEqual(workWithTaskrefRes.classId, '158750280');
+  assert.strictEqual(workWithTaskrefRes.isExam, false);
+  console.log(' ✅ [Test 3/3 PASS] 超星题目附件/图片防盗链预下载与测验识别契约验证通过');
 
   console.log('\n🎉 题库防投毒与自主做题增强测试 3/3 全部通过！\n');
 }

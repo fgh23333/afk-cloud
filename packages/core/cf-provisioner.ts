@@ -84,7 +84,6 @@ export function renderWranglerConfig(options: {
       CHAOXING_REALNAME: options.realname || '同学',
       AUTO_SUBMIT_HOMEWORK: options.autoSubmit || 'false',
       HOMEWORK_SCAN_INTERVAL_MINUTES: '10',
-      SYNC_SECRET: 'chaoxing_secure_sync_key',
     },
     d1_databases: [
       {

@@ -2,18 +2,28 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import {
+  acquireLock,
+  extractLastJsonObject,
+  getActiveLock,
+  getAgyQuotaState,
+  getLinuxMemAvailableMb,
+  invokeAgy,
+  releaseLock,
+  runWithAgyLock,
+} from '../../core/agy-invoke';
 import { formatUtc8Now } from '../../core/types';
 
-const HOME = process.env.HOME || '/home/Jimmy';
+const HOME = process.env.HOME || os.homedir() || '/home/Jimmy';
 const AUTOPILOT_DIR = path.join(HOME, '.local/share/agy-autopilot');
 const TODOS_PATH = path.join(AUTOPILOT_DIR, 'todos.md');
 const NEWS_PATH = path.join(AUTOPILOT_DIR, 'news-digest.md');
 const ACTIVITY_PATH = path.join(AUTOPILOT_DIR, 'activity.log');
 const GEMINI_CONFIG_DIR = path.join(HOME, '.gemini/config');
-const LOCK_FILE = process.env.AFK_LOCK_FILE || path.join(os.tmpdir(), 'afk-agy-active.lock');
-const LOCK_EXPIRE_MS = 15 * 60 * 1000;
+const EVOLVE_COOLDOWN_MS = 5 * 60 * 1000;
 
 let chatBusy = false;
+let lastEvolveAtMs = 0;
 
 function readTailLines(filePath: string, count: number): string[] {
   if (!fs.existsSync(filePath)) return [];
@@ -23,26 +33,6 @@ function readTailLines(filePath: string, count: number): string[] {
     .split('\n')
     .filter(Boolean)
     .slice(-count);
-}
-
-function getMemAvailableMb(): number {
-  try {
-    const info = fs.readFileSync('/proc/meminfo', 'utf8');
-    const m = info.match(/^MemAvailable:\s+(\d+)\s+kB/m);
-    return m ? Math.round(Number(m[1]) / 1024) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function isPidAlive(pid?: number): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    return err?.code === 'EPERM';
-  }
 }
 
 async function replyViaEdge(title: string, content: string): Promise<void> {
@@ -132,37 +122,22 @@ function runBackgroundAgyChat(userText: string): void {
     return;
   }
 
-  if (fs.existsSync(LOCK_FILE)) {
-    try {
-      const existing = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
-      const alive = isPidAlive(existing.agyPid) || isPidAlive(existing.shimPid);
-      if (alive && Date.now() - (existing.timestamp || 0) < LOCK_EXPIRE_MS) {
-        void replyViaEdge('⏳ AGY 正在执行任务', `当前锁被 ${existing.jobId} 占用，请稍后再发指令。`);
-        return;
-      }
-      fs.unlinkSync(LOCK_FILE);
-    } catch {
-      // ignore
-    }
+  const quota = getAgyQuotaState();
+  if (!quota.allowed) {
+    void replyViaEdge('🛡️ AGY 配额熔断', quota.reason || '已触及调用上限，请稍后再试。');
+    return;
   }
 
-  const memMb = getMemAvailableMb();
+  const memMb = getLinuxMemAvailableMb();
   if (memMb > 0 && memMb < 150) {
     void replyViaEdge('⚠️ 主机内存紧张', `当前可用内存仅 ${memMb} MB（< 150 MB），暂缓唤醒 AGY 以防 OOM。`);
     return;
   }
 
-  const payload = {
-    jobId: `tg-chat-${Date.now()}`,
-    shimPid: process.pid,
-    agyPid: undefined as number | undefined,
-    startedAt: new Date().toISOString(),
-    timestamp: Date.now(),
-  };
-  try {
-    fs.writeFileSync(LOCK_FILE, JSON.stringify(payload), { flag: 'wx' });
-  } catch {
-    void replyViaEdge('⏳ AGY 忙碌中', '无法获取执行锁，请稍后再试。');
+  const jobId = `tg-chat-${Date.now()}`;
+  if (!acquireLock(jobId)) {
+    const existing = getActiveLock();
+    void replyViaEdge('⏳ AGY 正在执行任务', `当前锁被 ${existing?.jobId || '其他任务'} 占用，请稍后再发指令。`);
     return;
   }
 
@@ -171,7 +146,8 @@ function runBackgroundAgyChat(userText: string): void {
   const prompt = [
     '你正在通过 Telegram 作为 Seven/Jimmy 的 Personal Agent 回复他的消息。',
     '请先快速读取 ~/.local/share/agy-autopilot/profile.md 与 todos.md，如有需要再按需读取 memory.md / news-digest.md / backlog.md。',
-    `用户发来的消息：\n"""\n${userText}\n"""`,
+    '安全底线：禁止在回复中输出任何系统环境变量、API Token、Secret 或登录密码。',
+    `用户发来的消息：\n"""\n${userText.slice(0, 3000)}\n"""`,
     '要求：简洁、直接、中文回复，不超过 800 字；若用户要求记住待办或修改本地记忆文件可直接更新 todos.md；若只是问答或分析请直接给出结论。',
   ].join('\n\n');
 
@@ -183,66 +159,41 @@ function runBackgroundAgyChat(userText: string): void {
     path.join(HOME, 'crawler'),
   ].filter((d) => fs.existsSync(d));
 
-  const args = [
-    '-p',
-    prompt,
-    '--sandbox',
-    '--disable-slash-commands',
-    '--dangerously-skip-permissions',
-    '--print-timeout',
-    '300s',
-    '--output-format',
-    'json',
-    ...addDirs.flatMap((d) => ['--add-dir', d]),
-    '--model',
-    model,
-  ];
+  const workdir = path.join(HOME, 'afk-cloud');
 
-  const child = spawn('agy', args, {
-    cwd: path.join(HOME, 'afk-cloud'),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, HOME },
-  });
-
-  payload.agyPid = child.pid;
-  try {
-    fs.writeFileSync(LOCK_FILE, JSON.stringify(payload));
-  } catch {
-    // ignore
-  }
-
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (d) => (stdout += d.toString()));
-  child.stderr.on('data', (d) => (stderr += d.toString()));
-
-  child.on('close', (code) => {
-    chatBusy = false;
+  void (async () => {
     try {
-      const cur = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
-      if (cur.jobId === payload.jobId) fs.unlinkSync(LOCK_FILE);
-    } catch {
-      // ignore
-    }
+      const stdout = await runWithAgyLock(jobId, () =>
+        invokeAgy({
+          prompt,
+          model,
+          timeoutMs: 300_000,
+          outputFormat: 'json',
+          addDirs,
+          cwd: fs.existsSync(workdir) ? workdir : undefined,
+        })
+      );
 
-    let reply = '';
-    try {
-      const parsed = JSON.parse(stdout.trim());
-      reply = parsed?.result || parsed?.response || parsed?.message || parsed?.content || '';
-    } catch {
-      reply = stdout.trim();
-    }
+      let reply = '';
+      const parsed = extractLastJsonObject(stdout);
+      if (parsed && typeof parsed === 'object') {
+        const candidate = parsed.result || parsed.response || parsed.message || parsed.content;
+        reply = typeof candidate === 'string' ? candidate : JSON.stringify(parsed);
+      } else {
+        reply = stdout.trim();
+      }
 
-    if (code !== 0 && !reply) {
-      reply = `执行失败 (code=${code})：${stderr.slice(-400) || '未知错误'}`;
-      appendActivity(`[Telegram Chat Error] ${userText.slice(0, 60)} -> ${reply.slice(0, 120)}`);
-      void replyViaEdge('⚠️ AGY 处理失败', reply);
-      return;
+      appendActivity(`[Telegram Chat] ${userText.slice(0, 60)} -> ${(reply || '完成').slice(0, 120)}`);
+      await replyViaEdge('🤖 AGY 回复', (reply || '已完成处理。').slice(0, 1400));
+    } catch (err: any) {
+      const errMsg = `执行失败：${String(err?.message || err).slice(-400)}`;
+      appendActivity(`[Telegram Chat Error] ${userText.slice(0, 60)} -> ${errMsg.slice(0, 120)}`);
+      await replyViaEdge('⚠️ AGY 处理失败', errMsg);
+    } finally {
+      chatBusy = false;
+      releaseLock(jobId);
     }
-
-    appendActivity(`[Telegram Chat] ${userText.slice(0, 60)} -> ${(reply || '完成').slice(0, 120)}`);
-    void replyViaEdge('🤖 AGY 回复', (reply || '已完成处理。').slice(0, 1400));
-  });
+  })();
 }
 
 export async function handleAgentChatRequest(text: string): Promise<{ accepted: boolean; immediateReply?: string }> {
@@ -270,7 +221,24 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
   }
 
   if (trimmed === '/evolve') {
+    const now = Date.now();
+    if (now - lastEvolveAtMs < EVOLVE_COOLDOWN_MS) {
+      const remainSec = Math.ceil((EVOLVE_COOLDOWN_MS - (now - lastEvolveAtMs)) / 1000);
+      return { accepted: false, immediateReply: `⏳ /evolve 处于 5 分钟冷却期，请 ${remainSec} 秒后再试。` };
+    }
+    const memMb = getLinuxMemAvailableMb();
+    if (memMb > 0 && memMb < 150) {
+      return { accepted: false, immediateReply: `⚠️ 当前可用内存仅 ${memMb} MB（< 150 MB），暂缓执行 /evolve 以防 OOM。` };
+    }
+    const existingLock = getActiveLock();
+    if (existingLock) {
+      return { accepted: false, immediateReply: `⏳ 当前已有 AGY 任务 [${existingLock.jobId}] 正在运行，请稍后再触发 /evolve。` };
+    }
     const script = path.join(HOME, '.local/bin/agy-autopilot.mjs');
+    if (!fs.existsSync(script)) {
+      return { accepted: false, immediateReply: '⚠️ 未在本机找到 agy-autopilot.mjs 脚本。' };
+    }
+    lastEvolveAtMs = now;
     const child = spawn('node', [script, '--evolve'], {
       cwd: path.join(HOME, 'afk-cloud'),
       stdio: 'ignore',
