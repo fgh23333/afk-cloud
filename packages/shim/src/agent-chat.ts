@@ -23,6 +23,9 @@ const GEMINI_CONFIG_DIR = path.join(HOME, '.gemini/config');
 const EVOLVE_COOLDOWN_MS = 5 * 60 * 1000;
 
 let chatBusy = false;
+const MAX_CHAT_QUEUE = 10;
+const chatQueue: string[] = [];
+let queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let lastEvolveAtMs = 0;
 
 function readTailLines(filePath: string, count: number): string[] {
@@ -116,29 +119,42 @@ function handleTodosCommand(text: string): { title: string; reply: string } | nu
   return null;
 }
 
-function runBackgroundAgyChat(userText: string): void {
-  if (chatBusy) {
-    void replyViaEdge('⏳ AGY 正在忙', '上一条个人对话仍在处理中，请稍候再试。');
-    return;
+function scheduleQueueDrain(delayMs = 5000): void {
+  if (queueRetryTimer) return;
+  queueRetryTimer = setTimeout(() => {
+    queueRetryTimer = null;
+    drainChatQueue();
+  }, delayMs);
+}
+
+function drainChatQueue(): void {
+  if (chatBusy || chatQueue.length === 0) return;
+  const nextText = chatQueue.shift()!;
+  const started = tryStartAgyChat(nextText);
+  if (!started) {
+    chatQueue.unshift(nextText);
   }
+}
+
+function tryStartAgyChat(userText: string): boolean {
+  if (chatBusy) return false;
 
   const quota = getAgyQuotaState();
   if (!quota.allowed) {
     void replyViaEdge('🛡️ AGY 配额熔断', quota.reason || '已触及调用上限，请稍后再试。');
-    return;
+    return true; // drop instead of infinite retry on quota limit
   }
 
   const memMb = getLinuxMemAvailableMb();
   if (memMb > 0 && memMb < 150) {
-    void replyViaEdge('⚠️ 主机内存紧张', `当前可用内存仅 ${memMb} MB（< 150 MB），暂缓唤醒 AGY 以防 OOM。`);
-    return;
+    scheduleQueueDrain(15_000);
+    return false;
   }
 
   const jobId = `tg-chat-${Date.now()}`;
   if (!acquireLock(jobId)) {
-    const existing = getActiveLock();
-    void replyViaEdge('⏳ AGY 正在执行任务', `当前锁被 ${existing?.jobId || '其他任务'} 占用，请稍后再发指令。`);
-    return;
+    scheduleQueueDrain(10_000);
+    return false;
   }
 
   chatBusy = true;
@@ -192,8 +208,26 @@ function runBackgroundAgyChat(userText: string): void {
     } finally {
       chatBusy = false;
       releaseLock(jobId);
+      drainChatQueue();
     }
   })();
+  return true;
+}
+
+function enqueueAgyChat(userText: string): { queued: boolean; position: number; busyNow: boolean } {
+  if (!chatBusy && chatQueue.length === 0) {
+    const started = tryStartAgyChat(userText);
+    if (started) {
+      return { queued: true, position: 0, busyNow: false };
+    }
+  }
+
+  if (chatQueue.length >= MAX_CHAT_QUEUE) {
+    return { queued: false, position: chatQueue.length, busyNow: true };
+  }
+  chatQueue.push(userText);
+  scheduleQueueDrain(5000);
+  return { queued: true, position: chatQueue.length, busyNow: true };
 }
 
 export async function handleAgentChatRequest(text: string): Promise<{ accepted: boolean; immediateReply?: string }> {
@@ -250,7 +284,19 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
     return { accepted: true, immediateReply: '🚀 已在后台触发一次 `agy-autopilot --evolve`，完成后会自动把结果推给你。' };
   }
 
-  // Natural language -> run agy in background and reply when done
-  runBackgroundAgyChat(trimmed);
+  // Natural language -> enqueue & run agy sequentially, replying when done
+  const enq = enqueueAgyChat(trimmed);
+  if (!enq.queued) {
+    return {
+      accepted: false,
+      immediateReply: `⚠️ 当前排队已满（上限 ${MAX_CHAT_QUEUE} 条），请稍等前面任务完成后再发。`,
+    };
+  }
+  if (enq.position > 0) {
+    return {
+      accepted: true,
+      immediateReply: `📥 已收到！当前前面还有任务在执行，已帮你加入排队（第 ${enq.position} 位），轮到后会自动处理并回复你。`,
+    };
+  }
   return { accepted: true, immediateReply: '收到，正在交给本机 AGY 处理，完成后回复你…' };
 }
