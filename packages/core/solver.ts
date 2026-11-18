@@ -605,10 +605,14 @@ ${wrapUntrustedDiscussionText('course_materials', materialsContext ? materialsCo
       const keyPoints = Array.isArray(parsed.keyPoints)
         ? parsed.keyPoints.map((x) => String(x || '').trim()).filter(Boolean)
         : [];
-      if (reply) {
+      if (reply && !isPoisonedOrRefusalAnswer(reply)) {
         return { reply, keyPoints, modelUsed };
       }
-    } catch {
+      if (reply && isPoisonedOrRefusalAnswer(reply)) {
+        throw new Error('agy 生成的讨论回复疑似拒答/错误模板，已拦截发布');
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('疑似拒答')) throw err;
       // 回退为清洗后的纯文本
     }
   }
@@ -618,7 +622,7 @@ ${wrapUntrustedDiscussionText('course_materials', materialsContext ? materialsCo
     .replace(/\n?```$/i, '')
     .trim();
 
-  if (!fallbackReply) {
+  if (!fallbackReply || isPoisonedOrRefusalAnswer(fallbackReply)) {
     throw new Error('agy 未生成有效讨论回复内容');
   }
 

@@ -42,6 +42,7 @@ export interface EdgeEnv {
   PHONE?: string;
   PASSWORD?: string;
   AUTO_SUBMIT_HOMEWORK?: string;
+  AUTO_PUBLISH_DISCUSSIONS?: string;
   HOMEWORK_SCAN_INTERVAL_MINUTES?: string;
   API_BEARER_TOKEN?: string;
   DASHBOARD_PASSWORD?: string;

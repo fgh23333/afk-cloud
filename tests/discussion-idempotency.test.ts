@@ -535,7 +535,31 @@ async function runTests() {
       console.log(' ✅ [Test 6/6 PASS] CLI 检测到 myReplied 自动回写 replied_externally 到 Edge D1');
     }
 
-    console.log('\n🎉 讨论发布幂等性与防重测试 6/6 全部通过！\n');
+    // --- Test 7: autoSubmit=true 时自动保存草稿并调用 Edge /publish 完成闭环 ---
+    {
+      const edgeIndexCode = fs.readFileSync(path.resolve(process.cwd(), 'edge/src/index.ts'), 'utf8');
+      assert.ok(
+        edgeIndexCode.includes('/discussions/process') &&
+          edgeIndexCode.includes('dispatchDiscussionProcessingToShim') &&
+          edgeIndexCode.includes("status = 'awaiting_approval'"),
+        'edge/src/index.ts scheduled() 必须自动处理 pending 与 awaiting_approval 讨论并免审发布'
+      );
+
+      const shimCode = fs.readFileSync(path.resolve(process.cwd(), 'packages/shim/src/index.ts'), 'utf8');
+      assert.ok(shimCode.includes("pathname === '/discussions/process'"), 'shim 必须挂载 /discussions/process 路由');
+
+      const adapterCode = fs.readFileSync(
+        path.resolve(process.cwd(), 'packages/adapters/chaoxing/discussions.ts'),
+        'utf8'
+      );
+      assert.ok(
+        adapterCode.includes('publishDiscussionOnEdge'),
+        'autoSubmit=true 且配置 Edge 时必须走 publishDiscussionOnEdge 原子加锁发布并同步 D1 状态'
+      );
+      console.log(' ✅ [Test 7/7 PASS] 讨论区自动下发与免审批自动发布契约验证通过');
+    }
+
+    console.log('\n🎉 讨论发布幂等性与防重测试 7/7 全部通过！\n');
   } finally {
     globalThis.fetch = origFetch;
   }

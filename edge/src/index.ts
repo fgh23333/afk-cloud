@@ -261,6 +261,31 @@ export default {
           }
         }
 
+        // 讨论区自动发布（免审批）与自动派发拟稿：
+        // 1) 对已有草稿的 awaiting_approval 讨论直接由 Edge 原子加锁发布到评论区；
+        // 2) 对尚在 pending 的讨论，签名通知本地 shim /discussions/process 拟稿并直接发布
+        if (shouldCheckHomework && env.DB && env.AUTO_PUBLISH_DISCUSSIONS !== 'false') {
+          try {
+            const readyDrafts = await env.DB.prepare(
+              "SELECT discussion_id FROM discussions WHERE status = 'awaiting_approval' ORDER BY updated_at ASC LIMIT 3"
+            ).all<{ discussion_id: string }>();
+            for (const d of readyDrafts.results || []) {
+              await approveAndPublishDiscussion(env, d.discussion_id);
+            }
+
+            if (env.AFK_SHIM_URL || env.SHIM_URL) {
+              const pendingDisc = await env.DB.prepare(
+                "SELECT COUNT(*) as cnt FROM discussions WHERE status = 'pending'"
+              ).first<{ cnt: number }>();
+              if ((pendingDisc?.cnt || 0) > 0) {
+                await dispatchDiscussionProcessingToShim(env, true, false);
+              }
+            }
+          } catch (e: any) {
+            console.warn(`[scheduled 讨论自动处理异常] ${e?.message || e}`);
+          }
+        }
+
         if (shouldSendDigest) {
           const data = await getDashboardData(env);
           await sendDigestNotification(
@@ -1315,6 +1340,24 @@ async function handleEdgeFetch(
         return corsJson({ ok: result.success, ...result, time: nowUtc8() }, result.success ? 200 : failStatus);
       }
 
+      // 主动触发讨论区自动拟稿与发布（发布已有 awaiting_approval 草稿 + 下发 pending 给 shim 处理）
+      if (url.pathname === '/api/discussions/auto-process' && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const autoSubmit = body.autoSubmit !== false;
+        const published: string[] = [];
+        if (autoSubmit && env.DB) {
+          const readyDrafts = await env.DB.prepare(
+            "SELECT discussion_id FROM discussions WHERE status = 'awaiting_approval' ORDER BY updated_at ASC LIMIT 10"
+          ).all<{ discussion_id: string }>();
+          for (const d of readyDrafts.results || []) {
+            const r = await approveAndPublishDiscussion(env, d.discussion_id);
+            if (r.success) published.push(d.discussion_id);
+          }
+        }
+        const dispatchRes = await dispatchDiscussionProcessingToShim(env, autoSubmit, true);
+        return corsJson({ ok: true, published, shimDispatch: dispatchRes, time: nowUtc8() });
+      }
+
       // 回写讨论安全状态（仅允许白名单状态如 replied_externally / ignored，严禁绕过发布门伪造 submitted）
       const discStatusMatch = url.pathname.match(/^\/api\/discussions\/([^\/]+)\/status$/);
       if (discStatusMatch && request.method === 'POST') {
@@ -1523,4 +1566,47 @@ async function dispatchSingleTask(
     status: finalStatus,
     reason: reasonMsg,
   };
+}
+
+async function dispatchDiscussionProcessingToShim(
+  env: ExtendedNotifyEnv,
+  autoSubmit = true,
+  force = false
+): Promise<{ dispatched: boolean; reason: string }> {
+  const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+  const shimSecret = env.AFK_SHIM_SECRET;
+  const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
+  if (!shimUrl) {
+    return { dispatched: false, reason: '未配置 AFK_SHIM_URL / SHIM_URL' };
+  }
+
+  try {
+    const endpoint = new URL('/discussions/process', shimUrl.replace(/\/+$/, '') + '/');
+    const body = JSON.stringify({ autoSubmit, force });
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (shimSecret) {
+      const sigHeaders = await signRequest({
+        secret: shimSecret,
+        method: 'POST',
+        pathWithQuery: endpoint.pathname + endpoint.search,
+        body,
+      });
+      Object.assign(headers, sigHeaders);
+    } else if (shimToken) {
+      headers['Authorization'] = `Bearer ${shimToken}`;
+    }
+
+    const res = await fetch(endpoint.toString(), {
+      method: 'POST',
+      headers,
+      body,
+    });
+    const data: any = await res.json().catch(() => ({}));
+    return {
+      dispatched: res.ok && data?.accepted !== false,
+      reason: data?.reason || `HTTP ${res.status}`,
+    };
+  } catch (err: any) {
+    return { dispatched: false, reason: err?.message || 'shim network error' };
+  }
 }
