@@ -525,6 +525,21 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
       }
       await this.tryDispatchNext();
+    } else if (payload.phase === 'awaiting_approval') {
+      await sendNotification(
+        '⚠️ 作业需人工上传/确认',
+        `任务：${payload.jobId}\n详情：${summary}`,
+        this.env
+      );
+      if (this.state.activeJobId === payload.jobId) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+      await this.tryDispatchNext();
+    } else if (payload.phase === 'ignored') {
+      if (this.state.activeJobId === payload.jobId) {
+        this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
+      }
+      await this.tryDispatchNext();
     } else if (payload.phase === 'failed') {
       await sendNotification(
         'afk-cloud 作业作答异常报警',
@@ -757,7 +772,13 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     const finalSummary = summary || '';
 
     this.ctx.storage.sql.exec(
-      'UPDATE tasks SET status = ?, summary = COALESCE(NULLIF(?, \'\'), summary), updated_at = ? WHERE job_id = ?',
+      `UPDATE tasks
+       SET status = ?,
+           attempts = CASE WHEN ? = 'pending' THEN 0 ELSE attempts END,
+           summary = COALESCE(NULLIF(?, ''), summary),
+           updated_at = ?
+       WHERE job_id = ?`,
+      status,
       status,
       finalSummary,
       now,

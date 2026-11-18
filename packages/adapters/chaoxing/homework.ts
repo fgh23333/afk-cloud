@@ -133,9 +133,12 @@ export async function getCourseHomeworkList(
       statusText.includes('已批') ||
       statusText.includes('已交') ||
       statusText.includes('完成');
+    const isReturned =
+      statusText.includes('打回') || statusText.includes('重做') || statusText.includes('退回');
     const isPending =
       !isDone &&
       (hasPendingDot ||
+        isReturned ||
         statusText.includes('待做') ||
         statusText.includes('未交') ||
         statusText.includes('重新编辑'));
@@ -354,6 +357,18 @@ export async function getHomeworkDetail(
   }
 
   return { questions, formParams, formAction, rawHtml: html };
+}
+
+/**
+ * 判断作业是否要求上传源程序/附件/运行截图或手写拍照，无法仅靠纯文本自动作答
+ */
+export function requiresManualAttachmentUpload(
+  questions: Array<{ title: string; options?: unknown[] }>
+): boolean {
+  if (!questions || questions.length === 0) return false;
+  const uploadPattern =
+    /(?:请上传|上传.{0,16}(?:源程序|源码|代码|截图|运行截图|结果截图|照片|图片|文件|附件|文档|压缩包|实验报告)|拍照上传)/i;
+  return questions.every((q) => (!q.options || q.options.length === 0) && uploadPattern.test(q.title || ''));
 }
 
 /**

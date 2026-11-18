@@ -23,7 +23,7 @@ import {
   nowUtc8,
   saveCachedSession,
   saveEnrolledCourses,
-  saveNotices,
+  saveNoticesWithEvents,
 } from './store';
 
 export const RATE_LIMIT_BACKOFF_MINUTES = [15, 30, 60, 120] as const;
@@ -395,7 +395,32 @@ export async function runChaoxingInspectionCycle(
     try {
       const noticeList = await fetchNoticeList(session, 20);
       if (noticeList.length > 0) {
-        noticesFound = await saveNotices(env, noticeList);
+        const noticeOutcome = await saveNoticesWithEvents(env, noticeList);
+        noticesFound = noticeOutcome.savedCount;
+
+        for (const rt of noticeOutcome.reopenedTasks) {
+          homeworkCount++;
+          if (env.SOLVER_AGENT) {
+            try {
+              const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
+              await (solverStub as any).syncExternalTaskStatus(rt.taskId, 'pending', rt.reason);
+            } catch {
+              // ignore DO sync error
+            }
+          }
+          await logExecution(
+            env,
+            'homework_returned',
+            'chaoxing',
+            `检测到作业被打回重做：《${rt.courseName} - ${rt.title}》 (截止: ${rt.endTime || '未知'})`,
+            rt
+          );
+          await sendNotification(
+            '⚠️ 学习通作业被打回重做',
+            `课程：《${rt.courseName}》\n作业：${rt.title}\n截止：${rt.endTime || '请登录查看'}\n已重新激活待处理状态，请及时确认！`,
+            env
+          );
+        }
       }
     } catch (err: any) {
       console.warn(`[Inspection] 通知箱抓取异常: ${err?.message || err}`);

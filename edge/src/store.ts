@@ -212,7 +212,15 @@ export async function resolveCanonicalPendingTaskId(
 /**
  * 写入或更新待办作业/评测任务（供 GCP 上 agy + Cloudflare Plugin 或 Cloud Run 消费）
  */
-export async function upsertPendingTask(
+export interface ReopenedHomeworkInfo {
+  taskId: string;
+  courseName: string;
+  title: string;
+  endTime: string;
+  reason: string;
+}
+
+export async function upsertPendingTaskWithOutcome(
   env: EdgeEnv,
   task: {
     taskId: string;
@@ -225,9 +233,11 @@ export async function upsertPendingTask(
     computeTier?: string;
     deadline?: string;
     payload?: unknown;
+    reopenNoticeIdCode?: string;
+    reopenReason?: string;
   }
-): Promise<boolean> {
-  if (!env.DB) return false;
+): Promise<{ created: boolean; reopened: boolean; taskId: string }> {
+  if (!env.DB) return { created: false, reopened: false, taskId: task.taskId };
   const ts = nowUtc8();
   const payloadStr = task.payload ? JSON.stringify(task.payload) : null;
 
@@ -239,39 +249,78 @@ export async function upsertPendingTask(
     );
     task = { ...task, taskId: canonicalTaskId };
 
-    // 若已存在且状态为 submitted / draft_saved / ignored，则不覆盖其终态；若新数据携带 notice idCode，仅补充合并 payload_json
-    const existing = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
+    // 若已存在且状态为终态/半终态，默认不覆盖；但收到全新的「作业打回通知」(reopenNoticeIdCode 未处理过) 时自动重开为 pending
+    const existing = await env.DB.prepare('SELECT status, payload_json, result_summary FROM pending_tasks WHERE task_id = ?')
       .bind(task.taskId)
-      .first<{ status: string; payload_json?: string }>();
+      .first<{ status: string; payload_json?: string; result_summary?: string }>();
 
     if (
       existing &&
-      (existing.status === 'submitted' || existing.status === 'draft_saved' || existing.status === 'ignored')
+      (existing.status === 'submitted' ||
+        existing.status === 'draft_saved' ||
+        existing.status === 'awaiting_approval' ||
+        existing.status === 'ignored' ||
+        existing.status === 'failed')
     ) {
-      if (task.payload && typeof task.payload === 'object') {
+      let prevPayload: Record<string, any> = {};
+      if (existing.payload_json) {
         try {
-          const prevPayload = existing.payload_json ? JSON.parse(existing.payload_json) : {};
-          const incomingPayload = task.payload as Record<string, unknown>;
-          if (incomingPayload.idCode && !prevPayload.idCode) {
-            const mergedPayload = JSON.stringify({ ...prevPayload, ...incomingPayload });
-            await env.DB.prepare('UPDATE pending_tasks SET payload_json = ?, updated_at = ? WHERE task_id = ?')
-              .bind(mergedPayload, ts, task.taskId)
-              .run();
-          }
+          prevPayload = JSON.parse(existing.payload_json) || {};
         } catch {
-          // ignore
+          prevPayload = {};
         }
       }
-      return false;
+      const incomingPayload =
+        task.payload && typeof task.payload === 'object' ? (task.payload as Record<string, any>) : {};
+      const processedReturnedIds: string[] = Array.isArray(prevPayload.returnedNoticeIds)
+        ? prevPayload.returnedNoticeIds.map(String)
+        : [];
+
+      if (task.reopenNoticeIdCode && !processedReturnedIds.includes(task.reopenNoticeIdCode)) {
+        const nextReturnedIds = [...processedReturnedIds, task.reopenNoticeIdCode];
+        const mergedPayload = JSON.stringify({
+          ...prevPayload,
+          ...incomingPayload,
+          lastReturnedNoticeIdCode: task.reopenNoticeIdCode,
+          returnedNoticeIds: nextReturnedIds,
+        });
+        const reason = task.reopenReason || '⚠️ 作业被打回重做，已自动重新激活为待处理';
+        await env.DB.prepare(
+          `UPDATE pending_tasks
+           SET status = 'pending', deadline = COALESCE(NULLIF(?, ''), deadline),
+               result_summary = ?, payload_json = ?, updated_at = ?
+           WHERE task_id = ?`
+        )
+          .bind(task.deadline || '', reason, mergedPayload, ts, task.taskId)
+          .run();
+        return { created: false, reopened: true, taskId: task.taskId };
+      }
+
+      if (incomingPayload.idCode && !prevPayload.idCode) {
+        const mergedPayload = JSON.stringify({ ...prevPayload, ...incomingPayload });
+        await env.DB.prepare('UPDATE pending_tasks SET payload_json = ?, updated_at = ? WHERE task_id = ?')
+          .bind(mergedPayload, ts, task.taskId)
+          .run();
+      }
+      return { created: false, reopened: false, taskId: task.taskId };
     }
+
+    const basePayloadObj =
+      task.payload && typeof task.payload === 'object' ? { ...(task.payload as Record<string, any>) } : null;
+    if (basePayloadObj && task.reopenNoticeIdCode) {
+      basePayloadObj.lastReturnedNoticeIdCode = task.reopenNoticeIdCode;
+      basePayloadObj.returnedNoticeIds = [task.reopenNoticeIdCode];
+    }
+    const insertPayloadStr = basePayloadObj ? JSON.stringify(basePayloadObj) : payloadStr;
 
     await env.DB.prepare(
       `INSERT INTO pending_tasks (
-         task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, payload_json, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, result_summary, payload_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(task_id) DO UPDATE SET
          title = excluded.title,
          deadline = excluded.deadline,
+         result_summary = COALESCE(excluded.result_summary, pending_tasks.result_summary),
          payload_json = COALESCE(excluded.payload_json, pending_tasks.payload_json),
          updated_at = excluded.updated_at`
     )
@@ -285,16 +334,38 @@ export async function upsertPendingTask(
         task.status || 'pending',
         task.computeTier || 'tier1-cloud-run',
         task.deadline || '',
-        payloadStr,
+        task.reopenNoticeIdCode ? task.reopenReason || '⚠️ 作业被打回重做' : null,
+        insertPayloadStr,
         ts,
         ts
       )
       .run();
 
-    return !existing; // 返回是否为新发现的任务
+    return { created: !existing, reopened: false, taskId: task.taskId };
   } catch {
-    return false;
+    return { created: false, reopened: false, taskId: task.taskId };
   }
+}
+
+export async function upsertPendingTask(
+  env: EdgeEnv,
+  task: {
+    taskId: string;
+    platform: string;
+    courseId: string;
+    classId: string;
+    courseName: string;
+    title: string;
+    status?: string;
+    computeTier?: string;
+    deadline?: string;
+    payload?: unknown;
+    reopenNoticeIdCode?: string;
+    reopenReason?: string;
+  }
+): Promise<boolean> {
+  const outcome = await upsertPendingTaskWithOutcome(env, task);
+  return outcome.created;
 }
 
 /**
@@ -469,12 +540,53 @@ export async function saveNotices(
       url: string;
       startTime: string;
       endTime: string;
+      isReturned?: boolean;
     };
   }>
 ): Promise<number> {
-  if (!env.DB || notices.length === 0) return 0;
+  const { savedCount } = await saveNoticesWithEvents(env, notices);
+  return savedCount;
+}
+
+export async function saveNoticesWithEvents(
+  env: EdgeEnv,
+  notices: Array<{
+    idCode: string;
+    title: string;
+    createrName: string;
+    sendTime: string;
+    content: string;
+    tag?: string;
+    sourceType?: number;
+    rawJson?: string;
+    examInfo?: {
+      examId: string;
+      title: string;
+      courseId: string;
+      courseName: string;
+      classId: string;
+      url: string;
+      startTime: string;
+      endTime: string;
+      isExpired: boolean;
+    };
+    workInfo?: {
+      workId: string;
+      title: string;
+      courseId: string;
+      courseName: string;
+      classId: string;
+      url: string;
+      startTime: string;
+      endTime: string;
+      isReturned?: boolean;
+    };
+  }>
+): Promise<{ savedCount: number; reopenedTasks: ReopenedHomeworkInfo[] }> {
+  if (!env.DB || notices.length === 0) return { savedCount: 0, reopenedTasks: [] };
   const ts = nowUtc8();
   let savedCount = 0;
+  const reopenedTasks: ReopenedHomeworkInfo[] = [];
 
   for (const n of notices) {
     if (!n.idCode) continue;
@@ -503,9 +615,15 @@ export async function saveNotices(
         .run();
       savedCount++;
 
-      // 如果通知内包含作业，联动写入待办作业队列 pending_tasks
+      // 如果通知内包含作业，联动写入待办作业队列 pending_tasks（含打回重做重新激活）
       if (n.workInfo && n.workInfo.courseId && n.workInfo.classId) {
-        await upsertPendingTask(env, {
+        const isReturned =
+          Boolean(n.workInfo.isReturned) ||
+          n.title.includes('打回') ||
+          n.title.includes('退回') ||
+          n.content.includes('打回重做');
+        const reason = `⚠️ 作业被打回重做 (${n.sendTime})，请重新处理并提交`;
+        const outcome = await upsertPendingTaskWithOutcome(env, {
           taskId: `chaoxing-notice-work-${n.workInfo.workId}-${n.workInfo.classId}`,
           platform: 'chaoxing',
           courseId: n.workInfo.courseId,
@@ -517,8 +635,19 @@ export async function saveNotices(
             url: n.workInfo.url,
             idCode: n.idCode,
             type: 'homework_notice',
+            isReturned,
           },
+          ...(isReturned ? { reopenNoticeIdCode: n.idCode, reopenReason: reason } : {}),
         });
+        if (outcome.reopened) {
+          reopenedTasks.push({
+            taskId: outcome.taskId,
+            courseName: n.workInfo.courseName,
+            title: n.workInfo.title,
+            endTime: n.workInfo.endTime || '',
+            reason,
+          });
+        }
       }
 
       // 如果通知内包含未截止考试/测验，联动写入 pending_tasks 方便监控与作答
@@ -544,7 +673,7 @@ export async function saveNotices(
     }
   }
 
-  return savedCount;
+  return { savedCount, reopenedTasks };
 }
 
 /**

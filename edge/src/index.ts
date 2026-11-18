@@ -983,13 +983,14 @@ async function handleEdgeFetch(
           const nextStatus = t.status || (t.isPending ? 'pending' : 'submitted');
           const resultSummary = t.resultSummary || null;
 
+          const allowReopen = t.reopened === true ? 1 : 0;
           await env.DB.prepare(
             `INSERT INTO pending_tasks 
              (task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, result_summary, payload_json, updated_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(task_id) DO UPDATE SET 
                title = excluded.title,
-               status = CASE WHEN pending_tasks.status IN ('draft_saved', 'awaiting_approval', 'submitting', 'submitted') AND excluded.status = 'pending' THEN pending_tasks.status ELSE excluded.status END,
+               status = CASE WHEN ? = 1 THEN excluded.status WHEN pending_tasks.status IN ('draft_saved', 'awaiting_approval', 'submitting', 'submitted', 'ignored') AND excluded.status = 'pending' THEN pending_tasks.status ELSE excluded.status END,
                deadline = excluded.deadline,
                result_summary = COALESCE(excluded.result_summary, pending_tasks.result_summary),
                payload_json = excluded.payload_json,
@@ -1008,7 +1009,8 @@ async function handleEdgeFetch(
               resultSummary,
               JSON.stringify(t),
               now,
-              now
+              now,
+              allowReopen
             )
             .run();
 
@@ -1031,7 +1033,7 @@ async function handleEdgeFetch(
             ).catch(() => {});
           }
 
-          if (env.SOLVER_AGENT && ['draft_saved', 'submitted', 'failed'].includes(nextStatus)) {
+          if (env.SOLVER_AGENT && (['draft_saved', 'submitted', 'failed'].includes(nextStatus) || t.reopened === true)) {
             try {
               const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
               await (solverStub as any).syncExternalTaskStatus(tid, nextStatus, resultSummary || undefined);

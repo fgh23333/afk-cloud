@@ -32,7 +32,7 @@ export interface TaskJob {
   taskUrl: string;
   deadline?: string;
   mode: 'draft' | 'submit';
-  phase: 'pending' | 'running' | 'draft_saved' | 'submitted' | 'failed' | 'ignored';
+  phase: 'pending' | 'running' | 'draft_saved' | 'awaiting_approval' | 'submitted' | 'failed' | 'ignored';
   qa?: Array<{
     id: string;
     type: string;
@@ -295,13 +295,16 @@ export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskU
     const u = new URL(job.taskUrl);
     courseId = u.searchParams.get('courseId') || '';
     classId = u.searchParams.get('classId') || '';
+    const workOrExam = (u.searchParams.get('workOrExam') || '').toLowerCase();
     workId =
       u.searchParams.get('workId') ||
       u.searchParams.get('workAnswerId') ||
       u.searchParams.get('taskrefId') ||
       u.searchParams.get('examId') ||
       '';
-    if (!isWorkJobId && (u.pathname.includes('/exam/') || u.searchParams.has('examId'))) {
+    if (workOrExam === 'work' || isWorkJobId) {
+      isExam = false;
+    } else if (workOrExam === 'exam' || u.pathname.includes('/exam/') || u.searchParams.has('examId')) {
       isExam = true;
     }
   } catch {
@@ -324,8 +327,14 @@ export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskU
  * 超星纯 HTTP 原生作答 / 提交链路（无需无头浏览器，自动识别已交/过期/无表单作业）
  */
 async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Promise<void> {
-  const { chaoxingLogin, getChaoxingCourses, getCourseHomeworkList, getHomeworkDetail, submitHomework } =
-    await import('../../adapters/chaoxing/index');
+  const {
+    chaoxingLogin,
+    getChaoxingCourses,
+    getCourseHomeworkList,
+    getHomeworkDetail,
+    requiresManualAttachmentUpload,
+    submitHomework,
+  } = await import('../../adapters/chaoxing/index');
   const { downloadCourseMaterials, searchCourseMaterialsContext } = await import('../../adapters/chaoxing/materials');
   const { solveHomeworkDualTrack, isPoisonedOrRefusalAnswer } = await import('../../core/solver');
 
@@ -456,8 +465,16 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
   }
 
   const detail = await getHomeworkDetail(found, cookies);
-  if (!detail.questions || detail.questions.length === 0) {
-    throw new Error('该作业无在线表单题目（可能为纯附件/实验报告上传类），请点击「打开作答界面」手动提交');
+  if (!detail.questions || detail.questions.length === 0 || requiresManualAttachmentUpload(detail.questions)) {
+    const isReturned = st.includes('打回') || st.includes('重做') || st.includes('退回');
+    job.phase = 'awaiting_approval';
+    job.summary = isReturned
+      ? `⚠️ 作业《${found.title}》已被打回（状态: ${st}）且需上传源程序/附件/截图，请打开学习通手动提交`
+      : `⚠️ 作业《${found.title}》需上传源程序/附件或截图（无纯文本可代答表单），请打开学习通手动完成`;
+    job.updatedAt = formatUtc8Now();
+    console.log(`[Shim Runner] 作业 [${job.jobId}] 需人工上传附件/截图 (${st})，转为 awaiting_approval`);
+    await notifyEdgeCallback(job);
+    return;
   }
 
   let materialsDir = '';
