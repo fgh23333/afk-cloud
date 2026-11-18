@@ -250,9 +250,9 @@ export async function upsertPendingTaskWithOutcome(
     task = { ...task, taskId: canonicalTaskId };
 
     // 若已存在且状态为终态/半终态，默认不覆盖；但收到全新的「作业打回通知」(reopenNoticeIdCode 未处理过) 时自动重开为 pending
-    const existing = await env.DB.prepare('SELECT status, payload_json, result_summary FROM pending_tasks WHERE task_id = ?')
+    const existing = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
       .bind(task.taskId)
-      .first<{ status: string; payload_json?: string; result_summary?: string }>();
+      .first<{ status: string; payload_json?: string }>();
 
     if (
       existing &&

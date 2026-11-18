@@ -27,7 +27,7 @@ function createMockD1(initialTask?: {
           return this;
         },
         async first<T = any>(): Promise<T | null> {
-          if (sql.includes('SELECT status, payload_json, result_summary FROM pending_tasks WHERE task_id = ?')) {
+          if (sql.includes('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')) {
             return (tasks.get(args[0]) as T) || null;
           }
           return null;
