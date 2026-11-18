@@ -3,6 +3,7 @@ import path from 'path';
 import { blue, green, yellow } from 'kolorist';
 import {
   fetchDiscussionsFromEdge,
+  publishDiscussionOnEdge,
   pushDiscussionDraftToEdge,
   triggerDiscussionScanOnEdge,
 } from '../../core/d1-bridge';
@@ -283,13 +284,23 @@ export async function solvePendingDiscussions(
         `### 《${item.courseName}》 ${item.title}\n- 链接: ${item.detailUrl}\n- 状态: ${synced ? '已推送至看板 awaiting_approval' : '仅本地草稿'}\n\n${solved.reply}\n`
       );
 
-      if (isAutoSubmit && detail.replyParams) {
-        const postRes = await postTopicReply(detail.replyParams, solved.reply, cookies.cookieStr, detail.detailUrl);
-        if (postRes.success) {
-          summary.submitted++;
-          console.log(green(`  🚀 [auto-submit] 已发布至学习通讨论区`));
-        } else {
-          console.log(yellow(`  ⚠️ [auto-submit] 发布失败: ${postRes.msg}`));
+      if (isAutoSubmit) {
+        if (edgeUrl) {
+          const pubRes = await publishDiscussionOnEdge(item.discussionId, solved.reply);
+          if (pubRes.ok) {
+            summary.submitted++;
+            console.log(green(`  🚀 [auto-submit] 已通过 Edge 自动发布至学习通讨论区`));
+          } else {
+            console.log(yellow(`  ⚠️ [auto-submit] Edge 发布失败: ${pubRes.msg || '未知错误'}`));
+          }
+        } else if (detail.replyParams) {
+          const postRes = await postTopicReply(detail.replyParams, solved.reply, cookies.cookieStr, detail.detailUrl);
+          if (postRes.success) {
+            summary.submitted++;
+            console.log(green(`  🚀 [auto-submit] 已发布至学习通讨论区`));
+          } else {
+            console.log(yellow(`  ⚠️ [auto-submit] 发布失败: ${postRes.msg}`));
+          }
         }
       }
     } catch (err: any) {

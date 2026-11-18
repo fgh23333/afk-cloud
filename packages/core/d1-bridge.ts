@@ -301,3 +301,25 @@ export async function pushDiscussionDraftToEdge(
     return false;
   }
 }
+
+export async function publishDiscussionOnEdge(
+  discussionId: string,
+  draftReply?: string
+): Promise<{ ok: boolean; msg?: string }> {
+  const conn = buildEdgeAuthHeaders();
+  if (!conn) return { ok: false, msg: 'Edge URL/token not configured' };
+  try {
+    const res = await fetch(`${conn.edgeUrl}/api/discussions/${encodeURIComponent(discussionId)}/publish`, {
+      method: 'POST',
+      headers: conn.headers,
+      body: JSON.stringify(draftReply !== undefined ? { draftReply } : {}),
+    });
+    const data: any = await res.json().catch(() => ({}));
+    return {
+      ok: Boolean(res.ok && data?.ok !== false),
+      msg: data?.msg || data?.error || `HTTP ${res.status}`,
+    };
+  } catch (err: any) {
+    return { ok: false, msg: err?.message || 'publish request failed' };
+  }
+}

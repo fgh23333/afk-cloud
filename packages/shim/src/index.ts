@@ -4,6 +4,7 @@ import { verifySignedRequest } from '../../core/request-signing';
 import { formatUtc8Now } from '../../core/types';
 import { getManagedBrowserStatus, startManagedBrowser, stopManagedBrowser } from './browser';
 import { handleAgentChatRequest } from './agent-chat';
+import { triggerDiscussionProcessing } from './discussions';
 import { enqueueJob, getJob, listJobs, pendingQueueLength, releaseLock, startAgyWatchdog } from './runner';
 import {
   assertShimStartupSecurity,
@@ -243,6 +244,16 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
         }
         const resData = await handleAgentChatRequest(text);
         sendJson(res, 200, resData);
+        return;
+      }
+
+      // 8. POST /discussions/process (接收 Edge Cron 下发的待处理课程讨论，自动拟稿并按配置直接发布)
+      if (pathname === '/discussions/process' && method === 'POST') {
+        const body = parseJson<Record<string, unknown>>(raw);
+        const autoSubmit = body.autoSubmit !== false;
+        const force = body.force === true;
+        const result = triggerDiscussionProcessing({ autoSubmit, force });
+        sendJson(res, result.accepted ? 202 : 200, result);
         return;
       }
 
