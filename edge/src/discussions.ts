@@ -245,13 +245,18 @@ export async function approveAndPublishDiscussion(
         lockSettled = true;
         return { success: false, msg: '检测到本人已在学习通回复该话题，已同步状态并取消重复提交', discussionId };
       }
+      if (!freshDetail.canReply) {
+        await updateDiscussionStatus(env, discussionId, 'ignored');
+        lockSettled = true;
+        return { success: false, msg: '该话题已结束或关闭回复，已自动归档忽略', discussionId };
+      }
       replyParams = freshDetail.replyParams;
     }
 
     if (!replyParams) {
-      await restoreDiscussionAfterPublishFailure(env, discussionId);
+      await updateDiscussionStatus(env, discussionId, 'ignored');
       lockSettled = true;
-      return { success: false, msg: '未能解析该讨论帖的提交参数 (话题可能已关闭回复)', discussionId };
+      return { success: false, msg: '未能解析该讨论帖的提交参数 (话题可能已关闭回复)，已自动归档', discussionId };
     }
 
     let postRes = await postTopicReply(replyParams, content, session.cookie, row.topic_url);
@@ -270,7 +275,12 @@ export async function approveAndPublishDiscussion(
     }
 
     if (!postRes.success) {
-      await restoreDiscussionAfterPublishFailure(env, discussionId);
+      const isClosedOrExpired = /已结束|已关闭|截止时间|无法回复|不允许回复|禁止回复/.test(postRes.msg || '');
+      if (isClosedOrExpired) {
+        await updateDiscussionStatus(env, discussionId, 'ignored');
+      } else {
+        await restoreDiscussionAfterPublishFailure(env, discussionId);
+      }
       lockSettled = true;
       return { success: false, msg: postRes.msg, discussionId };
     }
