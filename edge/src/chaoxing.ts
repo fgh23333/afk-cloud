@@ -439,6 +439,7 @@ export interface ChaoxingNoticeItem {
     url: string;
     startTime: string;
     endTime: string;
+    isReturned?: boolean;
   };
 }
 
@@ -671,6 +672,12 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
                 isExpired,
               };
             } else if (w.examOrWork === 'work') {
+              const rawContent = String(n.content || '');
+              const rawTitle = String(n.title || '');
+              const isReturned =
+                rawTitle.includes('打回') ||
+                rawTitle.includes('退回') ||
+                rawContent.includes('打回重做');
               workInfo = {
                 workId: String(w.examOrWorkId || att.examOrTextId || ''),
                 title: itemTitle,
@@ -680,6 +687,7 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
                 url: targetUrl,
                 startTime: startTime || '近期',
                 endTime: endTime || '无截止时间',
+                ...(isReturned ? { isReturned: true } : {}),
               };
             }
           }

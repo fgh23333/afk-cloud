@@ -121,16 +121,22 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
 
     if (allPending.length > 0) {
       await syncTasksToEdgeDashboard(
-        allPending.map((pw) => ({
-          taskId: `chaoxing-hw-${pw.workId}`,
-          platform: 'chaoxing',
-          courseId: pw.courseId,
-          classId: pw.classId,
-          courseName: pw.courseName || '',
-          title: pw.title,
-          status: pw.statusText.includes('暂存') ? 'draft_saved' : 'pending',
-          deadline: pw.endDate,
-        }))
+        allPending.map((pw) => {
+          const isReturned =
+            pw.statusText.includes('重做') || pw.statusText.includes('打回') || pw.statusText.includes('退回');
+          return {
+            taskId: `chaoxing-hw-${pw.workId}`,
+            platform: 'chaoxing',
+            courseId: pw.courseId,
+            classId: pw.classId,
+            courseName: pw.courseName || '',
+            title: pw.title,
+            status: pw.statusText.includes('暂存') ? 'draft_saved' : 'pending',
+            deadline: pw.endDate,
+            reopened: isReturned,
+            resultSummary: isReturned ? `学习通状态: ${pw.statusText}，需重新处理` : undefined,
+          };
+        })
       );
     }
 
@@ -148,7 +154,16 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
       const st = found.statusText || '';
       if (st.includes('暂存')) return 'draft_saved';
       if (st.includes('已交') || st.includes('待批') || st.includes('已批')) return 'submitted';
-      if (st.includes('待做') || st.includes('未交') || st.includes('重新编辑')) return 'pending';
+      if (
+        st.includes('待做') ||
+        st.includes('未交') ||
+        st.includes('重新编辑') ||
+        st.includes('打回') ||
+        st.includes('重做') ||
+        st.includes('退回')
+      ) {
+        return 'pending';
+      }
       return found.isPending ? 'pending' : 'submitted';
     } catch {
       return 'unknown';
