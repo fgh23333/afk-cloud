@@ -559,7 +559,36 @@ async function runTests() {
       console.log(' ✅ [Test 7/7 PASS] 讨论区自动下发与免审批自动发布契约验证通过');
     }
 
-    console.log('\n🎉 讨论发布幂等性与防重测试 7/7 全部通过！\n');
+    // --- Test 8: 已结束或过截止时间的讨论回复失败时自动归档为 ignored，避免 Edge Cron 无限重试 ---
+    {
+      for (const closedReplyBody of ['error;话题已结束，无法回复', 'error;该话题已到回复截止时间']) {
+        const db = createMockDiscussionDb([makeSampleRow()]);
+        let addReplyCount = 0;
+
+        globalThis.fetch = (async (input: RequestInfo | URL) => {
+          const u = String(input);
+          if (u.includes('/mooc-ans/bbscircle/addreply')) {
+            addReplyCount++;
+            return new Response(closedReplyBody, { status: 200 });
+          }
+          return new Response('unexpected', { status: 500 });
+        }) as typeof fetch;
+
+        const env = { DB: db, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' };
+        const res = await approveAndPublishDiscussion(env, 'chaoxing-bbs-726151794');
+        assert.strictEqual(res.success, false, `${closedReplyBody} 应返回失败`);
+        assert.strictEqual(addReplyCount, 1);
+        assert.strictEqual(
+          db.rows.get('chaoxing-bbs-726151794')?.status,
+          'ignored',
+          `${closedReplyBody} 必须自动归档为 ignored，而非回退 awaiting_approval`
+        );
+        assert.deepStrictEqual(db.statusHistory, ['publishing', 'ignored']);
+      }
+      console.log(' ✅ [Test 8/8 PASS] 已结束/过截止时间的讨论发布失败后自动归档为 ignored');
+    }
+
+    console.log('\n🎉 讨论发布幂等性与防重测试 8/8 全部通过！\n');
   } finally {
     globalThis.fetch = origFetch;
   }
