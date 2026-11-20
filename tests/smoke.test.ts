@@ -234,6 +234,8 @@ async function runAllTests() {
     const testSecret = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     process.env.NODE_ENV = 'test';
     process.env.AFK_SHIM_SECRET = testSecret;
+    const { resetJobForTest } = await import('../packages/shim/src/runner');
+    resetJobForTest('test-job-auth-101');
     const testPort = 8798;
     const server = createShimServer({ secret: testSecret });
     await new Promise<void>((resolve) => server.listen(testPort, '127.0.0.1', () => resolve()));

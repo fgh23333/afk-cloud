@@ -355,7 +355,7 @@ export async function runChaoxingInspectionCycle(
       const pendingCourses = await checkHomeworkPendingCourses(courses, session);
       for (const pc of pendingCourses) {
         homeworkCoursesDetected.push(pc.courseName);
-        const alreadyTracked = await hasTrackedHomeworkForCourse(env, pc.courseId);
+        const alreadyTracked = await hasTrackedHomeworkForCourse(env, pc.courseId, pc.classId);
         if (alreadyTracked) continue;
 
         if ((env.AFK_SHIM_URL || env.SHIM_URL) && env.SOLVER_AGENT) {
@@ -374,10 +374,12 @@ export async function runChaoxingInspectionCycle(
 
           if (enqueueRes?.accepted) {
             homeworkCount++;
-            await sendNotification(
-              'afk-cloud 发现新作业待办',
-              `课程：《${pc.courseName}》\n作业：${title}\n任务已自动入队派发求解。`,
-              env
+            await logExecution(
+              env,
+              'homework_pending_detected',
+              'chaoxing',
+              `发现课程《${pc.courseName}》作业红点，已入队派发求解 (${jobId})`,
+              { courseId: pc.courseId, classId: pc.classId, jobId }
             );
           }
         }

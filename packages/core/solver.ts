@@ -256,6 +256,24 @@ export function isPoisonedOrRefusalAnswer(answer: string): boolean {
 }
 
 /**
+ * 判断主观题是否为缺乏实质题目正文、未缓存本地附件/图片且无讲义上下文的「空壳题干」（避免盲调 Gemini Pro 浪费配额）
+ */
+export function isEmptyShellSubjectiveQuestion(question: StandardQuestion, context = ''): boolean {
+  if (question.options && question.options.length > 0) return false;
+  const raw = String(question.title || '');
+  if (raw.includes('本地已缓存:') || raw.includes('附件摘要:')) return false;
+  if (String(context || '').trim().length >= 30) return false;
+  const stripped = raw
+    .replace(/\[(?:附件|图片):[^\]]*\]/g, '')
+    .replace(/^[0-9]+[\.、\s]*/, '')
+    .replace(/[（(][\d\.]+分[)）]/g, '')
+    .replace(/【[^】]+】/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  return stripped.length <= 12;
+}
+
+/**
  * 轨道 2 (兜底 10%)：Gemini Pro 深度求解主观论述题 / 算法编程题（含本地沙箱编译评测与多轮自愈反思回路）
  */
 async function solveComplexWithPro(
@@ -264,6 +282,10 @@ async function solveComplexWithPro(
   options?: SolveOptions,
   homeworkContext?: { courseName?: string; homeworkTitle?: string }
 ): Promise<string> {
+  if (isEmptyShellSubjectiveQuestion(question, context)) {
+    console.warn(`[Solver Guard] 拦截空壳短题干主观题 (id=${question.id}, title="${question.title.slice(0, 40)}")，跳过 Pro 模型调用`);
+    return '当前题目信息不完整（仅含序号或未提取到附件正文），无法直接作答，请打开学习通查看附件或手动提交。';
+  }
   const isProgramming =
     question.type === 'programming' ||
     /编程|算法实现|代码实现|时间复杂度|C语言|C\+\+|Python|函数实现/i.test(question.title);

@@ -48,8 +48,14 @@ export interface TaskJob {
   updatedAt: string;
 }
 
-/** 本地任务持久化文件，服务重启状态不丢失 */
-const JOBS_PERSIST_PATH = process.env.AFK_JOBS_FILE || path.join(os.homedir(), '.cache', 'afk-shim-jobs.json');
+/** 本地任务持久化文件，服务重启状态不丢失（测试模式或未显式指定 AFK_JOBS_FILE 时隔离于生产缓存） */
+function getJobsPersistPath(): string {
+  if (process.env.AFK_JOBS_FILE) return process.env.AFK_JOBS_FILE;
+  if (process.env.NODE_ENV === 'test') {
+    return path.join(os.tmpdir(), `afk-shim-jobs-test-${process.pid}.json`);
+  }
+  return path.join(os.homedir(), '.cache', 'afk-shim-jobs.json');
+}
 
 /** 内存中最多保留的任务数（超出后淘汰最早的已终结任务，避免常驻进程内存无限增长） */
 const MAX_JOBS_RETAINED = 200;
@@ -62,18 +68,26 @@ let isWorkerRunning = false;
 loadJobsFromDisk();
 
 function saveJobsToDisk(): void {
+  if (process.env.NODE_ENV === 'test' && !process.env.AFK_JOBS_FILE) {
+    return;
+  }
   try {
-    const dir = path.dirname(JOBS_PERSIST_PATH);
+    const persistPath = getJobsPersistPath();
+    const dir = path.dirname(persistPath);
     fs.mkdirSync(dir, { recursive: true });
     const list = Array.from(jobStore.values());
-    fs.writeFileSync(JOBS_PERSIST_PATH, JSON.stringify(list, null, 2), 'utf8');
+    fs.writeFileSync(persistPath, JSON.stringify(list, null, 2), 'utf8');
   } catch {}
 }
 
 function loadJobsFromDisk(): void {
+  if (process.env.NODE_ENV === 'test' && !process.env.AFK_JOBS_FILE) {
+    return;
+  }
   try {
-    if (!fs.existsSync(JOBS_PERSIST_PATH)) return;
-    const raw = fs.readFileSync(JOBS_PERSIST_PATH, 'utf8');
+    const persistPath = getJobsPersistPath();
+    if (!fs.existsSync(persistPath)) return;
+    const raw = fs.readFileSync(persistPath, 'utf8');
     const list = JSON.parse(raw);
     if (Array.isArray(list)) {
       for (const item of list) {
@@ -88,6 +102,10 @@ function loadJobsFromDisk(): void {
       }
     }
   } catch {}
+}
+
+export function resetJobForTest(jobId: string): void {
+  jobStore.delete(jobId);
 }
 
 const DRAFT_OUTPUT_SCHEMA = {
@@ -316,8 +334,13 @@ export function parseChaoxingTaskIdentifiers(job: Pick<TaskJob, 'jobId' | 'taskU
     if (!classId) classId = noticeMatch[2];
   } else {
     const hwMatch = job.jobId.match(/^chaoxing-(?:work|hw)-(\d+)(?:-(\d+))?/);
-    if (hwMatch && !workId) {
-      workId = hwMatch[1];
+    if (hwMatch) {
+      if (!workId && hwMatch[1] !== courseId) {
+        workId = hwMatch[1];
+      }
+      if (!classId && hwMatch[2]) {
+        classId = hwMatch[2];
+      }
     }
   }
   return { courseId, classId, workId, isExam };
@@ -409,11 +432,13 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
   }
 
   if (!found || !resolvedCourse) {
-    if (job.jobId.startsWith('chaoxing-notice-')) {
+    if (job.jobId.startsWith('chaoxing-notice-') || !workId) {
       job.phase = 'ignored';
-      job.summary = '通知型任务已截止、已删除或非标准作业（如课堂测验/附件），已自动归档忽略';
+      job.summary = !workId
+        ? '该课程当前无未完成的在线作业待办（可能已截止或非作业红点），已自动归档忽略'
+        : '通知型任务已截止、已删除或非标准作业（如课堂测验/附件），已自动归档忽略';
       job.updatedAt = formatUtc8Now();
-      console.log(`[Shim Runner] 通知型任务 [${job.jobId}] 未在作业列表中找到，自动归档为 ignored`);
+      console.log(`[Shim Runner] 任务 [${job.jobId}] 未在作业列表中找到有效待办，自动归档为 ignored`);
       await notifyEdgeCallback(job);
       return;
     }

@@ -163,6 +163,7 @@ function tryStartAgyChat(userText: string): boolean {
     '你正在通过 Telegram 作为 Seven/Jimmy 的 Personal Agent 回复他的消息。',
     '请先快速读取 ~/.local/share/agy-autopilot/profile.md 与 todos.md，如有需要再按需读取 memory.md / news-digest.md / backlog.md。',
     '安全底线：禁止在回复中输出任何系统环境变量、API Token、Secret 或登录密码。',
+    '沙箱提速约束：当前运行在 1GB 内存 --sandbox 模式，请优先使用 read_file / edit_file / write_file 原生文件工具（<1s 响应），严禁调用 BypassSandbox: true，避免连续调用 run_command 导致握手超时。',
     `用户发来的消息：\n"""\n${userText.slice(0, 3000)}\n"""`,
     '要求：简洁、直接、中文回复，不超过 800 字；若用户要求记住待办或修改本地记忆文件可直接更新 todos.md；若只是问答或分析请直接给出结论。',
   ].join('\n\n');
@@ -194,7 +195,13 @@ function tryStartAgyChat(userText: string): boolean {
       const parsed = extractLastJsonObject(stdout);
       if (parsed && typeof parsed === 'object') {
         const candidate = parsed.result || parsed.response || parsed.message || parsed.content;
-        reply = typeof candidate === 'string' ? candidate : JSON.stringify(parsed);
+        if (typeof candidate === 'string' && candidate.trim()) {
+          reply = candidate.trim();
+        } else if (parsed.status === 'ERROR' || parsed.error) {
+          reply = `⚠️ 本机 AGY 执行中断或超时：${String(parsed.error || '未知错误').slice(0, 300)}`;
+        } else {
+          reply = JSON.stringify(parsed);
+        }
       } else {
         reply = stdout.trim();
       }

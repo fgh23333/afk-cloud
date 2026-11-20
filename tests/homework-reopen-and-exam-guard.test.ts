@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { requiresManualAttachmentUpload } from '../packages/adapters/chaoxing/homework';
+import { isEmptyShellSubjectiveQuestion } from '../packages/core/solver';
 import { parseChaoxingTaskIdentifiers } from '../packages/shim/src/runner';
-import { saveNoticesWithEvents } from '../edge/src/store';
+import { hasTrackedHomeworkForCourse, mergeSyncedTaskPayload, saveNoticesWithEvents } from '../edge/src/store';
 
 function createMockD1(initialTask?: {
   task_id: string;
@@ -29,6 +30,19 @@ function createMockD1(initialTask?: {
         async first<T = any>(): Promise<T | null> {
           if (sql.includes('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')) {
             return (tasks.get(args[0]) as T) || null;
+          }
+          if (sql.includes('SELECT task_id FROM pending_tasks') && sql.includes('course_id = ?')) {
+            const cid = String(args[0] || '');
+            const pid = String(args[1] || '');
+            const hit = Array.from(tasks.values()).find(
+              (r) =>
+                (r.course_id === cid &&
+                  ['pending', 'dispatched', 'processing', 'draft_saved', 'awaiting_approval', 'submitted'].includes(
+                    r.status
+                  )) ||
+                r.task_id === pid
+            );
+            return (hit as T) || null;
           }
           return null;
         },
@@ -154,7 +168,87 @@ async function runTests() {
   assert.strictEqual(db.tasks.get(taskId).status, 'pending');
   console.log(' ✅ [Test 3/3 PASS] 打回重做通知自动激活与幂等去重逻辑通过');
 
-  console.log('\n🎉 全部 3 项打回重做与测验守卫测试 100% 通过！\n');
+  // Test 4: 无 workId 红点占位任务 chaoxing-hw-${courseId}-${classId} 解析时不误把 courseId 当作 workId
+  const placeholderParsed = parseChaoxingTaskIdentifiers({
+    jobId: 'chaoxing-hw-268784887-158750280',
+    taskUrl: 'https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=268784887&classId=158750280&cpi=&workId=',
+  });
+  assert.strictEqual(placeholderParsed.courseId, '268784887');
+  assert.strictEqual(placeholderParsed.classId, '158750280');
+  assert.strictEqual(
+    placeholderParsed.workId,
+    '',
+    'chaoxing-hw-courseId-classId 占位任务的 workId 必须保持为空以触发 list.find(w => w.isPending)'
+  );
+  console.log(' ✅ [Test 4/6 PASS] 红点占位任务 chaoxing-hw-courseId-classId 绝不误把 courseId 解析为 workId');
+
+  // Test 5: 已截止的历史作业通知（含历史打回通知）不重新入队或触发重做提醒，且 hasTrackedHomeworkForCourse 识别已提交/占位任务
+  const expiredNotice = {
+    idCode: 'EXPIRED_RETURN_NOTICE_99',
+    title: '作业打回通知',
+    createrName: '学习通知',
+    sendTime: '2026-10-10 10:00:00',
+    content: '已截止旧作业打回重做',
+    workInfo: {
+      workId: '58366567',
+      title: '上机练习-不同类型函数的综合应用',
+      courseId: '266874983',
+      courseName: 'LabVIEW编程及应用',
+      classId: '154101446',
+      url: 'https://mooc1-api.chaoxing.com/examApi/intoexamorwork?taskrefId=58366567&workOrExam=work',
+      startTime: '2026-10-01 08:00',
+      endTime: '2026-10-15 23:59',
+      isExpired: true,
+      isReturned: true,
+    },
+  };
+  db.tasks.get(taskId).status = 'submitted';
+  const expiredRun = await saveNoticesWithEvents({ DB: db as any }, [expiredNotice]);
+  assert.strictEqual(expiredRun.reopenedTasks.length, 0, '已截止(isExpired=true)的旧打回通知绝不可重新激活任务或发通知');
+  assert.strictEqual(db.tasks.get(taskId).status, 'submitted');
+
+  db.tasks.get(taskId).course_id = '266874983';
+  const trackedByCourse = await hasTrackedHomeworkForCourse({ DB: db as any }, '266874983', '154101446');
+  assert.strictEqual(trackedByCourse, true, '已存在 submitted 作业的课程应被视为已跟踪，不再重复入队红点占位任务');
+  console.log(' ✅ [Test 5/6 PASS] 已截止作业通知防刷屏拦截与课程红点去重验证通过');
+
+  // Test 6: 空壳短题干主观题前置守卫（拦截无正文/无附件/无讲义的空壳题干，放行含讲义或缓存附件的题目）
+  assert.strictEqual(
+    isEmptyShellSubjectiveQuestion({ id: '1', type: 'essay', typeName: '简答题', title: '1. （100.0分）\n[附件: 实验1.doc (https://p.ananas.chaoxing.com/a.doc)]' }, ''),
+    true,
+    '仅含题号且未缓存附件正文的空壳主观题应被前置拦截'
+  );
+  assert.strictEqual(
+    isEmptyShellSubjectiveQuestion(
+      {
+        id: '1',
+        type: 'essay',
+        typeName: '简答题',
+        title: '1. （100.0分）\n[附件: 实验1.doc (https://p.ananas.chaoxing.com/a.doc | 本地已缓存: /tmp/att_1.doc | 附件摘要: 顺序表的基本操作实验要求实现插入与删除算法)]',
+      },
+      ''
+    ),
+    false,
+    '已预下载缓存附件摘要的题目必须放行进入 Pro 求解'
+  );
+  console.log(' ✅ [Test 6/7 PASS] 空壳主观题前置守卫与附件摘要放行测试通过');
+
+  // Test 7: shim /api/tasks/sync 覆盖 payload 时必须保留打回通知去重清单，防止同一旧打回通知被反复重新激活并重复推送
+  const merged = JSON.parse(
+    mergeSyncedTaskPayload(
+      JSON.stringify({ returnedNoticeIds: ['N1', 'N2'], lastReturnedNoticeIdCode: 'N2', url: 'u' }),
+      { workId: '58366567', status: 'submitted' }
+    )
+  );
+  assert.deepStrictEqual(merged.returnedNoticeIds, ['N1', 'N2'], 'sync 覆盖 payload 后 returnedNoticeIds 必须保留');
+  assert.strictEqual(merged.lastReturnedNoticeIdCode, 'N2');
+  assert.strictEqual(merged.status, 'submitted', '同步上来的新字段仍应生效');
+  const mergedFresh = JSON.parse(mergeSyncedTaskPayload(null, { workId: '1' }));
+  assert.strictEqual(mergedFresh.returnedNoticeIds, undefined);
+  assert.doesNotThrow(() => mergeSyncedTaskPayload('not-json{', { a: 1 }));
+  console.log(' ✅ [Test 7/7 PASS] tasks/sync 合并 payload 保留打回通知去重清单');
+
+  console.log('\n🎉 全部 7 项打回重做、防刷屏与测验守卫测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

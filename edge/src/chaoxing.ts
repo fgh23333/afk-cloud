@@ -439,6 +439,7 @@ export interface ChaoxingNoticeItem {
     url: string;
     startTime: string;
     endTime: string;
+    isExpired?: boolean;
     isReturned?: boolean;
   };
 }
@@ -687,6 +688,7 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
                 url: targetUrl,
                 startTime: startTime || '近期',
                 endTime: endTime || '无截止时间',
+                isExpired,
                 ...(isReturned ? { isReturned: true } : {}),
               };
             }
