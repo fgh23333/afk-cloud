@@ -25,6 +25,7 @@ import {
   listDiscussions,
   logExecution,
   lookupQuestionCache,
+  mergeSyncedTaskPayload,
   nowUtc8,
   resolveCanonicalPendingTaskId,
   saveCachedSession,
@@ -254,7 +255,11 @@ export default {
             ).all<{ task_id: string }>();
 
             for (const row of pending.results || []) {
-              await dispatchSingleTask(env, row.task_id, { force: false, suppressQueueLog: true });
+              await dispatchSingleTask(env, row.task_id, {
+                force: false,
+                suppressQueueLog: true,
+                suppressDispatchNotify: true,
+              });
             }
           } catch (e: any) {
             console.warn(`[scheduled 自动派发异常] ${e?.message || e}`);
@@ -1009,6 +1014,11 @@ async function handleEdgeFetch(
           const resultSummary = t.resultSummary || null;
 
           const allowReopen = t.reopened === true ? 1 : 0;
+          const prevRow = await env.DB.prepare('SELECT payload_json FROM pending_tasks WHERE task_id = ?')
+            .bind(tid)
+            .first<{ payload_json?: string }>()
+            .catch(() => null);
+          const mergedPayloadJson = mergeSyncedTaskPayload(prevRow?.payload_json, t);
           await env.DB.prepare(
             `INSERT INTO pending_tasks 
              (task_id, platform, course_id, class_id, course_name, title, status, compute_tier, deadline, result_summary, payload_json, updated_at, created_at)
@@ -1032,7 +1042,7 @@ async function handleEdgeFetch(
               t.computeTier || 'tier1-cloud-run',
               t.deadline || '',
               resultSummary,
-              JSON.stringify(t),
+              mergedPayloadJson,
               now,
               now,
               allowReopen
@@ -1417,7 +1427,7 @@ async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false
 async function dispatchSingleTask(
   env: ExtendedNotifyEnv,
   taskId: string,
-  options?: { force?: boolean; suppressQueueLog?: boolean }
+  options?: { force?: boolean; suppressQueueLog?: boolean; suppressDispatchNotify?: boolean }
 ): Promise<{ taskId: string; success: boolean; status: string; reason?: string }> {
   if (!env.DB) {
     return { taskId, success: false, status: 'error', reason: 'D1 数据库未连接' };
@@ -1444,7 +1454,14 @@ async function dispatchSingleTask(
   }
 
   if (!taskUrl) {
-    const rawWorkId = task.task_id.replace(/^chaoxing-(?:notice-)?work-/, '').split('-')[0];
+    const noticeMatch = String(task.task_id || '').match(/^chaoxing-notice-(?:work|exam)-(\d+)-(\d+)/);
+    const hwMatch = String(task.task_id || '').match(/^chaoxing-(?:work|hw)-(\d+)(?:-(\d+))?/);
+    let rawWorkId = '';
+    if (noticeMatch) {
+      rawWorkId = noticeMatch[1];
+    } else if (hwMatch) {
+      rawWorkId = hwMatch[1] !== String(task.course_id || '') ? hwMatch[1] : '';
+    }
     taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${task.course_id}&classId=${task.class_id}&cpi=&workId=${rawWorkId}`;
   }
 
@@ -1546,11 +1563,13 @@ async function dispatchSingleTask(
       `【主动派发给 agy】课程《${task.course_name}》- ${task.title}`
     );
 
-    await sendNotification(
-      'afk-cloud 任务主动派发 🚀',
-      `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
-      env
-    );
+    if (!options?.suppressDispatchNotify) {
+      await sendNotification(
+        'afk-cloud 任务主动派发 🚀',
+        `课程：《${task.course_name}》\n作业：《${task.title}》\n状态：已安全派发至云端 agy / shim 深度推理求解。`,
+        env
+      );
+    }
   } else if (!options?.suppressQueueLog) {
     await logExecution(
       env,

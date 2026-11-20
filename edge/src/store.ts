@@ -221,6 +221,31 @@ export interface ReopenedHomeworkInfo {
   reason: string;
 }
 
+/**
+ * 合并 shim 同步上来的任务 payload 与 D1 中已有 payload：
+ * 必须保留「打回通知已处理清单」(returnedNoticeIds / lastReturnedNoticeIdCode)，
+ * 否则每次 /api/tasks/sync 覆盖 payload_json 都会抹掉去重记录，导致同一条旧打回通知被反复重新激活并重复推送。
+ */
+export function mergeSyncedTaskPayload(existingPayloadJson: string | null | undefined, incoming: unknown): string {
+  let prev: Record<string, any> = {};
+  if (existingPayloadJson) {
+    try {
+      prev = JSON.parse(existingPayloadJson) || {};
+    } catch {
+      prev = {};
+    }
+  }
+  const next: Record<string, any> = incoming && typeof incoming === 'object' ? { ...(incoming as any) } : {};
+  const ids = new Set<string>([
+    ...(Array.isArray(prev.returnedNoticeIds) ? prev.returnedNoticeIds.map(String) : []),
+    ...(Array.isArray(next.returnedNoticeIds) ? next.returnedNoticeIds.map(String) : []),
+  ]);
+  if (ids.size > 0) next.returnedNoticeIds = Array.from(ids);
+  const lastId = next.lastReturnedNoticeIdCode || prev.lastReturnedNoticeIdCode;
+  if (lastId) next.lastReturnedNoticeIdCode = lastId;
+  return JSON.stringify(next);
+}
+
 export async function upsertPendingTaskWithOutcome(
   env: EdgeEnv,
   task: {
@@ -254,6 +279,22 @@ export async function upsertPendingTaskWithOutcome(
     const existing = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
       .bind(task.taskId)
       .first<{ status: string; payload_json?: string }>();
+
+    // 同步补齐原本缺失的 course_id / class_id / course_name / title / deadline（例如 SolverAgent.enqueue 预先创建的空课程行）
+    if (existing) {
+      await env.DB.prepare(
+        `UPDATE pending_tasks
+         SET course_id = COALESCE(NULLIF(course_id, ''), ?),
+             class_id = COALESCE(NULLIF(class_id, ''), ?),
+             course_name = COALESCE(NULLIF(course_name, ''), ?),
+             title = COALESCE(NULLIF(title, ''), ?),
+             deadline = COALESCE(NULLIF(deadline, ''), ?)
+         WHERE task_id = ?`
+      )
+        .bind(task.courseId || '', task.classId || '', task.courseName || '', task.title || '', task.deadline || '', task.taskId)
+        .run()
+        .catch(() => {});
+    }
 
     if (
       existing &&
@@ -541,6 +582,7 @@ export async function saveNotices(
       url: string;
       startTime: string;
       endTime: string;
+      isExpired?: boolean;
       isReturned?: boolean;
     };
   }>
@@ -580,6 +622,7 @@ export async function saveNoticesWithEvents(
       url: string;
       startTime: string;
       endTime: string;
+      isExpired?: boolean;
       isReturned?: boolean;
     };
   }>
@@ -616,8 +659,8 @@ export async function saveNoticesWithEvents(
         .run();
       savedCount++;
 
-      // 如果通知内包含作业，联动写入待办作业队列 pending_tasks（含打回重做重新激活）
-      if (n.workInfo && n.workInfo.courseId && n.workInfo.classId) {
+      // 如果通知内包含未截止作业，联动写入待办作业队列 pending_tasks（含打回重做重新激活；已截止历史作业/旧打回通知直接跳过以防刷屏）
+      if (n.workInfo && n.workInfo.courseId && n.workInfo.classId && !n.workInfo.isExpired) {
         const isReturned =
           Boolean(n.workInfo.isReturned) ||
           n.title.includes('打回') ||
@@ -786,15 +829,21 @@ export interface DiscussionRecord {
 /**
  * 检查 D1 pending_tasks 中该课程是否已有已知作业记录（用于避免对已暂存/已提交课程重复入队占位任务）
  */
-export async function hasTrackedHomeworkForCourse(env: EdgeEnv, courseId: string): Promise<boolean> {
+export async function hasTrackedHomeworkForCourse(
+  env: EdgeEnv,
+  courseId: string,
+  classId?: string
+): Promise<boolean> {
   if (!env.DB || !courseId) return false;
   try {
+    const placeholderId = `chaoxing-hw-${courseId}-${classId || 'default'}`;
     const row = await env.DB.prepare(
       `SELECT task_id FROM pending_tasks
-       WHERE course_id = ? AND status IN ('pending', 'dispatched', 'processing', 'draft_saved', 'awaiting_approval')
+       WHERE (course_id = ? AND status IN ('pending', 'dispatched', 'processing', 'draft_saved', 'awaiting_approval', 'submitted'))
+          OR task_id = ?
        LIMIT 1`
     )
-      .bind(courseId)
+      .bind(courseId, placeholderId)
       .first<{ task_id: string }>();
     return Boolean(row);
   } catch {

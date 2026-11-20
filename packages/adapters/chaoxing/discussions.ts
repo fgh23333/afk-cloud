@@ -292,6 +292,21 @@ export async function solvePendingDiscussions(
             console.log(green(`  🚀 [auto-submit] 已通过 Edge 自动发布至学习通讨论区`));
           } else {
             console.log(yellow(`  ⚠️ [auto-submit] Edge 发布失败: ${pubRes.msg || '未知错误'}`));
+            if (detail.replyParams) {
+              const postRes = await postTopicReply(
+                detail.replyParams,
+                solved.reply,
+                cookies.cookieStr,
+                detail.detailUrl
+              );
+              if (postRes.success) {
+                summary.submitted++;
+                await syncDiscussionStatusToEdge(item.discussionId, 'replied_externally');
+                console.log(green(`  🚀 [auto-submit] 已通过本地直连回退发布至学习通讨论区`));
+              } else {
+                console.log(yellow(`  ⚠️ [auto-submit] 本地直连回退发布失败: ${postRes.msg}`));
+              }
+            }
           }
         } else if (detail.replyParams) {
           const postRes = await postTopicReply(detail.replyParams, solved.reply, cookies.cookieStr, detail.detailUrl);

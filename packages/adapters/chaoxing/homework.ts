@@ -65,6 +65,73 @@ export async function downloadChaoxingQuestionImage(
 }
 
 /**
+ * 预下载超星题干附件（.doc/.docx/.pdf/.txt/.md 等）至 agy 沙箱可读目录并尝试提取可读文本摘要
+ */
+export async function downloadChaoxingQuestionAttachment(
+  attUrl: string,
+  label: string,
+  courseCookie: string,
+  workId: string
+): Promise<{ localPath: string; extractedText?: string } | null> {
+  if (!attUrl || process.env.NODE_ENV === 'test') {
+    return null;
+  }
+  const resolvedUrl = attUrl.startsWith('//')
+    ? `https:${attUrl}`
+    : attUrl.startsWith('/')
+      ? `https://mooc1-1.chaoxing.com${attUrl}`
+      : attUrl;
+  if (!/^https?:\/\//i.test(resolvedUrl)) {
+    return null;
+  }
+  try {
+    const safeWorkDir = String(workId || 'common').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const assetDir = path.join(resolveAgyWorkdir(), 'homework_assets', safeWorkDir);
+    fs.mkdirSync(assetDir, { recursive: true });
+    const extSource = `${label || ''} ${new URL(resolvedUrl).pathname}`;
+    const extMatch = extSource.match(/\.(txt|md|csv|json|html?|docx?|pdf|pptx?|xlsx?|c|cpp|py|java)$/i);
+    const ext = extMatch ? extMatch[0].toLowerCase() : '.bin';
+    const hash = crypto.createHash('sha1').update(resolvedUrl).digest('hex').slice(0, 12);
+    const localPath = path.join(assetDir, `att_${hash}${ext}`);
+
+    if (!fs.existsSync(localPath) || fs.statSync(localPath).size === 0) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(resolvedUrl, {
+          headers: {
+            Cookie: courseCookie,
+            Referer: CHAOXING_REFERER,
+            'User-Agent': BROWSER_UA,
+          },
+          signal: controller.signal,
+        });
+        if (!res.ok) return null;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length === 0 || buf.length > MAX_QUESTION_IMAGE_BYTES) return null;
+        fs.writeFileSync(localPath, buf);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    let extractedText = '';
+    const buf = fs.readFileSync(localPath);
+    if (['.txt', '.md', '.csv', '.json', '.html', '.htm', '.c', '.cpp', '.py', '.java'].includes(ext)) {
+      extractedText = buf.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 1500);
+    } else if (['.doc', '.docx', '.pdf'].includes(ext)) {
+      const str = buf.toString('utf8');
+      const chunks = str.match(/[\u4e00-\u9fa5a-zA-Z0-9，。！？；：“”（）\-_.,:()]{4,}/g) || [];
+      const readable = chunks.filter((c) => /[\u4e00-\u9fa5]/.test(c)).join(' ');
+      extractedText = readable.replace(/\s+/g, ' ').trim().slice(0, 1500);
+    }
+    return { localPath, ...(extractedText.length >= 10 ? { extractedText } : {}) };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 获取单门课程的全部作业列表（含待做、重新编辑、已交状态）
  */
 export async function getCourseHomeworkList(
@@ -340,7 +407,7 @@ export async function getHomeworkDetail(
     });
   });
 
-  // 预下载超星题干图片至本地，附上本地路径供多模态读取（规避 p.ananas.chaoxing.com 403 防盗链）
+  // 预下载超星题干图片与附件至本地，附上本地路径与提取文本供多模态/Pro读取（规避 p.ananas.chaoxing.com 403 防盗链与空壳附件题）
   for (const q of questions) {
     const imgMatches = Array.from(q.title.matchAll(/\[图片:\s*(https?:\/\/[^\]\s]+)\]/g));
     for (const m of imgMatches) {
@@ -348,6 +415,19 @@ export async function getHomeworkDetail(
       const localPath = await downloadChaoxingQuestionImage(imgUrl, session.courseCookie, homework.workId);
       if (localPath) {
         q.title = q.title.replace(`[图片: ${imgUrl}]`, `[图片: ${imgUrl} (本地已缓存: ${localPath})]`);
+      }
+    }
+    const attMatches = Array.from(q.title.matchAll(/\[附件:\s*([^\](]+?)\s*\(([^)]+)\)\]/g));
+    for (const m of attMatches) {
+      const label = (m[1] || '文件').trim();
+      const attUrl = (m[2] || '').trim();
+      const dl = await downloadChaoxingQuestionAttachment(attUrl, label, session.courseCookie, homework.workId);
+      if (dl) {
+        const snippet = dl.extractedText ? ` | 附件摘要: ${dl.extractedText}` : '';
+        q.title = q.title.replace(
+          m[0],
+          `[附件: ${label} (${attUrl} | 本地已缓存: ${dl.localPath}${snippet})]`
+        );
       }
     }
   }

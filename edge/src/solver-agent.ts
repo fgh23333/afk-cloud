@@ -202,6 +202,8 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     platform: string;
     taskUrl: string;
     deadline?: string;
+    courseId?: string;
+    classId?: string;
     courseName?: string;
     title?: string;
     force?: boolean;
@@ -304,12 +306,22 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       );
     }
 
+    let parsedCourseId = task.courseId || '';
+    let parsedClassId = task.classId || '';
+    try {
+      const u = new URL(task.taskUrl);
+      if (!parsedCourseId) parsedCourseId = u.searchParams.get('courseId') || '';
+      if (!parsedClassId) parsedClassId = u.searchParams.get('classId') || '';
+    } catch {
+      // ignore URL parse error
+    }
+
     // 同步到 D1 待办表供前端看板高频读 (初始记为 pending)
     await upsertPendingTask(this.env, {
       taskId: task.jobId,
       platform: task.platform || 'chaoxing',
-      courseId: '',
-      classId: '',
+      courseId: parsedCourseId,
+      classId: parsedClassId,
       courseName: task.courseName || '',
       title: task.title || task.jobId,
       status: 'pending',
@@ -439,6 +451,15 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
 
     let nextStatus = payload.phase === 'draft_saved' ? 'awaiting_approval' : payload.phase;
 
+    const prevCur = this.ctx.storage.sql.exec(
+      'SELECT status, summary FROM tasks WHERE job_id = ?',
+      payload.jobId
+    );
+    const prevRows = [...prevCur] as any[];
+    const prevStatus = prevRows.length > 0 ? String(prevRows[0].status || '') : '';
+    const prevSummary = prevRows.length > 0 ? String(prevRows[0].summary || '') : '';
+    const isDuplicateCallback = prevStatus === nextStatus && prevSummary === summary;
+
     this.ctx.storage.sql.exec(
       'UPDATE tasks SET status = ?, qa_json = ?, summary = ?, updated_at = ? WHERE job_id = ?',
       nextStatus,
@@ -503,11 +524,13 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         }
       }
       if (!autoSubmitted) {
-        await sendNotification(
-          'afk-cloud 作业安全草稿已暂存',
-          `任务：${payload.jobId}\n状态：已保存草稿 (包含 ${payload.qa?.length || 0} 题)\n详情：${summary}\n👉 请登录看板核验并点击【审批提交】。`,
-          this.env
-        );
+        if (!isDuplicateCallback) {
+          await sendNotification(
+            'afk-cloud 作业安全草稿已暂存',
+            `任务：${payload.jobId}\n状态：已保存草稿 (包含 ${payload.qa?.length || 0} 题)\n详情：${summary}\n👉 请登录看板核验并点击【审批提交】。`,
+            this.env
+          );
+        }
         // 草稿暂存完成，释放当前执行槽位，出队调度下一个 pending 作业
         if (this.state.activeJobId === payload.jobId) {
           this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
@@ -515,22 +538,26 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         await this.tryDispatchNext();
       }
     } else if (payload.phase === 'submitted') {
-      await sendNotification(
-        'afk-cloud 作业正式提交成功',
-        `任务：${payload.jobId}\n状态：已正式提交\n详情：${summary}`,
-        this.env
-      );
+      if (!isDuplicateCallback) {
+        await sendNotification(
+          'afk-cloud 作业正式提交成功',
+          `任务：${payload.jobId}\n状态：已正式提交\n详情：${summary}`,
+          this.env
+        );
+      }
       // 提交完成，释放槽位并出队下一个
       if (this.state.activeJobId === payload.jobId) {
         this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
       }
       await this.tryDispatchNext();
     } else if (payload.phase === 'awaiting_approval') {
-      await sendNotification(
-        '⚠️ 作业需人工上传/确认',
-        `任务：${payload.jobId}\n详情：${summary}`,
-        this.env
-      );
+      if (!isDuplicateCallback) {
+        await sendNotification(
+          '⚠️ 作业需人工上传/确认',
+          `任务：${payload.jobId}\n详情：${summary}`,
+          this.env
+        );
+      }
       if (this.state.activeJobId === payload.jobId) {
         this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
       }
@@ -541,11 +568,13 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
       }
       await this.tryDispatchNext();
     } else if (payload.phase === 'failed') {
-      await sendNotification(
-        'afk-cloud 作业作答异常报警',
-        `任务：${payload.jobId}\n状态：执行失败\n原因：${payload.error || summary}`,
-        this.env
-      );
+      if (!isDuplicateCallback) {
+        await sendNotification(
+          'afk-cloud 作业作答异常报警',
+          `任务：${payload.jobId}\n状态：执行失败\n原因：${payload.error || summary}`,
+          this.env
+        );
+      }
       // 失败熔断，释放槽位并调度下一个
       if (this.state.activeJobId === payload.jobId) {
         this.setState({ ...this.state, activeJobId: null, activeJobStartedAt: null });
