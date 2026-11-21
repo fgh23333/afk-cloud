@@ -37,6 +37,58 @@ export function escalateRateLimitBackoff(currentLevel = 0): { level: number; min
   };
 }
 
+export interface Utc8TimeWindow {
+  startMinutes: number;
+  endMinutes: number;
+}
+
+export const DEFAULT_SIGN_LISTEN_WINDOWS = '08:15-11:40,13:00-16:20,18:00-19:35';
+
+/**
+ * 解析 UTC+8 签到监听时段列表（格式：HH:MM-HH:MM，逗号分隔；'*' 或 'all' 返回空数组表示不限时）
+ */
+export function parseSignListenWindows(raw?: string): Utc8TimeWindow[] {
+  const source = raw === undefined || raw.trim() === '' ? DEFAULT_SIGN_LISTEN_WINDOWS : raw.trim();
+  if (source === '*' || source.toLowerCase() === 'all') {
+    return [];
+  }
+  const windows: Utc8TimeWindow[] = [];
+  for (const part of source.split(/[,;]+/)) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(/^(\d{1,2}):(\d{2})\s*[-~–]\s*(\d{1,2}):(\d{2})$/);
+    if (!m) continue;
+    const sh = Number(m[1]);
+    const sm = Number(m[2]);
+    const eh = Number(m[3]);
+    const em = Number(m[4]);
+    if (sh < 0 || sh > 23 || sm < 0 || sm > 59 || eh < 0 || eh > 23 || em < 0 || em > 59) continue;
+    const startMinutes = sh * 60 + sm;
+    const endMinutes = eh * 60 + em;
+    if (endMinutes >= startMinutes) {
+      windows.push({ startMinutes, endMinutes });
+    }
+  }
+  return windows;
+}
+
+/**
+ * 判断指定毫秒时间戳在 UTC+8 下是否处于允许的签到监听时段内
+ */
+export function isWithinSignListenWindows(nowMs: number, rawWindows?: string): boolean {
+  const trimmed = rawWindows?.trim();
+  if (trimmed === '*' || trimmed?.toLowerCase() === 'all') {
+    return true;
+  }
+  const windows = parseSignListenWindows(rawWindows);
+  if (windows.length === 0) {
+    return true;
+  }
+  const utc8 = new Date(nowMs + 8 * 3600 * 1000);
+  const minuteOfDay = utc8.getUTCHours() * 60 + utc8.getUTCMinutes();
+  return windows.some((w) => minuteOfDay >= w.startMinutes && minuteOfDay <= w.endMinutes);
+}
+
 export interface SignState {
   lastCheckedAt?: string;
   lastSignAt?: string;
@@ -55,6 +107,7 @@ export interface SignState {
   lastScanErrorLoggedMs?: number;
   blockedCooldownUntilMs?: number;
   homeworkCursor?: number;
+  nextMobileCheckAtMs?: number;
   seenClassActivityIds?: string[];
   recentFailedSignMap?: Record<string, number>;
 }
@@ -67,6 +120,8 @@ export interface InspectionOptions {
   nowMs?: number;
   state?: SignState;
   onStateUpdate?: (nextState: SignState) => void;
+  skipSleep?: boolean;
+  randomFn?: () => number;
 }
 
 export interface InspectionSummary {
@@ -88,6 +143,8 @@ export interface InspectionSummary {
   rateLimited: boolean;
   cooldownActive: boolean;
   blockedCooldownActive?: boolean;
+  outsideSignWindow?: boolean;
+  mobileScanThrottled?: boolean;
   rateLimitBackoffLevel?: number;
   canaryProbe?: boolean;
   scanErrors?: number;
@@ -125,6 +182,8 @@ export async function runChaoxingInspectionCycle(
     rateLimited: false,
     cooldownActive: false,
     blockedCooldownActive: false,
+    outsideSignWindow: false,
+    mobileScanThrottled: false,
   };
 
   if (!phone || !password) {
@@ -189,22 +248,36 @@ export async function runChaoxingInspectionCycle(
   let rateLimitUntilMs = prevState.rateLimitUntilMs || 0;
   let rateLimitNotifiedAtMs = prevState.rateLimitNotifiedAtMs || 0;
   let rateLimitBackoffLevel = prevState.rateLimitBackoffLevel ?? (rateLimitUntilMs > 0 ? 1 : 0);
-  let lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
+  const lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
   let blockedCooldownUntilMs = prevState.blockedCooldownUntilMs || 0;
   let homeworkCursor = prevState.homeworkCursor || 0;
+  let nextMobileCheckAtMs = prevState.nextMobileCheckAtMs || 0;
+  const rand = options.randomFn ?? Math.random;
+
+  const configuredBatch = parseInt(env.MOBILE_SCAN_BATCH_SIZE || '', 10);
+  const defaultBatchSize =
+    Number.isFinite(configuredBatch) && configuredBatch > 0 ? Math.min(20, configuredBatch) : 4;
+  const intervalSecRaw = parseInt(env.MOBILE_SCAN_INTERVAL_SEC || '', 10);
+  const mobileIntervalSec = Number.isFinite(intervalSecRaw) && intervalSecRaw >= 0 ? intervalSecRaw : 90;
+  const jitterSecRaw = parseInt(env.MOBILE_SCAN_JITTER_SEC || '', 10);
+  const mobileJitterSec = Number.isFinite(jitterSecRaw) && jitterSecRaw >= 0 ? jitterSecRaw : 60;
 
   const utc8 = new Date(nowMs + 8 * 3600 * 1000);
   const hhmm = utc8.getUTCHours() * 100 + utc8.getUTCMinutes();
   const isQuietNight = hhmm < 715 || hhmm >= 2230; // 22:30 - 07:14 UTC+8
 
+  const inSignWindow = isWithinSignListenWindows(nowMs, env.SIGN_LISTEN_WINDOWS);
+  const outsideSignWindow = !force && !inSignWindow;
   let cooldownActive = !bypassCooldown && rateLimitUntilMs > nowMs;
   let blockedCooldownActive = !bypassCooldown && blockedCooldownUntilMs > nowMs;
-  let shouldScanMobile = !cooldownActive && !blockedCooldownActive;
-  if (shouldScanMobile && isQuietNight && !force) {
-    if (nowMs - lastNightMobileCheckMs < 15 * 60 * 1000) {
-      shouldScanMobile = false;
-    }
-  }
+  const mobileScanThrottled =
+    !force &&
+    !bypassCooldown &&
+    !cooldownActive &&
+    !blockedCooldownActive &&
+    !outsideSignWindow &&
+    nextMobileCheckAtMs > nowMs;
+  const shouldScanMobile = !cooldownActive && !blockedCooldownActive && !outsideSignWindow && !mobileScanThrottled;
 
   const isBlockedProbe = shouldScanMobile && !bypassCooldown && blockedCooldownUntilMs > 0;
   const isCanaryProbe = shouldScanMobile && !bypassCooldown && rateLimitBackoffLevel > 0;
@@ -222,23 +295,36 @@ export async function runChaoxingInspectionCycle(
     const customLocations = resolveSignLocations(env);
     const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
     const batchSize =
-      isCanaryProbe || isBlockedProbe ? 1 : force ? targetCourses.length : Math.min(6, targetCourses.length);
+      isCanaryProbe || isBlockedProbe
+        ? 1
+        : force
+          ? targetCourses.length
+          : Math.min(defaultBatchSize, targetCourses.length);
     const startIdx =
       isCanaryProbe || isBlockedProbe
         ? roundRobinCursor % targetCourses.length
         : force
           ? 0
           : roundRobinCursor % targetCourses.length;
-    if (isQuietNight) {
-      lastNightMobileCheckMs = nowMs;
+
+    if (mobileIntervalSec > 0 || mobileJitterSec > 0) {
+      const delaySec = mobileIntervalSec + Math.floor(rand() * (mobileJitterSec + 1));
+      nextMobileCheckAtMs = delaySec > 0 ? nowMs + delaySec * 1000 : 0;
+    } else {
+      nextMobileCheckAtMs = 0;
+    }
+
+    if (!options.skipSleep && !force && mobileJitterSec > 0) {
+      await sleep(500 + Math.floor(rand() * 2000));
     }
 
     for (let step = 0; step < batchSize; step++) {
       const idx = (startIdx + step) % targetCourses.length;
       const course = targetCourses[idx];
 
-      if (step > 0) {
-        await sleep(180);
+      if (step > 0 && !options.skipSleep) {
+        const gapMs = mobileJitterSec > 0 ? 350 + Math.floor(rand() * 550) : 180;
+        await sleep(gapMs);
       }
 
       try {
@@ -604,6 +690,7 @@ export async function runChaoxingInspectionCycle(
       lastCourseSyncMs,
       lastScanErrorLoggedMs,
       blockedCooldownUntilMs,
+      nextMobileCheckAtMs,
     });
   }
 
@@ -613,10 +700,14 @@ export async function runChaoxingInspectionCycle(
     `讨论贴 ${discussionsFound} 项(新增待拟稿 ${newDiscussionsFound})`,
     `通知 ${noticesFound} 条`,
   ];
-  if (cooldownActive) {
+  if (outsideSignWindow) {
+    msgParts.push('非上课监听时段(仅巡检作业/讨论/通知)');
+  } else if (cooldownActive) {
     msgParts.push(`移动端处于频控退避冷却中(L${rateLimitBackoffLevel})`);
   } else if (blockedCooldownActive) {
     msgParts.push('移动端 IP 封禁冷却中(15m 自动试探)');
+  } else if (mobileScanThrottled) {
+    msgParts.push('移动端随机间隔等待中');
   } else if (isCanaryProbe && !hitRateLimit && !scanException) {
     msgParts.push('移动端 Canary 试探成功并恢复轮转');
   }
@@ -640,6 +731,8 @@ export async function runChaoxingInspectionCycle(
     rateLimited: hitRateLimit,
     cooldownActive,
     blockedCooldownActive,
+    outsideSignWindow,
+    mobileScanThrottled,
     rateLimitBackoffLevel,
     canaryProbe: isCanaryProbe,
     scanErrors: scanErrors.length,

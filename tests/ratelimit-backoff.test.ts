@@ -94,6 +94,10 @@ async function runTests() {
     DB: createMockDb(logs),
     CHAOXING_PHONE: '13800000000',
     CHAOXING_PASSWORD: 'pwd',
+    SIGN_LISTEN_WINDOWS: '*',
+    MOBILE_SCAN_BATCH_SIZE: '6',
+    MOBILE_SCAN_INTERVAL_SEC: '0',
+    MOBILE_SCAN_JITTER_SEC: '0',
   };
 
   let mobileRequestedCourseIds: string[] = [];
