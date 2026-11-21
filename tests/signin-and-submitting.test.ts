@@ -6,6 +6,7 @@ import {
   classifyPreSignHtml,
   extractSignHistoryCandidates,
   isSignSubmissionSuccess,
+  scanCourseActivitiesShared,
 } from '../packages/adapters/chaoxing/activity-protocol';
 import { performSign } from '../edge/src/chaoxing';
 import { getDashboardData, renderDashboardHtml } from '../edge/src/dashboard';
@@ -624,7 +625,41 @@ async function runTests() {
     console.log(' ✅ [Test 5/5 PASS] 无 shim 审批保护 Fail-Closed 契约通过');
   }
 
-  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 5 项测试 100% 通过！\n');
+  // Test 6: 活动列表接口被封禁/异常时必须返回明确错误（不能伪装成“没有签到”），正常返回要带 rawCount
+  {
+    const origFetch = globalThis.fetch;
+    const course = { courseId: '1', classId: '2', courseName: 'T' };
+    try {
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ result: 0, errorMsg: '当前ip [1.2.3.4] 已被封禁，请勿使用vpn、代理等网络' }), {
+          status: 200,
+        })) as typeof fetch;
+      const blockedRes = await scanCourseActivitiesShared(course, 'c=1', '9', 'UA');
+      assert.strictEqual(blockedRes.activities.length, 0);
+      assert.strictEqual(blockedRes.rateLimited, false, 'IP 封禁不应触发 15~120 分钟退避，否则会长时间失明');
+      assert.strictEqual(blockedRes.blocked, true, 'IP 封禁必须被显式标记');
+      assert.ok(String(blockedRes.errorMsg).includes('封禁'), `必须返回错误原因，实际: ${blockedRes.errorMsg}`);
+
+      globalThis.fetch = (async () => new Response('<html>oops</html>', { status: 200 })) as typeof fetch;
+      const garbageRes = await scanCourseActivitiesShared(course, 'c=1', '9', 'UA');
+      assert.ok(garbageRes.errorMsg, '返回非 JSON/异常结构时必须带错误信息而不是静默为空');
+
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({ result: 1, activeList: [{ id: 1001, status: 1, activeType: 2, nameOne: '签到' }] }),
+          { status: 200 }
+        )) as typeof fetch;
+      const okRes = await scanCourseActivitiesShared(course, 'c=1', '9', 'UA');
+      assert.strictEqual(okRes.rawCount, 1);
+      assert.strictEqual(okRes.activities.length, 1);
+      assert.strictEqual(okRes.errorMsg, undefined);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    console.log(' ✅ [Test 6/6 PASS] 活动列表被封禁/异常时显式报错而非静默漏签');
+  }
+
+  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 6 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

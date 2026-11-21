@@ -36,6 +36,15 @@ export interface ScanActivitiesResult {
   classActivities: ParsedClassActivity[];
   rateLimited: boolean;
   errorMsg?: string;
+  /** 接口原始返回的活动条数（用于区分“真的没有活动”与“接口被拦截/返回空”） */
+  rawCount?: number;
+  /** 超星返回 IP 被封禁/代理拦截等非频控类拒绝（不会触发退避冷却，但必须对外告警） */
+  blocked?: boolean;
+}
+
+export function isChaoxingBlockedMessage(msg?: string): boolean {
+  if (!msg) return false;
+  return /已被封禁|API_ACCESS_BLOCKED|请勿使用vpn|请勿使用.*代理/i.test(String(msg));
 }
 
 export interface ParsedSignHistoryCandidate {
@@ -421,6 +430,7 @@ export async function scanCourseActivitiesShared(
   mobileUa: string
 ): Promise<ScanActivitiesResult> {
   // 1. 首选通道：taskactivelist
+  let primaryError: string | undefined;
   try {
     const url = `https://mobilelearn.chaoxing.com/ppt/activeAPI/taskactivelist?courseId=${course.courseId}&classId=${course.classId}&uid=${uid}`;
     const res = await fetch(url, {
@@ -433,7 +443,7 @@ export async function scanCourseActivitiesShared(
 
     if (json?.result === 1 && Array.isArray(json?.activeList)) {
       const classified = classifyActiveList(json.activeList, course);
-      return { ...classified, rateLimited: false };
+      return { ...classified, rateLimited: false, rawCount: json.activeList.length };
     }
 
     const errMsg = json?.errorMsg || json?.msg ? String(json.errorMsg || json.msg) : undefined;
@@ -445,6 +455,7 @@ export async function scanCourseActivitiesShared(
         errorMsg: errMsg || `HTTP ${res.status}`,
       };
     }
+    primaryError = errMsg || (res.ok ? 'taskactivelist 返回异常结构' : `HTTP ${res.status}`);
 
     if (errMsg) {
       console.warn(
@@ -452,6 +463,7 @@ export async function scanCourseActivitiesShared(
       );
     }
   } catch (err: any) {
+    primaryError = `taskactivelist 异常: ${err?.message || err}`;
     console.warn(`[scanCourseActivities] taskactivelist 异常: ${err?.message || err}，尝试降级通道`);
   }
 
@@ -468,7 +480,7 @@ export async function scanCourseActivitiesShared(
 
     if (json?.result === 1 && Array.isArray(json?.data?.activeList)) {
       const classified = classifyActiveList(json.data.activeList, course);
-      return { ...classified, rateLimited: false };
+      return { ...classified, rateLimited: false, rawCount: json.data.activeList.length };
     }
 
     const errMsg = json?.errorMsg || json?.msg ? String(json.errorMsg || json.msg) : undefined;
@@ -481,18 +493,23 @@ export async function scanCourseActivitiesShared(
       };
     }
 
+    // 两个通道都没拿到活动列表：必须返回明确错误，绝不能伪装成“没有签到”
+    const finalErr = errMsg || primaryError || (res.ok ? 'activelist 返回异常结构' : `HTTP ${res.status}`);
     return {
       activities: [],
       classActivities: [],
       rateLimited: false,
-      errorMsg: errMsg,
+      errorMsg: finalErr,
+      blocked: isChaoxingBlockedMessage(finalErr) || isChaoxingBlockedMessage(primaryError),
     };
   } catch (err: any) {
+    const finalErr = err?.message || String(err);
     return {
       activities: [],
       classActivities: [],
       rateLimited: false,
-      errorMsg: err?.message || String(err),
+      errorMsg: primaryError ? `${primaryError}; ${finalErr}` : finalErr,
+      blocked: isChaoxingBlockedMessage(primaryError),
     };
   }
 }

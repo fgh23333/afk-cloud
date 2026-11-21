@@ -52,6 +52,7 @@ export interface SignState {
   lastDiscussionCheckMs?: number;
   lastNightMobileCheckMs?: number;
   lastCourseSyncMs?: number;
+  lastScanErrorLoggedMs?: number;
   seenClassActivityIds?: string[];
   recentFailedSignMap?: Record<string, number>;
 }
@@ -84,6 +85,8 @@ export interface InspectionSummary {
   cooldownActive: boolean;
   rateLimitBackoffLevel?: number;
   canaryProbe?: boolean;
+  scanErrors?: number;
+  scanDiag?: Array<{ course: string; raw: number; sign: number; cls: number; error?: string; blocked?: boolean }>;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -197,6 +200,10 @@ export async function runChaoxingInspectionCycle(
   let classActivitiesFound = 0;
   let hitRateLimit = false;
   let scanException = false;
+  const scanDiag: Array<{ course: string; raw: number; sign: number; cls: number; error?: string; blocked?: boolean }> = [];
+  const scanErrors: string[] = [];
+  let scanBlocked = false;
+  let lastScanErrorLoggedMs = prevState.lastScanErrorLoggedMs || 0;
   const signsExecuted: string[] = [];
 
   if (shouldScanMobile) {
@@ -222,6 +229,18 @@ export async function runChaoxingInspectionCycle(
 
       try {
         const scanRes = await scanCourseActivitiesWithMeta(course, session);
+        scanDiag.push({
+          course: course.courseName,
+          raw: scanRes.rawCount ?? -1,
+          sign: scanRes.activities.length,
+          cls: scanRes.classActivities.length,
+          ...(scanRes.errorMsg ? { error: String(scanRes.errorMsg).slice(0, 120) } : {}),
+          ...(scanRes.blocked ? { blocked: true } : {}),
+        });
+        if (scanRes.errorMsg && !scanRes.rateLimited) {
+          scanErrors.push(`${course.courseName}: ${String(scanRes.errorMsg).slice(0, 120)}`);
+          if (scanRes.blocked) scanBlocked = true;
+        }
         if (scanRes.rateLimited) {
           hitRateLimit = true;
           cooldownActive = true;
@@ -330,6 +349,28 @@ export async function runChaoxingInspectionCycle(
       } catch (err: any) {
         scanException = true;
         console.warn(`[Inspection] 扫描课程《${course.courseName}》异常: ${err?.message || err}`);
+      }
+    }
+
+    if (scanErrors.length > 0) {
+      // 接口返回错误/被拦截绝不能被当作“没有签到”：标记异常、阻止退避复位，并限频告警（每 60 分钟一次）
+      scanException = true;
+      if (nowMs - lastScanErrorLoggedMs >= 60 * 60 * 1000) {
+        lastScanErrorLoggedMs = nowMs;
+        const failedCount = scanErrors.length;
+        const total = scanDiag.length;
+        await logExecution(
+          env,
+          'scan_error',
+          'chaoxing',
+          `签到监听异常：本轮 ${failedCount}/${total} 门课未能获取活动列表 (${scanErrors[0]})`,
+          { failedCount, total, blocked: scanBlocked, errors: scanErrors.slice(0, 5) }
+        );
+        await sendNotification(
+          scanBlocked ? '学习通签到监听被拦截 ⚠️' : '学习通签到监听异常 ⚠️',
+          `本轮 ${failedCount}/${total} 门课未能获取活动列表，可能漏签！\n示例：${scanErrors[0]}\n时间：${nowUtc8()}`,
+          env
+        );
       }
     }
 
@@ -476,6 +517,7 @@ export async function runChaoxingInspectionCycle(
       lastDiscussionCheckMs,
       lastNightMobileCheckMs,
       lastCourseSyncMs,
+      lastScanErrorLoggedMs,
     });
   }
 
@@ -509,6 +551,8 @@ export async function runChaoxingInspectionCycle(
     cooldownActive,
     rateLimitBackoffLevel,
     canaryProbe: isCanaryProbe,
+    scanErrors: scanErrors.length,
+    scanDiag,
   };
 }
 
