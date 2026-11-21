@@ -1,6 +1,5 @@
 import {
   CHAOXING_MOBILE_UA,
-  checkHomeworkPendingCourses,
   classifyPreSignHtml,
   fetchCourseSignHistoryCandidates,
   fetchNoticeList,
@@ -10,6 +9,7 @@ import {
   performSign,
   resolveSignLocations,
   scanCourseActivitiesWithMeta,
+  scanCourseHomeworksWeb,
   UserSession,
 } from './chaoxing';
 import { scanDiscussionsBatch } from './discussions';
@@ -18,12 +18,12 @@ import {
   formatUtc8FromMs,
   getCachedSession,
   getRecordedSignActivityIds,
-  hasTrackedHomeworkForCourse,
   logExecution,
   nowUtc8,
   saveCachedSession,
   saveEnrolledCourses,
   saveNoticesWithEvents,
+  upsertPendingTaskWithOutcome,
 } from './store';
 
 export const RATE_LIMIT_BACKOFF_MINUTES = [15, 30, 60, 120] as const;
@@ -53,6 +53,8 @@ export interface SignState {
   lastNightMobileCheckMs?: number;
   lastCourseSyncMs?: number;
   lastScanErrorLoggedMs?: number;
+  blockedCooldownUntilMs?: number;
+  homeworkCursor?: number;
   seenClassActivityIds?: string[];
   recentFailedSignMap?: Record<string, number>;
 }
@@ -78,11 +80,14 @@ export interface InspectionSummary {
   classActivitiesFound: number;
   homeworkFound: number;
   homeworkCoursesDetected: string[];
+  homeworkScannedCourses?: number;
   noticesFound: number;
+  newNoticesNotified?: number;
   discussionsFound: number;
   newDiscussionsFound: number;
   rateLimited: boolean;
   cooldownActive: boolean;
+  blockedCooldownActive?: boolean;
   rateLimitBackoffLevel?: number;
   canaryProbe?: boolean;
   scanErrors?: number;
@@ -112,11 +117,14 @@ export async function runChaoxingInspectionCycle(
     classActivitiesFound: 0,
     homeworkFound: 0,
     homeworkCoursesDetected: [],
+    homeworkScannedCourses: 0,
     noticesFound: 0,
+    newNoticesNotified: 0,
     discussionsFound: 0,
     newDiscussionsFound: 0,
     rateLimited: false,
     cooldownActive: false,
+    blockedCooldownActive: false,
   };
 
   if (!phone || !password) {
@@ -182,19 +190,23 @@ export async function runChaoxingInspectionCycle(
   let rateLimitNotifiedAtMs = prevState.rateLimitNotifiedAtMs || 0;
   let rateLimitBackoffLevel = prevState.rateLimitBackoffLevel ?? (rateLimitUntilMs > 0 ? 1 : 0);
   let lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
+  let blockedCooldownUntilMs = prevState.blockedCooldownUntilMs || 0;
+  let homeworkCursor = prevState.homeworkCursor || 0;
 
   const utc8 = new Date(nowMs + 8 * 3600 * 1000);
   const hhmm = utc8.getUTCHours() * 100 + utc8.getUTCMinutes();
-  const isQuietNight = hhmm >= 0 && hhmm < 715; // 00:00 - 07:14 UTC+8
+  const isQuietNight = hhmm < 715 || hhmm >= 2230; // 22:30 - 07:14 UTC+8
 
   let cooldownActive = !bypassCooldown && rateLimitUntilMs > nowMs;
-  let shouldScanMobile = !cooldownActive;
+  let blockedCooldownActive = !bypassCooldown && blockedCooldownUntilMs > nowMs;
+  let shouldScanMobile = !cooldownActive && !blockedCooldownActive;
   if (shouldScanMobile && isQuietNight && !force) {
     if (nowMs - lastNightMobileCheckMs < 15 * 60 * 1000) {
       shouldScanMobile = false;
     }
   }
 
+  const isBlockedProbe = shouldScanMobile && !bypassCooldown && blockedCooldownUntilMs > 0;
   const isCanaryProbe = shouldScanMobile && !bypassCooldown && rateLimitBackoffLevel > 0;
   let signsHandled = 0;
   let classActivitiesFound = 0;
@@ -209,12 +221,14 @@ export async function runChaoxingInspectionCycle(
   if (shouldScanMobile) {
     const customLocations = resolveSignLocations(env);
     const targetCourses = courses.length > 20 ? courses.slice(0, 20) : courses;
-    const batchSize = isCanaryProbe ? 1 : force ? targetCourses.length : Math.min(6, targetCourses.length);
-    const startIdx = isCanaryProbe
-      ? roundRobinCursor % targetCourses.length
-      : force
-        ? 0
-        : roundRobinCursor % targetCourses.length;
+    const batchSize =
+      isCanaryProbe || isBlockedProbe ? 1 : force ? targetCourses.length : Math.min(6, targetCourses.length);
+    const startIdx =
+      isCanaryProbe || isBlockedProbe
+        ? roundRobinCursor % targetCourses.length
+        : force
+          ? 0
+          : roundRobinCursor % targetCourses.length;
     if (isQuietNight) {
       lastNightMobileCheckMs = nowMs;
     }
@@ -240,6 +254,13 @@ export async function runChaoxingInspectionCycle(
         if (scanRes.errorMsg && !scanRes.rateLimited) {
           scanErrors.push(`${course.courseName}: ${String(scanRes.errorMsg).slice(0, 120)}`);
           if (scanRes.blocked) scanBlocked = true;
+        }
+        if (scanRes.blocked && !scanRes.rateLimited) {
+          scanBlocked = true;
+          blockedCooldownActive = true;
+          blockedCooldownUntilMs = nowMs + 15 * 60 * 1000;
+          roundRobinCursor = (idx + 1) % targetCourses.length;
+          break;
         }
         if (scanRes.rateLimited) {
           hitRateLimit = true;
@@ -374,7 +395,26 @@ export async function runChaoxingInspectionCycle(
       }
     }
 
-    if (!hitRateLimit && targetCourses.length > 0) {
+    if (isBlockedProbe && !hitRateLimit && !scanBlocked && !scanException) {
+      blockedCooldownUntilMs = 0;
+      blockedCooldownActive = false;
+      await logExecution(
+        env,
+        'sign_listener_recovered',
+        'chaoxing',
+        `学习通签到监听已恢复正常 (${targetCourses[startIdx]?.courseName || 'Canary'})`
+      );
+      await sendNotification(
+        '学习通签到监听已恢复 ✅',
+        `边缘探测已恢复正常，将继续自动轮转扫描课程签到活动。\n时间：${nowUtc8()}`,
+        env
+      );
+    } else if (!hitRateLimit && !scanBlocked && !scanException && blockedCooldownUntilMs > 0) {
+      blockedCooldownUntilMs = 0;
+      blockedCooldownActive = false;
+    }
+
+    if (!hitRateLimit && !scanBlocked && targetCourses.length > 0) {
       roundRobinCursor = (startIdx + batchSize) % targetCourses.length;
       if (!scanException) {
         rateLimitUntilMs = 0;
@@ -383,62 +423,79 @@ export async function runChaoxingInspectionCycle(
     }
   }
 
-  // 作业红点探测（按间隔节流，避免每分钟重复打红点接口或写入虚假占位任务）
+  // 网页端作业轮转巡检（使用 stucoursemiddle -> /work/getAllWork 替代已 404 的 workTestPendingNew）
   const hwIntervalMin = Math.max(1, parseInt(env.HOMEWORK_SCAN_INTERVAL_MINUTES || '10', 10));
   const hwIntervalMs = hwIntervalMin * 60 * 1000;
   let lastHomeworkCheckMs = prevState.lastHomeworkCheckMs || 0;
   let homeworkCount = 0;
+  let homeworkScannedCourses = 0;
   const homeworkCoursesDetected: string[] = [];
 
   if (force || options.checkHomework || nowMs - lastHomeworkCheckMs >= hwIntervalMs) {
     lastHomeworkCheckMs = nowMs;
     try {
-      const pendingCourses = await checkHomeworkPendingCourses(courses, session);
-      for (const pc of pendingCourses) {
-        homeworkCoursesDetected.push(pc.courseName);
-        const alreadyTracked = await hasTrackedHomeworkForCourse(env, pc.courseId, pc.classId);
-        if (alreadyTracked) continue;
-
-        if ((env.AFK_SHIM_URL || env.SHIM_URL) && env.SOLVER_AGENT) {
-          const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
-          const jobId = `chaoxing-hw-${pc.courseId}-${pc.classId || 'default'}`;
-          const taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${pc.courseId}&classId=${pc.classId}&cpi=${pc.cpi || ''}&workId=`;
-          const title = `《${pc.courseName}》待办作业`;
-
-          const enqueueRes: any = await (solverStub as any).enqueue({
-            jobId,
+      const hwBatchLimit = force ? Math.min(5, courses.length) : Math.min(4, courses.length);
+      const hwStart = courses.length > 0 ? homeworkCursor % courses.length : 0;
+      for (let i = 0; i < hwBatchLimit; i++) {
+        const course = courses[(hwStart + i) % courses.length];
+        const items = await scanCourseHomeworksWeb(course, session, nowMs);
+        homeworkScannedCourses++;
+        for (const hw of items) {
+          if (!hw.isPending || hw.isExpired) continue;
+          if (!homeworkCoursesDetected.includes(course.courseName)) {
+            homeworkCoursesDetected.push(course.courseName);
+          }
+          const outcome = await upsertPendingTaskWithOutcome(env, {
+            taskId: `chaoxing-notice-work-${hw.workId}-${course.classId}`,
             platform: 'chaoxing',
-            taskUrl,
-            courseName: pc.courseName,
-            title,
+            courseId: course.courseId,
+            classId: course.classId,
+            courseName: course.courseName,
+            title: hw.title,
+            deadline: hw.endDate || '',
+            payload: {
+              url: hw.taskUrl,
+              workId: hw.workId,
+              type: 'homework_web_scan',
+              statusText: hw.statusText,
+            },
           });
-
-          if (enqueueRes?.accepted) {
+          if (outcome.created) {
             homeworkCount++;
             await logExecution(
               env,
-              'homework_pending_detected',
+              'homework_detected',
               'chaoxing',
-              `发现课程《${pc.courseName}》作业红点，已入队派发求解 (${jobId})`,
-              { courseId: pc.courseId, classId: pc.classId, jobId }
+              `网页巡检发现新待做作业：《${course.courseName} - ${hw.title}》 (截止: ${hw.endDate || '无'})`,
+              { taskId: outcome.taskId, workId: hw.workId, courseId: course.courseId, classId: course.classId }
+            );
+            await sendNotification(
+              'afk-cloud 发现新作业 📚',
+              `课程：《${course.courseName}》\n作业：${hw.title}\n状态：${hw.statusText}\n截止：${hw.endDate || '无截止时间'}\n已写入待办队列准备自动处理。`,
+              env
             );
           }
         }
       }
+      if (courses.length > 0) {
+        homeworkCursor = (hwStart + hwBatchLimit) % courses.length;
+      }
     } catch (err: any) {
-      console.warn(`[Inspection] 作业红点探测异常: ${err?.message || err}`);
+      console.warn(`[Inspection] 网页端作业巡检异常: ${err?.message || err}`);
     }
   }
 
-  // 通知箱抓取（每 5 分钟节流一次，避免无意义高频刷通知接口）
+  // 通知箱抓取（白天每 2 分钟 / 夜间每 5 分钟）
+  const noticeIntervalMs = isQuietNight ? 5 * 60 * 1000 : 2 * 60 * 1000;
   let lastNoticeCheckMs = prevState.lastNoticeCheckMs || 0;
   let noticesFound = 0;
-  if (force || nowMs - lastNoticeCheckMs >= 5 * 60 * 1000) {
+  let newNoticesNotified = 0;
+  if (force || nowMs - lastNoticeCheckMs >= noticeIntervalMs) {
     lastNoticeCheckMs = nowMs;
     try {
       const noticeList = await fetchNoticeList(session, 20);
       if (noticeList.length > 0) {
-        const noticeOutcome = await saveNoticesWithEvents(env, noticeList);
+        const noticeOutcome = await saveNoticesWithEvents(env, noticeList, nowMs);
         noticesFound = noticeOutcome.savedCount;
 
         for (const rt of noticeOutcome.reopenedTasks) {
@@ -464,6 +521,33 @@ export async function runChaoxingInspectionCycle(
             env
           );
         }
+
+        const kindMeta: Record<string, { event: string; title: string }> = {
+          activity: { event: 'notice_activity', title: '学习通随堂活动提醒 🔔' },
+          exam: { event: 'notice_exam', title: '学习通考试/测验通知 📝' },
+          homework: { event: 'notice_homework', title: '学习通新作业通知 📚' },
+          important: { event: 'notice_important', title: '学习通重要课程通知 📢' },
+        };
+        for (const nn of noticeOutcome.newNotices.slice(0, 5)) {
+          const meta = kindMeta[nn.kind] || kindMeta.important;
+          await logExecution(
+            env,
+            meta.event,
+            'chaoxing',
+            `${nn.courseName ? `《${nn.courseName}》` : ''}${nn.title}: ${nn.content.slice(0, 100)}`,
+            nn
+          );
+          const lines = [
+            nn.courseName ? `课程：《${nn.courseName}》` : '',
+            `标题：${nn.title}`,
+            nn.deadline ? `截止：${nn.deadline}` : '',
+            `内容：${nn.content}`,
+            nn.url ? `入口：${nn.url}` : '',
+            `发布时间：${nn.sendTime}`,
+          ].filter(Boolean);
+          await sendNotification(meta.title, lines.join('\n'), env);
+          newNoticesNotified++;
+        }
       }
     } catch (err: any) {
       console.warn(`[Inspection] 通知箱抓取异常: ${err?.message || err}`);
@@ -482,7 +566,7 @@ export async function runChaoxingInspectionCycle(
       const discSummary = await scanDiscussionsBatch(env, session, courses, {
         realname,
         offset: discussionCursor,
-        limit: force ? 9 : 6,
+        limit: force ? 6 : 5,
         notifyOnNew: true,
       });
       discussionCursor = discSummary.nextOffset;
@@ -509,6 +593,7 @@ export async function runChaoxingInspectionCycle(
       recentFailedSignMap: prunedFailedMap,
       roundRobinCursor,
       discussionCursor,
+      homeworkCursor,
       rateLimitUntilMs,
       rateLimitNotifiedAtMs,
       rateLimitBackoffLevel,
@@ -518,6 +603,7 @@ export async function runChaoxingInspectionCycle(
       lastNightMobileCheckMs,
       lastCourseSyncMs,
       lastScanErrorLoggedMs,
+      blockedCooldownUntilMs,
     });
   }
 
@@ -529,6 +615,8 @@ export async function runChaoxingInspectionCycle(
   ];
   if (cooldownActive) {
     msgParts.push(`移动端处于频控退避冷却中(L${rateLimitBackoffLevel})`);
+  } else if (blockedCooldownActive) {
+    msgParts.push('移动端 IP 封禁冷却中(15m 自动试探)');
   } else if (isCanaryProbe && !hitRateLimit && !scanException) {
     msgParts.push('移动端 Canary 试探成功并恢复轮转');
   }
@@ -544,11 +632,14 @@ export async function runChaoxingInspectionCycle(
     classActivitiesFound,
     homeworkFound: homeworkCount,
     homeworkCoursesDetected,
+    homeworkScannedCourses,
     noticesFound,
+    newNoticesNotified,
     discussionsFound,
     newDiscussionsFound,
     rateLimited: hitRateLimit,
     cooldownActive,
+    blockedCooldownActive,
     rateLimitBackoffLevel,
     canaryProbe: isCanaryProbe,
     scanErrors: scanErrors.length,

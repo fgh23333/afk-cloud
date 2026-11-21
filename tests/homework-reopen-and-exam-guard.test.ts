@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { requiresManualAttachmentUpload } from '../packages/adapters/chaoxing/homework';
 import { isEmptyShellSubjectiveQuestion } from '../packages/core/solver';
 import { parseChaoxingTaskIdentifiers } from '../packages/shim/src/runner';
+import { fetchNoticeList, parseCourseWorkListHtml } from '../edge/src/chaoxing';
 import { hasTrackedHomeworkForCourse, mergeSyncedTaskPayload, saveNoticesWithEvents } from '../edge/src/store';
 
 function createMockD1(initialTask?: {
@@ -28,6 +29,9 @@ function createMockD1(initialTask?: {
           return this;
         },
         async first<T = any>(): Promise<T | null> {
+          if (sql.includes('SELECT id_code FROM notices WHERE id_code = ?')) {
+            return (notices.get(args[0]) as T) || null;
+          }
           if (sql.includes('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')) {
             return (tasks.get(args[0]) as T) || null;
           }
@@ -246,9 +250,146 @@ async function runTests() {
   const mergedFresh = JSON.parse(mergeSyncedTaskPayload(null, { workId: '1' }));
   assert.strictEqual(mergedFresh.returnedNoticeIds, undefined);
   assert.doesNotThrow(() => mergeSyncedTaskPayload('not-json{', { a: 1 }));
-  console.log(' ✅ [Test 7/7 PASS] tasks/sync 合并 payload 保留打回通知去重清单');
+  console.log(' ✅ [Test 7/9 PASS] tasks/sync 合并 payload 保留打回通知去重清单');
 
-  console.log('\n🎉 全部 7 项打回重做、防刷屏与测验守卫测试 100% 通过！\n');
+  // Test 8: parseCourseWorkListHtml 零 JSDOM 解析网页端 getAllWork 列表
+  const sampleWorkHtml = `
+    <ul>
+      <li>
+        <div class="titTxt" data="0">
+          <p class="clearfix">
+            <a href="javascript:void(0);" class="inspectTask" data="58496166" data2="55677561" data3="0" title="微分方程作业笔记">微分方程作业笔记</a>
+          </p>
+          <span class="pt5"><span class="fl">开始时间：</span>2026-11-15 14:42</span>
+          <span class="pt5"><span class="fl">截止时间：</span>2026-11-23 15:42</span>
+          <span class="pt5"><span class="fl">作业状态：</span><strong> 待做 </strong></span>
+        </div>
+      </li>
+      <li class="lookLi">
+        <div class="titTxt" data="0">
+          <p><a href="/mooc-ans/work/selectWorkQuestionYiPiYue?workId=58464301&workAnswerId=55674098" title="常微分方程作业习题">常微分方程作业习题</a></p>
+          <span>开始时间：2026-11-14 09:54</span>
+          <span>截止时间：2026-11-18 10:54</span>
+          <span>作业状态：<strong> 待批阅 </strong></span>
+        </div>
+      </li>
+      <li>
+        <div class="titTxt" data="0">
+          <p><a class="inspectTask" data="58366567" data2="100" data3="0" title="过期实验">过期实验</a></p>
+          <span>截止时间：2026-11-19 16:05</span>
+          <span>作业状态：<strong> 已过期 </strong></span>
+        </div>
+      </li>
+      <li>
+        <div class="titTxt" data="0">
+          <p><a class="inspectTask" data="58999001" data2="200" data3="4" title="重新编辑作业">重新编辑作业</a></p>
+          <span>截止时间：2026-11-28 23:59</span>
+          <span>作业状态：<strong> 重新编辑 </strong></span>
+        </div>
+      </li>
+    </ul>
+  `;
+  const nowTest8 = Date.parse('2026-11-21T20:00:00+08:00');
+  const parsedWorks = parseCourseWorkListHtml(
+    sampleWorkHtml,
+    { courseId: '268784887', classId: '158750280', courseName: '高等数学(二)', cpi: '340100029' },
+    nowTest8
+  );
+  assert.strictEqual(parsedWorks.length, 4);
+  assert.strictEqual(parsedWorks[0].workId, '58496166');
+  assert.strictEqual(parsedWorks[0].isPending, true);
+  assert.strictEqual(parsedWorks[0].isExpired, false);
+  assert.strictEqual(parsedWorks[0].isDone, false);
+  assert.strictEqual(parsedWorks[1].workId, '58464301');
+  assert.strictEqual(parsedWorks[1].isDone, true);
+  assert.strictEqual(parsedWorks[1].isPending, false);
+  assert.strictEqual(parsedWorks[2].workId, '58366567');
+  assert.strictEqual(parsedWorks[2].isExpired, true);
+  assert.strictEqual(parsedWorks[2].isPending, false);
+  assert.strictEqual(parsedWorks[3].workId, '58999001');
+  assert.strictEqual(parsedWorks[3].isPending, true);
+  console.log(' ✅ [Test 8/9 PASS] parseCourseWorkListHtml 零 JSDOM 解析待做/待批阅/已过期/重编辑作业通过');
+
+  // Test 9: fetchNoticeList 解析 att_subject 随堂活动通知 + saveNoticesWithEvents 仅对首次见到的 48h 内新通知发出告警
+  const origFetch = globalThis.fetch;
+  try {
+    const nowTest9 = Date.parse('2026-11-21T16:00:00+08:00');
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          notices: {
+            list: [
+              {
+                idCode: 'SUBJ_ACT_01',
+                title: '活动结束提醒',
+                createrName: '学习通',
+                sendTime: '2026-11-21 15:50:00',
+                content: '课程名称：LabVIEW编程及应用\n活动名称：随堂练习-章节4\n还有10分钟就要结束，请尽快作答!',
+                attachment: JSON.stringify([
+                  {
+                    attachmentType: 3,
+                    att_subject: {
+                      subjectTitle: '随堂练习-章节4',
+                      subjectLink: 'https://mobilelearn.chaoxing.com/widget/quiz/proxyTestAttendUrl?activeId=8000180082238',
+                    },
+                  },
+                ]),
+              },
+              {
+                idCode: 'OLD_ACT_02',
+                title: '活动结束提醒',
+                createrName: '学习通',
+                sendTime: '2026-11-10 10:00:00',
+                content: '课程名称：LabVIEW编程及应用\n活动名称：旧随堂练习',
+              },
+              {
+                idCode: 'EXP_WORK_03',
+                title: '过期作业提醒',
+                createrName: '学习通',
+                sendTime: '2026-11-21 15:00:00',
+                content: '课程名称：物理\r作业名称：旧作业\r结束时间：2026-11-18 12:00',
+                attachment: JSON.stringify([
+                  {
+                    attachmentType: 25,
+                    att_web: {
+                      examOrWork: 'work',
+                      examOrWorkId: 999888,
+                      courseId: 11,
+                      clazzId: 22,
+                      title: '旧作业',
+                      url: 'https://mooc1-api.chaoxing.com/examApi/intoexamorwork?taskrefId=999888',
+                    },
+                  },
+                ]),
+              },
+            ],
+          },
+        }),
+        { status: 200 }
+      )) as typeof fetch;
+
+    const fetched = await fetchNoticeList(
+      { _uid: '1', _d: 'd', vc3: 'v', uf: 'u', fid: '2', cookie: '_uid=1;' },
+      10
+    );
+    assert.strictEqual(fetched.length, 3);
+    assert.ok(fetched[0].activityInfo, '必须解析 att_subject 为 activityInfo');
+    assert.strictEqual(fetched[0].activityInfo?.activeId, '8000180082238');
+    assert.strictEqual(fetched[0].activityInfo?.courseName, 'LabVIEW编程及应用');
+
+    const res1 = await saveNoticesWithEvents({ DB: db as any }, fetched, nowTest9);
+    assert.strictEqual(res1.newNotices.length, 1, '仅 48h 内未过期的新随堂活动通知应触发告警');
+    assert.strictEqual(res1.newNotices[0].kind, 'activity');
+    assert.strictEqual(res1.newNotices[0].idCode, 'SUBJ_ACT_01');
+
+    const res2 = await saveNoticesWithEvents({ DB: db as any }, fetched, nowTest9 + 60_000);
+    assert.strictEqual(res2.newNotices.length, 0, '同一 idCode 再次抓取不得重复告警');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  console.log(' ✅ [Test 9/9 PASS] att_subject 活动通知解析与 48h 新通知去重告警验证通过');
+
+  console.log('\n🎉 全部 9 项打回重做、网页作业扫描与新通知守卫测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {
