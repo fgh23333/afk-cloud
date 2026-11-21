@@ -1415,7 +1415,7 @@ async function handleEdgeFetch(
 
 async function handleEdgeHeartbeat(env: ExtendedNotifyEnv, checkHomework = false) {
   return runChaoxingInspectionCycle(env, {
-    force: checkHomework,
+    force: false,
     checkHomework,
     scanDiscussions: checkHomework,
   });

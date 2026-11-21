@@ -1102,11 +1102,19 @@ async function runAllTests() {
       // 验证 Inspection 15 分钟冷却退避：首次触发请勿频繁操作后记录冷却时间戳，第二次跳过 mobilelearn 轮询
       let savedAgentState: any = null;
       const cycle1 = await runChaoxingInspectionCycle(
-        { DB: mockDiscDb, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' },
+        {
+          DB: mockDiscDb,
+          CHAOXING_PHONE: '13800000000',
+          CHAOXING_PASSWORD: 'pwd',
+          SIGN_LISTEN_WINDOWS: '*',
+          MOBILE_SCAN_INTERVAL_SEC: '0',
+          MOBILE_SCAN_JITTER_SEC: '0',
+        },
         {
           force: false,
           checkHomework: false,
           scanDiscussions: false,
+          skipSleep: true,
           onStateUpdate: (next) => {
             savedAgentState = next;
           },
@@ -1117,11 +1125,19 @@ async function runAllTests() {
       assert.strictEqual(mobileScanCalls, 1, '触发频控后必须立即中断本轮剩余课程扫描');
 
       const cycle2 = await runChaoxingInspectionCycle(
-        { DB: mockDiscDb, CHAOXING_PHONE: '13800000000', CHAOXING_PASSWORD: 'pwd' },
+        {
+          DB: mockDiscDb,
+          CHAOXING_PHONE: '13800000000',
+          CHAOXING_PASSWORD: 'pwd',
+          SIGN_LISTEN_WINDOWS: '*',
+          MOBILE_SCAN_INTERVAL_SEC: '0',
+          MOBILE_SCAN_JITTER_SEC: '0',
+        },
         {
           force: false,
           checkHomework: false,
           scanDiscussions: false,
+          skipSleep: true,
           state: savedAgentState,
         }
       );

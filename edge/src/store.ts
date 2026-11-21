@@ -46,6 +46,10 @@ export interface EdgeEnv {
   AUTO_SUBMIT_HOMEWORK?: string;
   AUTO_PUBLISH_DISCUSSIONS?: string;
   HOMEWORK_SCAN_INTERVAL_MINUTES?: string;
+  SIGN_LISTEN_WINDOWS?: string;
+  MOBILE_SCAN_BATCH_SIZE?: string;
+  MOBILE_SCAN_INTERVAL_SEC?: string;
+  MOBILE_SCAN_JITTER_SEC?: string;
   API_BEARER_TOKEN?: string;
   DASHBOARD_PASSWORD?: string;
   AFK_SHIM_SECRET?: string;

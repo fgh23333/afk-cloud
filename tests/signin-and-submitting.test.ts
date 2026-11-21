@@ -10,7 +10,7 @@ import {
 } from '../packages/adapters/chaoxing/activity-protocol';
 import { performSign } from '../edge/src/chaoxing';
 import { getDashboardData, renderDashboardHtml } from '../edge/src/dashboard';
-import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from '../edge/src/inspection';
+import { isWithinSignListenWindows, runChaoxingInspectionCycle, syncChaoxingSignHistory } from '../edge/src/inspection';
 
 // Stub `agents` and `cloudflare:workers` before importing DO / Edge worker modules
 const origLoad = (Module as any)._load;
@@ -734,6 +734,7 @@ async function runTests() {
         nowMs: t0,
         checkHomework: false,
         scanDiscussions: false,
+        skipSleep: true,
         onStateUpdate: (s) => {
           state = s;
         },
@@ -749,6 +750,7 @@ async function runTests() {
         nowMs: t0 + 5 * 60 * 1000,
         checkHomework: false,
         scanDiscussions: false,
+        skipSleep: true,
         state,
         onStateUpdate: (s) => {
           state = s;
@@ -763,6 +765,7 @@ async function runTests() {
         nowMs: t0 + 15 * 60 * 1000,
         checkHomework: false,
         scanDiscussions: false,
+        skipSleep: true,
         state,
         onStateUpdate: (s) => {
           state = s;
@@ -775,10 +778,154 @@ async function runTests() {
     } finally {
       globalThis.fetch = origFetch;
     }
-    console.log(' ✅ [Test 7/7 PASS] IP 封禁立即中断、15m 冷却与单课恢复试探验证通过');
+    console.log(' ✅ [Test 7/8 PASS] IP 封禁立即中断、15m 冷却与单课恢复试探验证通过');
   }
 
-  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 7 项测试 100% 通过！\n');
+  // Test 8: 签到监听严格限定在上课时段 (08:15-11:40, 13:00-16:20, 18:00-19:35 UTC+8) + 4 门批大小 + 90-150s 随机扰动间隔
+  {
+    const atUtc8 = (hhmm: string) => Date.parse(`2026-11-21T${hhmm}:00+08:00`);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('08:14')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('08:15')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('11:40')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('11:41')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('12:59')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('13:00')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('16:20')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('16:21')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('17:59')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('18:00')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('19:35')), true);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('19:36')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('23:30')), false);
+    assert.strictEqual(isWithinSignListenWindows(atUtc8('03:00')), false);
+
+    const origFetch = globalThis.fetch;
+    const mockEnv: any = {
+      CHAOXING_PHONE: '13800000000',
+      CHAOXING_PASSWORD: 'pwd',
+      DB: {
+        prepare(sql: string) {
+          const makeBound = () => ({
+            first: async () => {
+              if (sql.includes('FROM sessions')) {
+                return {
+                  cookie_json: JSON.stringify({
+                    _uid: '149258490',
+                    _d: 'd',
+                    vc3: 'v',
+                    uf: 'u',
+                    fid: '2893',
+                    cookie: '_uid=149258490;',
+                  }),
+                  expires_at: Date.now() + 3600_000,
+                };
+              }
+              return null;
+            },
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true }),
+          });
+          return { bind: () => makeBound(), first: async () => null, all: async () => ({ results: [] }), run: async () => ({ success: true }) };
+        },
+        async batch() {
+          return [];
+        },
+      },
+    };
+
+    const coursesHtml = Array.from({ length: 8 }, (_, i) =>
+      `<li class="course" courseId="${5000 + i}" clazzId="${6000 + i}" personId="1"><span class="course-name" title="课程${i}">课程${i}</span></li>`
+    ).join('\n');
+
+    let scannedCourseIds: string[] = [];
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const u = String(input);
+        if (u.includes('/visit/courselistdata')) {
+          return new Response(coursesHtml, { status: 200 });
+        }
+        if (u.includes('mobilelearn.chaoxing.com') && u.includes('taskactivelist')) {
+          scannedCourseIds.push(new URL(u).searchParams.get('courseId') || '');
+          return new Response(JSON.stringify({ result: 1, activeList: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }) as typeof fetch;
+
+      // 非上课时段（12:15、21:00）：零 mobilelearn 请求
+      scannedCourseIds = [];
+      const noonOut = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: atUtc8('12:15'),
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+      });
+      const nightOut = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: atUtc8('21:00'),
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+      });
+      assert.strictEqual(scannedCourseIds.length, 0, '非上课监听时段不得向 mobilelearn 发请求');
+      assert.strictEqual(noonOut.outsideSignWindow, true);
+      assert.strictEqual(nightOut.outsideSignWindow, true);
+
+      // 上课时段 09:00：默认每轮仅扫描 4 门课，nextMobileCheckAtMs 落在 t0 + 120s (rand=0.5 => 90 + floor(0.5*61) = 120s)
+      const t0 = atUtc8('09:00');
+      let state: any;
+      scannedCourseIds = [];
+      const in1 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0,
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+        randomFn: () => 0.5,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.deepStrictEqual(scannedCourseIds, ['5000', '5001', '5002', '5003']);
+      assert.strictEqual(in1.outsideSignWindow, false);
+      assert.strictEqual(in1.mobileScanThrottled, false);
+      assert.strictEqual(state.nextMobileCheckAtMs, t0 + 120_000);
+
+      // +60s (09:01)：仍在随机等待窗口，跳过 mobilelearn
+      scannedCourseIds = [];
+      const in2 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0 + 60_000,
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+        randomFn: () => 0.5,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(scannedCourseIds.length, 0, '随机间隔等待窗口内必须跳过 mobilelearn');
+      assert.strictEqual(in2.mobileScanThrottled, true);
+
+      // +120s (09:02)：随机等待结束，轮转扫描后 4 门课
+      scannedCourseIds = [];
+      const in3 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0 + 120_000,
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+        randomFn: () => 0.5,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.deepStrictEqual(scannedCourseIds, ['5004', '5005', '5006', '5007']);
+      assert.strictEqual(in3.mobileScanThrottled, false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    console.log(' ✅ [Test 8/8 PASS] 上课分时段监听、4 门低频批次与 90-150s 随机扰动间隔通过');
+  }
+
+  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 8 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {
