@@ -141,23 +141,6 @@ export async function getCourseHomeworkList(
 ): Promise<HomeworkSummary[]> {
   const session = sessionInfo || (await fetchCourseSession(course, cookies));
 
-  let hasPendingDot = false;
-  try {
-    const pendingRes = await fetch(
-      `https://mooc1-1.chaoxing.com/work/workTestPendingNew?classIds=${course.classId}`,
-      {
-        headers: {
-          Cookie: session.courseCookie,
-          'User-Agent': BROWSER_UA,
-        },
-      }
-    );
-    const pendingJson: any = await pendingRes.json();
-    hasPendingDot = !!pendingJson?.[0]?.hasWorkMsg;
-  } catch {
-    // ignore
-  }
-
   const workUrl = `https://mooc1-1.chaoxing.com/mooc-ans/work/getAllWork?classId=${course.classId}&courseId=${course.courseId}&isdisplaytable=2&mooc=1&ut=s&enc=${session.enc}&cpi=${session.cpi}&openc=${session.openc}`;
   const res = await fetch(workUrl, {
     headers: {
@@ -202,10 +185,11 @@ export async function getCourseHomeworkList(
       statusText.includes('完成');
     const isReturned =
       statusText.includes('打回') || statusText.includes('重做') || statusText.includes('退回');
+    const isExpired = statusText.includes('过期') || statusText.includes('截止');
     const isPending =
       !isDone &&
-      (hasPendingDot ||
-        isReturned ||
+      !isExpired &&
+      (isReturned ||
         statusText.includes('待做') ||
         statusText.includes('未交') ||
         statusText.includes('重新编辑'));

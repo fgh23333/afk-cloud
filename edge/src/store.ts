@@ -1,3 +1,5 @@
+import { extractInfoFromContent, parseTimeToMs } from './chaoxing';
+
 export interface D1PreparedStatementLike {
   bind(...values: unknown[]): D1PreparedStatementLike;
   first<T = unknown>(): Promise<T | null>;
@@ -585,10 +587,27 @@ export async function saveNotices(
       isExpired?: boolean;
       isReturned?: boolean;
     };
+    activityInfo?: {
+      activeId?: string;
+      title: string;
+      courseName: string;
+      url: string;
+    };
   }>
 ): Promise<number> {
   const { savedCount } = await saveNoticesWithEvents(env, notices);
   return savedCount;
+}
+
+export interface NewNoticeAlert {
+  idCode: string;
+  kind: 'activity' | 'exam' | 'homework' | 'important';
+  title: string;
+  courseName: string;
+  sendTime: string;
+  content: string;
+  deadline?: string;
+  url?: string;
 }
 
 export async function saveNoticesWithEvents(
@@ -625,16 +644,30 @@ export async function saveNoticesWithEvents(
       isExpired?: boolean;
       isReturned?: boolean;
     };
-  }>
-): Promise<{ savedCount: number; reopenedTasks: ReopenedHomeworkInfo[] }> {
-  if (!env.DB || notices.length === 0) return { savedCount: 0, reopenedTasks: [] };
+    activityInfo?: {
+      activeId?: string;
+      title: string;
+      courseName: string;
+      url: string;
+    };
+  }>,
+  nowMs = Date.now()
+): Promise<{ savedCount: number; reopenedTasks: ReopenedHomeworkInfo[]; newNotices: NewNoticeAlert[] }> {
+  if (!env.DB || notices.length === 0) return { savedCount: 0, reopenedTasks: [], newNotices: [] };
   const ts = nowUtc8();
   let savedCount = 0;
   const reopenedTasks: ReopenedHomeworkInfo[] = [];
+  const newNotices: NewNoticeAlert[] = [];
 
   for (const n of notices) {
     if (!n.idCode) continue;
     try {
+      const existingNotice = await env.DB.prepare('SELECT id_code FROM notices WHERE id_code = ?')
+        .bind(n.idCode)
+        .first<{ id_code: string }>()
+        .catch(() => null);
+      const isNewNotice = !existingNotice;
+
       await env.DB.prepare(
         `INSERT INTO notices (
            id_code, title, creater_name, send_time, content, tag, source_type, raw_json, updated_at
@@ -659,9 +692,10 @@ export async function saveNoticesWithEvents(
         .run();
       savedCount++;
 
+      let isReturnedWork = false;
       // 如果通知内包含未截止作业，联动写入待办作业队列 pending_tasks（含打回重做重新激活；已截止历史作业/旧打回通知直接跳过以防刷屏）
       if (n.workInfo && n.workInfo.courseId && n.workInfo.classId && !n.workInfo.isExpired) {
-        const isReturned =
+        isReturnedWork =
           Boolean(n.workInfo.isReturned) ||
           n.title.includes('打回') ||
           n.title.includes('退回') ||
@@ -679,9 +713,9 @@ export async function saveNoticesWithEvents(
             url: n.workInfo.url,
             idCode: n.idCode,
             type: 'homework_notice',
-            isReturned,
+            isReturned: isReturnedWork,
           },
-          ...(isReturned ? { reopenNoticeIdCode: n.idCode, reopenReason: reason } : {}),
+          ...(isReturnedWork ? { reopenNoticeIdCode: n.idCode, reopenReason: reason } : {}),
         });
         if (outcome.reopened) {
           reopenedTasks.push({
@@ -712,12 +746,60 @@ export async function saveNoticesWithEvents(
           },
         });
       }
+
+      // 首次见到的 48 小时内重要通知（随堂活动/考试/作业/机房实验调整等），发出实时通知列表事件（跳过已过期及已走重做提醒的作业）
+      if (isNewNotice && !n.workInfo?.isExpired && !n.examInfo?.isExpired && !isReturnedWork) {
+        const sendMs = parseTimeToMs(n.sendTime);
+        const isRecent =
+          sendMs === null || (nowMs - sendMs <= 48 * 60 * 60 * 1000 && sendMs <= nowMs + 24 * 60 * 60 * 1000);
+        if (isRecent) {
+          const textBlob = `${n.title} ${n.content}`;
+          let kind: NewNoticeAlert['kind'] | null = null;
+          if (
+            n.activityInfo ||
+            /签到|随堂练习|课堂活动|抢答|选人|问卷|投票|活动结束提醒/.test(textBlob)
+          ) {
+            kind = 'activity';
+          } else if (
+            (n.examInfo && !n.examInfo.isExpired) ||
+            /考试通知|测验通知|考试提醒|期中考试|期末考试/.test(n.title)
+          ) {
+            kind = 'exam';
+          } else if (n.workInfo && !n.workInfo.isExpired) {
+            kind = 'homework';
+          } else if (/实验课|上机课|调课|停课|补课|机房|地点|答辩|汇报/.test(textBlob)) {
+            kind = 'important';
+          }
+
+          if (kind) {
+            const extracted = extractInfoFromContent(n.content);
+            const courseName =
+              n.activityInfo?.courseName ||
+              n.examInfo?.courseName ||
+              n.workInfo?.courseName ||
+              extracted.courseName ||
+              '';
+            const deadline = n.examInfo?.endTime || n.workInfo?.endTime;
+            const url = n.activityInfo?.url || n.examInfo?.url || n.workInfo?.url;
+            newNotices.push({
+              idCode: n.idCode,
+              kind,
+              title: n.activityInfo?.title && n.title === '活动结束提醒' ? `${n.title}: ${n.activityInfo.title}` : n.title,
+              courseName,
+              sendTime: n.sendTime,
+              content: n.content.slice(0, 200),
+              ...(deadline ? { deadline } : {}),
+              ...(url ? { url } : {}),
+            });
+          }
+        }
+      }
     } catch {
       // ignore
     }
   }
 
-  return { savedCount, reopenedTasks };
+  return { savedCount, reopenedTasks, newNotices };
 }
 
 /**

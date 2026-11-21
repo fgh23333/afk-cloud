@@ -455,6 +455,15 @@ export async function scanCourseActivitiesShared(
         errorMsg: errMsg || `HTTP ${res.status}`,
       };
     }
+    if (isChaoxingBlockedMessage(errMsg)) {
+      return {
+        activities: [],
+        classActivities: [],
+        rateLimited: false,
+        blocked: true,
+        errorMsg: errMsg,
+      };
+    }
     primaryError = errMsg || (res.ok ? 'taskactivelist 返回异常结构' : `HTTP ${res.status}`);
 
     if (errMsg) {

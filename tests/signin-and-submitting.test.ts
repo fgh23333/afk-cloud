@@ -630,11 +630,15 @@ async function runTests() {
     const origFetch = globalThis.fetch;
     const course = { courseId: '1', classId: '2', courseName: 'T' };
     try {
-      globalThis.fetch = (async () =>
-        new Response(JSON.stringify({ result: 0, errorMsg: '当前ip [1.2.3.4] 已被封禁，请勿使用vpn、代理等网络' }), {
+      let fetchCallCount = 0;
+      globalThis.fetch = (async () => {
+        fetchCallCount++;
+        return new Response(JSON.stringify({ result: 0, errorMsg: '当前ip [1.2.3.4] 已被封禁，请勿使用vpn、代理等网络' }), {
           status: 200,
-        })) as typeof fetch;
+        });
+      }) as typeof fetch;
       const blockedRes = await scanCourseActivitiesShared(course, 'c=1', '9', 'UA');
+      assert.strictEqual(fetchCallCount, 1, 'taskactivelist 返回 IP 封禁时必须立即熔断，禁止再打 student/activelist');
       assert.strictEqual(blockedRes.activities.length, 0);
       assert.strictEqual(blockedRes.rateLimited, false, 'IP 封禁不应触发 15~120 分钟退避，否则会长时间失明');
       assert.strictEqual(blockedRes.blocked, true, 'IP 封禁必须被显式标记');
@@ -656,10 +660,125 @@ async function runTests() {
     } finally {
       globalThis.fetch = origFetch;
     }
-    console.log(' ✅ [Test 6/6 PASS] 活动列表被封禁/异常时显式报错而非静默漏签');
+    console.log(' ✅ [Test 6/7 PASS] 活动列表被封禁/异常时显式报错并短路而非静默漏签');
   }
 
-  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 6 项测试 100% 通过！\n');
+  // Test 7: Edge 巡检遇到 IP 封禁时立即中断剩余课程并进入 15m 冷却，恢复时仅单课试探并发送恢复通知
+  {
+    const origFetch = globalThis.fetch;
+    const logs: Array<{ eventType: string; summary: string }> = [];
+    const mockEnv: any = {
+      CHAOXING_PHONE: '13800000000',
+      CHAOXING_PASSWORD: 'pwd',
+      DB: {
+        prepare(sql: string) {
+          const makeBound = (args: unknown[]) => ({
+            first: async () => {
+              if (sql.includes('FROM sessions')) {
+                return {
+                  cookie_json: JSON.stringify({
+                    _uid: '149258490',
+                    _d: 'd',
+                    vc3: 'v',
+                    uf: 'u',
+                    fid: '2893',
+                    cookie: '_uid=149258490;',
+                  }),
+                  expires_at: Date.now() + 3600_000,
+                };
+              }
+              return null;
+            },
+            all: async () => ({ results: [] }),
+            run: async () => {
+              if (sql.includes('INSERT INTO execution_logs')) {
+                logs.push({ eventType: String(args[0] || ''), summary: String(args[2] || '') });
+              }
+              return { success: true };
+            },
+          });
+          return { bind: (...args: unknown[]) => makeBound(args), first: async () => null, all: async () => ({ results: [] }), run: async () => ({ success: true }) };
+        },
+        async batch() {
+          return [];
+        },
+      },
+    };
+
+    const coursesHtml = Array.from({ length: 6 }, (_, i) =>
+      `<li class="course" courseId="${2000 + i}" clazzId="${3000 + i}" personId="1"><span class="course-name" title="课程${i}">课程${i}</span></li>`
+    ).join('\n');
+
+    let mobileCalls = 0;
+    let isBlocked = true;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const u = String(input);
+        if (u.includes('/visit/courselistdata')) {
+          return new Response(coursesHtml, { status: 200 });
+        }
+        if (u.includes('mobilelearn.chaoxing.com') && u.includes('taskactivelist')) {
+          mobileCalls++;
+          if (isBlocked) {
+            return new Response(JSON.stringify({ result: 0, errorMsg: '当前ip [1.2.3.4] 已被封禁' }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ result: 1, activeList: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }) as typeof fetch;
+
+      const t0 = Date.parse('2026-11-21T14:00:00+08:00');
+      let state: any;
+
+      const c1 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0,
+        checkHomework: false,
+        scanDiscussions: false,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(mobileCalls, 1, '首门课被 IP 封禁后必须立即跳出循环，不能继续连打 6 门课');
+      assert.strictEqual(c1.blockedCooldownActive, true);
+      assert.strictEqual(c1.rateLimited, false);
+      assert.strictEqual(state.blockedCooldownUntilMs, t0 + 15 * 60 * 1000);
+      assert.ok(logs.some((l) => l.eventType === 'scan_error'), '应写入 scan_error 告警日志');
+
+      mobileCalls = 0;
+      const c2 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0 + 5 * 60 * 1000,
+        checkHomework: false,
+        scanDiscussions: false,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(mobileCalls, 0, '15 分钟 IP 封禁冷却窗口内不得向 mobilelearn 发请求');
+      assert.strictEqual(c2.blockedCooldownActive, true);
+
+      mobileCalls = 0;
+      isBlocked = false;
+      const c3 = await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: t0 + 15 * 60 * 1000,
+        checkHomework: false,
+        scanDiscussions: false,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(mobileCalls, 1, '冷却到期恢复试探应仅请求 1 门课作为金丝雀探针');
+      assert.strictEqual(c3.blockedCooldownActive, false);
+      assert.strictEqual(state.blockedCooldownUntilMs, 0);
+      assert.ok(logs.some((l) => l.eventType === 'sign_listener_recovered'), '恢复时必须写入 sign_listener_recovered 日志');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    console.log(' ✅ [Test 7/7 PASS] IP 封禁立即中断、15m 冷却与单课恢复试探验证通过');
+  }
+
+  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 7 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

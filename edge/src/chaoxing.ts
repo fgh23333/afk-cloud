@@ -294,6 +294,185 @@ export async function checkHomeworkPendingCourses(
   }
 }
 
+export interface ChaoxingWebHomeworkItem {
+  workId: string;
+  workAnswerId: string;
+  title: string;
+  statusText: string;
+  startDate: string;
+  endDate: string;
+  isPending: boolean;
+  isDone: boolean;
+  isExpired: boolean;
+  isReturned: boolean;
+  courseId: string;
+  classId: string;
+  courseName: string;
+  taskUrl: string;
+}
+
+const CHAOXING_WEB_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/**
+ * 零 JSDOM 解析超星课程 /work/getAllWork HTML，提取待做、打回、已过期与已提交作业状态
+ */
+export function parseCourseWorkListHtml(
+  html: string,
+  course: Course,
+  nowMs = Date.now()
+): ChaoxingWebHomeworkItem[] {
+  if (!html) return [];
+  const items: ChaoxingWebHomeworkItem[] = [];
+  const seen = new Set<string>();
+  const rawChunks = html.split(/(?=<div[^>]*class=["']titTxt["'])/i);
+
+  for (const rawChunk of rawChunks) {
+    if (!/^<div[^>]*class=["']titTxt["']/i.test(rawChunk)) continue;
+    const endLiIdx = rawChunk.search(/<\/li>/i);
+    const chunk = endLiIdx >= 0 ? rawChunk.slice(0, endLiIdx) : rawChunk;
+
+    let workId = '';
+    let workAnswerId = '0';
+    let statusType = '0';
+    let title = '';
+    let hasInspectTask = false;
+
+    const inspectTagMatch = chunk.match(/<a\b[^>]*class=["'][^"']*inspectTask[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
+    if (inspectTagMatch) {
+      hasInspectTask = true;
+      const tag = inspectTagMatch[0];
+      const innerText = stripChaoxingHtmlTags(inspectTagMatch[1] || '');
+      workId = tag.match(/\bdata=["'](\d+)["']/i)?.[1] || '';
+      workAnswerId = tag.match(/\bdata2=["'](\d+)["']/i)?.[1] || '0';
+      statusType = tag.match(/\bdata3=["'](\d+)["']/i)?.[1] || '0';
+      title = (tag.match(/\btitle=["']([^"']+)["']/i)?.[1] || innerText || '').trim();
+    } else {
+      const linkMatch = chunk.match(/<a\b[^>]*href=["'][^"']*workId=(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
+      if (linkMatch) {
+        workId = linkMatch[1];
+        const tag = linkMatch[0];
+        const innerText = stripChaoxingHtmlTags(linkMatch[2] || '');
+        workAnswerId = tag.match(/workAnswerId=(\d+)/i)?.[1] || '0';
+        title = (tag.match(/\btitle=["']([^"']+)["']/i)?.[1] || innerText || '').trim();
+      }
+    }
+
+    if (!workId || seen.has(workId)) continue;
+    seen.add(workId);
+
+    const plain = stripChaoxingHtmlTags(chunk);
+    const startDate =
+      plain.match(/开始时间：\s*([\d\-/:]+(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/)?.[1]?.trim() || '';
+    const endDate =
+      plain.match(/截止时间：\s*([\d\-/:]+(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/)?.[1]?.trim() || '';
+    const parsedStatus = plain.match(/作业状态：\s*([^\s]+)/)?.[1]?.trim();
+    const statusText = parsedStatus || (statusType === '1' ? '待批阅' : hasInspectTask ? '待做' : '');
+
+    const isDone = /待批|已批|已交|完成/.test(statusText);
+    const endMs = parseTimeToMs(endDate);
+    const isExpired = /过期|截止/.test(statusText) || (endMs !== null && endMs < nowMs);
+    const isReturned = /打回|重做|退回/.test(statusText);
+    const isPending =
+      !isDone &&
+      !isExpired &&
+      (isReturned || /待做|未交|重新编辑/.test(statusText) || (hasInspectTask && statusType === '0'));
+
+    const taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${course.courseId}&classId=${course.classId}&cpi=${course.cpi || ''}&workId=${workId}`;
+
+    items.push({
+      workId,
+      workAnswerId,
+      title: title || `作业_${workId}`,
+      statusText,
+      startDate,
+      endDate,
+      isPending,
+      isDone,
+      isExpired,
+      isReturned,
+      courseId: course.courseId,
+      classId: course.classId,
+      courseName: course.courseName,
+      taskUrl,
+    });
+  }
+
+  return items;
+}
+
+/**
+ * 通过超星网页端 stucoursemiddle -> /work/getAllWork 扫描单门课程的作业列表（替代已失效的 404 红点接口）
+ */
+export async function scanCourseHomeworksWeb(
+  course: Course,
+  session: UserSession,
+  nowMs = Date.now()
+): Promise<ChaoxingWebHomeworkItem[]> {
+  try {
+    let cookieStr = session.cookie;
+    const stuUrl = `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${encodeURIComponent(
+      course.courseId
+    )}&clazzid=${encodeURIComponent(course.classId)}&cpi=${encodeURIComponent(course.cpi || '')}&vc=1`;
+    const res = await fetch(stuUrl, {
+      headers: {
+        Cookie: cookieStr,
+        'User-Agent': CHAOXING_WEB_UA,
+      },
+    });
+    if (!res.ok) return [];
+
+    const setCookies: string[] = (res.headers as any).getSetCookie
+      ? (res.headers as any).getSetCookie()
+      : res.headers.get('set-cookie')
+        ? [res.headers.get('set-cookie')!]
+        : [];
+    for (const c of setCookies) {
+      if (c) cookieStr += '; ' + c.split(';')[0];
+    }
+
+    const html = await res.text();
+    let workUrl = '';
+    const match = html.match(/['"]([^'"]*\/work\/getAllWork[^'"]*)['"]/i);
+    if (match) {
+      const rawPath = match[1].replace(/&amp;/g, '&').trim();
+      if (rawPath.startsWith('http://') || rawPath.startsWith('https://')) {
+        workUrl = rawPath;
+      } else if (rawPath.startsWith('/mooc-ans/')) {
+        workUrl = `https://mooc1-1.chaoxing.com${rawPath}`;
+      } else if (rawPath.startsWith('/work/')) {
+        workUrl = `https://mooc1-1.chaoxing.com/mooc-ans${rawPath}`;
+      } else {
+        workUrl = `https://mooc1-1.chaoxing.com/${rawPath.replace(/^\/+/, '')}`;
+      }
+    } else {
+      const encMatch = html.match(/\benc=([a-f0-9]{16,})/i);
+      const opencMatch = html.match(/\bopenc=([a-f0-9]{16,})/i);
+      if (encMatch) {
+        const cpi = html.match(/\bcpi=(\d+)/i)?.[1] || course.cpi || '';
+        const openc = opencMatch?.[1] || '';
+        workUrl = `https://mooc1-1.chaoxing.com/mooc-ans/work/getAllWork?classId=${encodeURIComponent(
+          course.classId
+        )}&courseId=${encodeURIComponent(course.courseId)}&isdisplaytable=2&mooc=1&ut=s&enc=${encMatch[1]}&cpi=${encodeURIComponent(cpi)}&openc=${openc}`;
+      }
+    }
+
+    if (!workUrl) return [];
+
+    const workRes = await fetch(workUrl, {
+      headers: {
+        Cookie: cookieStr,
+        'User-Agent': CHAOXING_WEB_UA,
+      },
+    });
+    if (!workRes.ok) return [];
+    const workHtml = await workRes.text();
+    return parseCourseWorkListHtml(workHtml, course, nowMs);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 获取超星活动详细信息 (otherId, ifphoto 等)
  */
@@ -442,6 +621,12 @@ export interface ChaoxingNoticeItem {
     isExpired?: boolean;
     isReturned?: boolean;
   };
+  activityInfo?: {
+    activeId?: string;
+    title: string;
+    courseName: string;
+    url: string;
+  };
 }
 
 /**
@@ -587,16 +772,37 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
     for (const n of rawList.slice(0, limit)) {
       let examInfo: ChaoxingNoticeItem['examInfo'] | undefined = undefined;
       let workInfo: ChaoxingNoticeItem['workInfo'] | undefined = undefined;
+      let activityInfo: ChaoxingNoticeItem['activityInfo'] | undefined = undefined;
 
-      // 解析附件中的随堂考试或作业
+      // 解析附件中的随堂考试、作业或课堂活动 (att_subject)
       if (n.attachment) {
         try {
           const attachList = JSON.parse(n.attachment);
-          const att = attachList.find(
-            (a: any) =>
-              a.att_web &&
-              (a.att_web.examOrWork === 'exam' || a.att_web.examOrWork === 'work')
-          );
+          const sendYear = n.sendTime ? new Date(n.sendTime).getFullYear() : new Date().getFullYear();
+          const subjAtt = Array.isArray(attachList)
+            ? attachList.find(
+                (a: any) => a && a.att_subject && (a.att_subject.subjectTitle || a.att_subject.subjectLink)
+              )
+            : undefined;
+          if (subjAtt?.att_subject) {
+            const subjectLink = String(subjAtt.att_subject.subjectLink || '');
+            const activeIdMatch = subjectLink.match(/active(?:Primary)?Id=(\d+)/i);
+            const extractedSubj = extractInfoFromContent(n.content, sendYear);
+            activityInfo = {
+              activeId: activeIdMatch?.[1],
+              title: String(subjAtt.att_subject.subjectTitle || n.title || '随堂活动').trim(),
+              courseName: extractedSubj.courseName || '',
+              url: subjectLink,
+            };
+          }
+
+          const att = Array.isArray(attachList)
+            ? attachList.find(
+                (a: any) =>
+                  a.att_web &&
+                  (a.att_web.examOrWork === 'exam' || a.att_web.examOrWork === 'work')
+              )
+            : undefined;
           if (att && att.att_web) {
             const w = att.att_web;
             let startTime = '';
@@ -626,7 +832,6 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
               }
             }
 
-            const sendYear = n.sendTime ? new Date(n.sendTime).getFullYear() : new Date().getFullYear();
             const extracted = extractInfoFromContent(n.content, sendYear);
 
             if (!endTime || endTime === '无截止时间' || endTime === '无') {
@@ -715,6 +920,7 @@ export async function fetchNoticeList(session: UserSession, limit = 20): Promise
         sourceType: n.sourceType || 0,
         examInfo,
         workInfo,
+        ...(activityInfo ? { activityInfo } : {}),
       };
       noticeItem.rawJson = JSON.stringify(noticeItem);
       notices.push(noticeItem);
