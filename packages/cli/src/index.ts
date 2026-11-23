@@ -161,6 +161,31 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'zhihuishu':
+    case 'zhs':
+    case 'watch': {
+      const { ZHIHUISHU_DEFAULT_STUDY_URL, ZhihuishuAdapter } = await import('../../adapters/zhihuishu');
+      const studyUrl =
+        getFlagValue(args, '--url') || process.env.ZHIHUISHU_STUDY_URL || ZHIHUISHU_DEFAULT_STUDY_URL;
+      const rateStr = getFlagValue(args, '--rate');
+      const maxMinStr = getFlagValue(args, '--max-minutes');
+      const portStr = getFlagValue(args, '--port');
+      const tier = (getFlagValue(args, '--tier') || 'local') as 'local' | 'gce';
+      const zhs = new ZhihuishuAdapter();
+      const res = await zhs.watchCourse({
+        studyUrl,
+        targetRate: rateStr ? parseFloat(rateStr) : 1.5,
+        maxMinutes: maxMinStr ? parseInt(maxMinStr, 10) : 120,
+        headless: !args.includes('--headed'),
+        debuggingPort: portStr ? parseInt(portStr, 10) : 9222,
+        tier: tier === 'gce' ? 'gce' : 'local',
+        dryRun,
+        ignoreMemGuard: args.includes('--ignore-mem-guard'),
+      });
+      console.log(res.status === 'completed' ? green(`✅ ${res.message}`) : yellow(`ℹ️ ${res.message}`));
+      break;
+    }
+
     case 'web': {
       const platform = (getFlagValue(args, '--platform') || args[1] || 'pta') as PlatformName;
       const targetUrl = getFlagValue(args, '--url');
@@ -366,12 +391,12 @@ async function main(): Promise<void> {
       const { PluginRegistry } = await import('../../core/plugin');
       const { ChaoxingAdapter } = await import('../../adapters/chaoxing');
       const { PtaAdapter } = await import('../../adapters/pta');
-      const { WebBrowserAdapter } = await import('../../adapters/web-agent');
+      const { ZhihuishuAdapter } = await import('../../adapters/zhihuishu');
 
       const registry = PluginRegistry.getInstance();
       registry.register(new ChaoxingAdapter());
       registry.register(new PtaAdapter());
-      registry.register(new WebBrowserAdapter('zhihuishu'));
+      registry.register(new ZhihuishuAdapter());
 
       console.log(cyan(`\n======================================================`));
       console.log(cyan(` 🧩 afk-cloud / agy 插件化与 Skills 技能体系`));
