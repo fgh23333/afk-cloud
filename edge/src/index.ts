@@ -292,15 +292,21 @@ export default {
         }
 
         if (shouldSendDigest) {
-          const data = await getDashboardData(env);
-          await sendDigestNotification(
-            env,
-            {
-              ...data.stats,
-              recentTasks: data.tasks,
-            },
-            '每日定时任务简报'
-          );
+          const utc8 = new Date(event.scheduledTime + 8 * 3600 * 1000);
+          const slotKey = `${utc8.getUTCFullYear()}-${String(utc8.getUTCMonth() + 1).padStart(2, '0')}-${String(utc8.getUTCDate()).padStart(2, '0')}_${String(utc8.getUTCHours()).padStart(2, '0')}:${String(utc8.getUTCMinutes()).padStart(2, '0')}`;
+          const alreadySent = await getCachedSession<{ sentAt: string }>(env, 'digest_lock', slotKey).catch(() => null);
+          if (!alreadySent) {
+            await saveCachedSession(env, 'digest_lock', slotKey, { sentAt: nowUtc8() }, 3600).catch(() => {});
+            const data = await getDashboardData(env);
+            await sendDigestNotification(
+              env,
+              {
+                ...data.stats,
+                recentTasks: data.tasks,
+              },
+              '每日定时任务简报'
+            );
+          }
         }
       })()
     );

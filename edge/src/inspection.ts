@@ -425,7 +425,7 @@ export async function runChaoxingInspectionCycle(
             }
           );
 
-          if (!isExpired) {
+          if (!isExpired && (isSuccess || lastFailedAt === 0)) {
             await sendNotification(
               `学习通签到${isSuccess ? '成功 ✅' : '异常 ⚠️'}`,
               `课程：《${course.courseName}》\n活动：${act.name}\n状态：${signRes}\n时间：${nowUtc8()}`,
@@ -460,9 +460,10 @@ export async function runChaoxingInspectionCycle(
     }
 
     if (scanErrors.length > 0) {
-      // 接口返回错误/被拦截绝不能被当作“没有签到”：标记异常、阻止退避复位，并限频告警（每 60 分钟一次）
+      // 接口返回错误/被拦截绝不能被当作“没有签到”：标记异常、阻止退避复位；IP 永久封禁 12 小时告警一次防刷屏，普通异常 60 分钟一次
       scanException = true;
-      if (nowMs - lastScanErrorLoggedMs >= 60 * 60 * 1000) {
+      const errorAlertCooldownMs = scanBlocked ? 12 * 60 * 60 * 1000 : 60 * 60 * 1000;
+      if (nowMs - lastScanErrorLoggedMs >= errorAlertCooldownMs) {
         lastScanErrorLoggedMs = nowMs;
         const failedCount = scanErrors.length;
         const total = scanDiag.length;
@@ -633,6 +634,26 @@ export async function runChaoxingInspectionCycle(
           ].filter(Boolean);
           await sendNotification(meta.title, lines.join('\n'), env);
           newNoticesNotified++;
+        }
+        if (noticeOutcome.newNotices.length > 5) {
+          const overflow = noticeOutcome.newNotices.slice(5);
+          const overflowLines = overflow.map((nn, idx) => {
+            const meta = kindMeta[nn.kind] || kindMeta.important;
+            return `${idx + 1}. ${meta.title.replace(/\s+[^\w\u4e00-\u9fa5]+$/, '')} ${nn.courseName ? `《${nn.courseName}》` : ''}${nn.title}${nn.deadline ? ` (截止: ${nn.deadline})` : ''}`;
+          });
+          await logExecution(
+            env,
+            'notice_overflow_batch',
+            'chaoxing',
+            `合并补推其余 ${overflow.length} 条新通知`,
+            { count: overflow.length, idCodes: overflow.map((n) => n.idCode) }
+          );
+          await sendNotification(
+            `学习通其余 ${overflow.length} 条新通知汇总 📢`,
+            overflowLines.join('\n'),
+            env
+          );
+          newNoticesNotified += overflow.length;
         }
       }
     } catch (err: any) {

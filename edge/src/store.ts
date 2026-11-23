@@ -697,6 +697,7 @@ export async function saveNoticesWithEvents(
       savedCount++;
 
       let isReturnedWork = false;
+      let workCreatedByNotice = false;
       // 如果通知内包含未截止作业，联动写入待办作业队列 pending_tasks（含打回重做重新激活；已截止历史作业/旧打回通知直接跳过以防刷屏）
       if (n.workInfo && n.workInfo.courseId && n.workInfo.classId && !n.workInfo.isExpired) {
         isReturnedWork =
@@ -721,6 +722,7 @@ export async function saveNoticesWithEvents(
           },
           ...(isReturnedWork ? { reopenNoticeIdCode: n.idCode, reopenReason: reason } : {}),
         });
+        workCreatedByNotice = outcome.created;
         if (outcome.reopened) {
           reopenedTasks.push({
             taskId: outcome.taskId,
@@ -770,8 +772,10 @@ export async function saveNoticesWithEvents(
           ) {
             kind = 'exam';
           } else if (n.workInfo && !n.workInfo.isExpired) {
-            kind = 'homework';
-          } else if (/实验课|上机课|调课|停课|补课|机房|地点|答辩|汇报/.test(textBlob)) {
+            if (workCreatedByNotice) {
+              kind = 'homework';
+            }
+          } else if (n.title.trim()) {
             kind = 'important';
           }
 
