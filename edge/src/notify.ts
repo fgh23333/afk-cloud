@@ -86,18 +86,44 @@ export async function sendNotification(
     );
   }
 
-  // 5. Telegram Bot
+  // 5. Telegram Bot（先尝试 Markdown，若因下划线/方括号等特殊字符触发 HTTP 400 则自动降级纯文本重发，防止静默丢消息）
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    const apiUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+    const mdText = `🔔 *${title}*\n\n${content}`;
+    const plainText = `🔔 【${title}】\n\n${content}`;
     promises.push(
-      fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: env.TELEGRAM_CHAT_ID,
-          text: `🔔 *${title}*\n\n${content}`,
-          parse_mode: 'Markdown',
-        }),
-      }).catch((e) => console.error('Telegram error:', e))
+      (async () => {
+        try {
+          const res = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: env.TELEGRAM_CHAT_ID,
+              text: mdText.slice(0, 3900),
+              parse_mode: 'Markdown',
+            }),
+          });
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            console.warn(`Telegram Markdown HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+            if (res.status === 400) {
+              const retry = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: env.TELEGRAM_CHAT_ID,
+                  text: plainText.slice(0, 3900),
+                }),
+              });
+              if (!retry.ok) {
+                console.error(`Telegram plain fallback HTTP ${retry.status}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Telegram error:', e);
+        }
+      })()
     );
   }
 

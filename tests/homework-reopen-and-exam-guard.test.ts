@@ -389,7 +389,111 @@ async function runTests() {
   }
   console.log(' ✅ [Test 9/9 PASS] att_subject 活动通知解析与 48h 新通知去重告警验证通过');
 
-  console.log('\n🎉 全部 9 项打回重做、网页作业扫描与新通知守卫测试 100% 通过！\n');
+  // Test 10: Telegram Markdown 400 自动降级纯文本 + 教室上课通知防漏推 + 同 workId 作业防重复推送
+  {
+    const { sendNotification } = await import('../edge/src/notify');
+    const tgPayloads: any[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      tgPayloads.push(body);
+      if (body.parse_mode === 'Markdown') {
+        return new Response(JSON.stringify({ ok: false, error_code: 400, description: "can't parse entities" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await sendNotification('测试通知', '课程：《课程_267082295》请尽快处理', {
+        TELEGRAM_BOT_TOKEN: '123:abc',
+        TELEGRAM_CHAT_ID: '999',
+      });
+      assert.strictEqual(tgPayloads.length, 2, 'Markdown 400 时必须自动降级纯文本重发');
+      assert.strictEqual(tgPayloads[0].parse_mode, 'Markdown');
+      assert.strictEqual(tgPayloads[1].parse_mode, undefined);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    const { saveNoticesWithEvents, upsertPendingTaskWithOutcome } = await import('../edge/src/store');
+    const insertedNotices = new Set<string>();
+    const pendingTasks = new Map<string, { status: string; payload_json?: string }>();
+    const db2 = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          first: async () => {
+            if (sql.includes('FROM notices WHERE id_code')) {
+              return insertedNotices.has(String(args[0])) ? { id_code: args[0] } : null;
+            }
+            if (sql.includes('FROM pending_tasks WHERE task_id')) {
+              return pendingTasks.get(String(args[0])) || null;
+            }
+            return null;
+          },
+          all: async () => ({ results: [] }),
+          run: async () => {
+            if (sql.includes('INSERT INTO notices')) insertedNotices.add(String(args[0]));
+            if (sql.includes('INSERT INTO pending_tasks')) {
+              pendingTasks.set(String(args[0]), { status: String(args[6] || 'pending'), payload_json: String(args[10] || '{}') });
+            }
+            return { meta: { changes: 1 } };
+          },
+        }),
+      }),
+    };
+
+    const now10 = Date.now();
+    // 网页端先扫到作业 777
+    await upsertPendingTaskWithOutcome(
+      { DB: db2 as any },
+      {
+        taskId: 'chaoxing-notice-work-777-888',
+        platform: 'chaoxing',
+        courseId: '111',
+        classId: '888',
+        courseName: '数字图像处理',
+        title: '实验报告1',
+      }
+    );
+
+    const outcome10 = await saveNoticesWithEvents(
+      { DB: db2 as any },
+      [
+        {
+          idCode: 'CLS_NOTICE_1',
+          title: '《数字图像处理》请大家速来教室1207上课',
+          createrName: '老师',
+          sendTime: new Date(now10 - 60_000).toISOString(),
+          content: '请大家速来教室1207上课',
+        },
+        {
+          idCode: 'WORK_NOTICE_777',
+          title: '作业: 实验报告1',
+          createrName: '老师',
+          sendTime: new Date(now10 - 30_000).toISOString(),
+          content: '课程名称：数字图像处理 作业名称：实验报告1',
+          workInfo: {
+            workId: '777',
+            title: '实验报告1',
+            courseId: '111',
+            courseName: '数字图像处理',
+            classId: '888',
+            url: 'https://mooc1.chaoxing.com/work',
+            startTime: '',
+            endTime: '2099-01-01 00:00',
+            isExpired: false,
+          },
+        },
+      ],
+      now10
+    );
+    assert.strictEqual(outcome10.newNotices.length, 1, '应推送教室上课通知并跳过已由网页端建档的重复作业通知');
+    assert.strictEqual(outcome10.newNotices[0].idCode, 'CLS_NOTICE_1');
+    assert.strictEqual(outcome10.newNotices[0].kind, 'important');
+    console.log(' ✅ [Test 10/10 PASS] Telegram 400 降级重发、教室通知防漏推与同 workId 去重验证通过');
+  }
+
+  console.log('\n🎉 全部 10 项打回重做、网页作业扫描与新通知守卫测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {
