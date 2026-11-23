@@ -79,10 +79,16 @@ WORKDIR=/tmp/afk-cloud-burst
 if [ -n '${REPO_URL}' ]; then
   git clone --depth=1 '${REPO_URL}' \"\${WORKDIR}\"
   cd \"\${WORKDIR}\"
+  if echo '${TASK_CMD}' | grep -qE '^(zhihuishu|zhs|watch|web)'; then
+    if ! command -v chromium >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
+      apt-get update -y && apt-get install -y --no-install-recommends chromium fonts-noto-cjk
+    fi
+  fi
   export CHAOXING_PHONE='${CHAOXING_PHONE:-}'
   export CHAOXING_PASSWORD='${CHAOXING_PASSWORD:-}'
   export AFK_EDGE_WORKER_URL='${AFK_EDGE_WORKER_URL:-}'
   export AFK_EDGE_BEARER_TOKEN='${AFK_EDGE_BEARER_TOKEN:-}'
+  export ZHIHUISHU_STUDY_URL='${ZHIHUISHU_STUDY_URL:-}'
   export AFK_FLASH_MODEL='${AFK_FLASH_MODEL:-gemini-4-hydrogen-medium}'
   export AFK_PRO_MODEL='${AFK_PRO_MODEL:-gemini-4-hydrogen-xhigh}'
   npx --yes tsx packages/cli/src/index.ts ${TASK_CMD}
