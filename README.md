@@ -107,12 +107,12 @@
 
 ## 三、 选装平台插件生态一览（Plugins / Skills）
 
-核心宿主与特定教学平台解耦，所有适配器统一实现 [`PlatformPlugin`](file:///home/Jimmy/afk-cloud/packages/core/plugin.ts#L34-L76)：
+核心宿主与特定教学平台解耦，所有适配器统一实现 [`PlatformPlugin`](./packages/core/plugin.ts#L34-L76)：
 
 | 插件 ID | 适配平台 | 核心能力与合规机制 | 驱动技术栈 |
 | :--- | :--- | :--- | :--- |
 | **`chaoxing`** | 超星学习通 | • DES 登录、在读课程与课件 RAG 资料批量拉取<br>• 网页端作业扫描（`getAllWork` 状态反查）+ 防空壳主观题/附件人工上传守卫<br>• 作业安全草稿先行（`pyFlag=1`）+ 打回重做自动重新激活<br>• 讨论区抓取、AI 拟稿与幂等发布闭环（区分 `myReplied` 与自动归档过期讨论）<br>• 全类型签到协议（位置/拍照/手势/二维码）+ WebIM 信令解析基础 | 原生 HTTP + DES + Edge Durable Objects |
-| **`zhihuishu`** | 智慧树 (知到) | • 适配新版 `studyvideoh5.zhihuishu.com/stuStudy`<br>• 零外部依赖原生 RFC 6455 [`CdpClient`](file:///home/Jimmy/afk-cloud/packages/adapters/web-agent/cdp-client.ts) 驱动真机 Chromium<br>• 仅使用平台官方倍速控件（严格上限 `1.0x / 1.25x / 1.5x`）、静音、自然 `video.ended` 切换下一未完成小节<br>• 遇登录/扫码、易盾滑块（`#captchaYidun`）或随堂弹题（`.dialog-test`）**立即暂停视频并截图推送告警**，绝不注入反作弊或绕过钩子 | Chromium CDP + Cloudflare D1 Session 同步 |
+| **`zhihuishu` *(TODO)*** | 智慧树 (知到) | • **🚧 状态：框架已搭好，整条实播闭环列为 TODO**<br>• 已具备合规 CDP 播放骨架（[`ZhihuishuAdapter`](./packages/adapters/zhihuishu/index.ts) + 原生 [`CdpClient`](./packages/adapters/web-agent/cdp-client.ts)），仅使用 `1.0x/1.25x/1.5x` 官方控件倍速与自然 `video.ended` 切课<br>• 待补齐：无头会话握手稳定性、易盾滑块/弹题半自动接管与云端 GCE 调度合并验证 | Chromium CDP + Cloudflare D1 Session 同步 |
 | **`pta`** | 拼题 A (PTA) | • 浏览器 Profile Cookie 持久化免登 + DOM 题面提取<br>• 本地 Linux 沙箱（`gcc`/`g++`/`python3`/`node`）评测并迭代修复至 AC | Chromium Profile + 本地代码沙箱 |
 
 ---
@@ -124,7 +124,7 @@
 | **Tier 0** | 24/7 定时巡检、通知箱与作业轮询、D1 记忆库、Web 看板、多通道消息推送 | **Cloudflare Workers + D1 + KV + Durable Objects**（免费层） | **$0.00** |
 | **Tier 1 (常驻)** | Server Shim 守护、轻量 HTTP 任务、超星课件提取与 `agy` 调度 | **Google Cloud Always Free `e2-micro`**（`us-west1` 1 台常驻，30GB 磁盘） | **$0.00** |
 | **Tier 1 (弹性)** | 批量课件向量化、重型作业批处理 | **Google Cloud Run Jobs 免费层**（每月 `360,000` vCPU-秒） | **$0.00** |
-| **Tier 2 (突发)** | 需完整 Chromium 内存（建议 `e2-small` 2GB）的智慧树等浏览器任务 | **Spot GCE 临时实例**（[`spawn-ephemeral-gce.sh`](file:///home/Jimmy/afk-cloud/infra/gcp/spawn-ephemeral-gce.sh)：完工 `EXIT` trap 秒级自毁 + `at` TTL 兜底，最小权限 `sa-antigravity-worker`） | **按秒微额 (<$1)** |
+| **Tier 2 (突发)** | 需完整 Chromium 内存（建议 `e2-small` 2GB）的智慧树等浏览器任务 | **Spot GCE 临时实例**（[`spawn-ephemeral-gce.sh`](./infra/gcp/spawn-ephemeral-gce.sh)：完工 `EXIT` trap 秒级自毁 + `at` TTL 兜底，最小权限 `sa-antigravity-worker`） | **按秒微额 (<$1)** |
 
 ---
 
@@ -134,8 +134,8 @@
    - 新作业发现后进入 `pending` → 派发 `dispatched` → Server Shim 完成草稿（`pyFlag=1`）后回调 `awaiting_approval`（暂存草稿）→ 在看板确认或开启自动提交后进入 `submitting` → `submitted`。
    - 超时未响应（> 15 分钟）由 `SolverAgent.reconcileDispatchedTasks()` 自动对账回退；随堂测验/考试自动识别并归档 `ignored`，防误代做。
 2. **多通道推送可靠性与去重**：
-   - **Telegram 400 自动降级**：[`edge/src/notify.ts`](file:///home/Jimmy/afk-cloud/edge/src/notify.ts#L89-L127) 先发送 Markdown，一旦因课程名或 URL 中的 `_` / `[` 触发 HTTP 400，立即自动降级纯文本重发，避免静默丢消息。
-   - **通知箱全量提醒**：[`edge/src/store.ts`](file:///home/Jimmy/afk-cloud/edge/src/store.ts#L755-L785) 对 48h 内全部首次见到的未过期通知推送（含教室上课、调课、实验等普通重要通知）；单批超过 5 条时通过 `notice_overflow_batch` 汇总补发，不静默截断。
+   - **Telegram 400 自动降级**：[`edge/src/notify.ts`](./edge/src/notify.ts#L89-L127) 先发送 Markdown，一旦因课程名或 URL 中的 `_` / `[` 触发 HTTP 400，立即自动降级纯文本重发，避免静默丢消息。
+   - **通知箱全量提醒**：[`edge/src/store.ts`](./edge/src/store.ts#L755-L785) 对 48h 内全部首次见到的未过期通知推送（含教室上课、调课、实验等普通重要通知）；单批超过 5 条时通过 `notice_overflow_batch` 汇总补发，不静默截断。
    - **四重去重防刷屏**：
      - 同一 `workId` 在网页扫描与通知箱之间共享去重，已建档通知的作业不再重复推「新作业通知」；
      - 同一 `activeId` 签到失败仅首次推送异常详情；
@@ -185,7 +185,7 @@ bash infra/gcp/setup-iam-guardrails.sh
 | `pnpm afk discuss` | **讨论区自动拟稿**：结合课件 RAG 为未回复话题生成草稿供审批或发布 |
 | `pnpm afk materials` | **课件批量下载**：下载全量课程 PPT/PDF/Word 资料构建 1M 上下文 |
 | `pnpm afk signin` | **本地/代理签到扫描**：执行全类型签到打卡 |
-| `pnpm afk zhihuishu --url "<URL>" --rate 1.5 --headed` | **智慧树合规播放**：支持 `zhs` / `watch` 别名、最高 `1.5x` 倍速、`--headed` 桌面窗口与 `--tier gce` 云端 Spot 调度 |
+| `pnpm afk zhihuishu --url "<URL>" --rate 1.5 --headed` | **[TODO / 实验性] 智慧树合规播放**：已注册骨架入口，支持 `zhs` / `watch` 别名、最高 `1.5x` 倍速与 `--headed` 窗口；整条真机续播与 GCE 闭环待完善（见 [TODO](#十-todo-与后续演进路线)） |
 | `pnpm afk profile import-cookie --platform zhihuishu --cookie '<Cookie>'` | **导入浏览器 Cookie 并上云**：持久化至 `.cache/browser-profiles/` 并同步到 Edge D1；也支持 `push` / `pull` |
 | `pnpm afk burst --mode cloud-run\|gce` | **调度弹性算力**：触发 Cloud Run Job 或带物理 TTL 的 Spot GCE |
 | `pnpm afk setup-cf` / `setup-vm` / `setup-gcp` | **自动化基础设施编排**：Cloudflare 边缘一键开通、GCP 常驻机及安全围栏初始化 |
@@ -232,10 +232,18 @@ AFK_LOCK_FILE="/tmp/afk-test-lock-$$.lock" pnpm test
 
 ## 十、 TODO 与后续演进路线
 
-- [ ] **签到干净出口代理 / WebIM 被动监听闭环**：接入国内住宅/校园网出口代理专责承接 `mobilelearn` 签到请求，并打通 [`packages/adapters/chaoxing/webim.ts`](file:///home/Jimmy/afk-cloud/packages/adapters/chaoxing/webim.ts) 群聊信令监听与毫秒级签到回调。
+### 1. 学习通与 Edge 控制面 TODO
+- [ ] **签到干净出口代理 / WebIM 被动监听闭环**：接入国内住宅/校园网出口代理专责承接 `mobilelearn` 签到请求，并打通 [`packages/adapters/chaoxing/webim.ts`](./packages/adapters/chaoxing/webim.ts) 群聊信令监听与毫秒级签到回调。
 - [ ] **在读课程章节任务点看板合并上线**：审核并合入 `/api/courses/progress` 章节完成率统计与看板进度卡片。
-- [ ] **智慧树 GCE Spot 私有库分发与握手脚本合入**：将已验证的 [`spawn-ephemeral-gce.sh`](file:///home/Jimmy/afk-cloud/infra/gcp/spawn-ephemeral-gce.sh) 私有包分发、`e2-small` 默认配置与 `gologin?fromurl=...` 前置握手合入主分支，并验证海外 IP 下弹题/滑块实播稳定性。
-- [ ] **Telegram 交互增强**：为签到码/手势/智慧树随堂弹题通知接入 Telegram Bot Inline Keyboard 快速人工回传通道。
+- [ ] **Telegram 交互增强**：为签到码/手势通知接入 Telegram Bot Inline Keyboard 快速人工回传通道。
+
+### 2. 智慧树（知到）插件与相关模块 TODO *(暂缓推进)*
+- [ ] **合入与完善 GCE 临时实例调度及 `gologin` 握手**：将本地验证中的 [`spawn-ephemeral-gce.sh`](./infra/gcp/spawn-ephemeral-gce.sh) 私有包分发、`e2-small` 默认机型、[`browser-profile.ts`](./packages/core/browser-profile.ts) V8 内存配额放宽及 [`ZhihuishuAdapter`](./packages/adapters/zhihuishu/index.ts) 的 `gologin?fromurl=...` 前置握手整理合入主分支。
+- [ ] **海外无头环境下 `SESSION` / 易盾滑块 / 弹题接管闭环**：核查并解决 `studyservice-api.zhihuishu.com` 在无头模式下跳转首页问题；打通无头遇易盾滑块（`#captchaYidun`）或随堂弹题（`.dialog-test`）截图回传 Telegram 与人工响应后恢复播放的半自动接管流程。
+- [ ] **学号登录与 `--headed` 本地真机实播验收**：补充本地桌面 Chromium 有头模式完整播放一节至自动切换下一未完成小节、D1 学习进度真实增长以及 Cookie 自动保活续期的端到端验证。
+- [ ] **智慧树测试扩展**：在 [`tests/zhihuishu-plugin.test.ts`](./tests/zhihuishu-plugin.test.ts) 中补充 `gologin?fromurl=...` 入口导航、官网首页回跳重入及通知截图路径回归测试。
+
+### 3. CI/CD 与测试演进 TODO
 - [ ] **测试覆盖率与真实行为验证深化**：持续提高 Edge Worker、Server Shim 与适配器分支的断言覆盖，逐步减少脆弱的模拟逻辑，增加端到端真实集成检查。
 
 ---
