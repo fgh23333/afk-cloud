@@ -1,255 +1,289 @@
-# `afk-cloud` — 个人云端自治 Agent（Personal Autonomous Agent）
+<div align="center">
 
-<p align="center">
-  <img src="./dashboard-real-preview.png" alt="afk-cloud Dashboard" width="780" style="border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.3);" />
-</p>
+# ☁️ afk-cloud (v1.1.0)
 
-<p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/Agent-Google%20Cloud%20%2B%20gcloud%20%2B%20agy-blue.svg" alt="Agent: GCP + gcloud + agy">
-  <img src="https://img.shields.io/badge/Architecture-Core%20%2B%20Pluggable%20Skills-indigo.svg" alt="Plugins">
-  <img src="https://img.shields.io/badge/Monthly%20Cost-%240.00%20(Always%20Free)-success.svg" alt="Cost: $0.00">
-  <img src="https://img.shields.io/badge/AI%20Funnel-Gemini%204%20Hydrogen-purple.svg" alt="Gemini 4 Hydrogen">
-  <img src="https://img.shields.io/badge/Edge%20Portal-Cloudflare%20Workers%20%2B%20D1-orange.svg" alt="Cloudflare Edge">
-</p>
+**Cloudflare Edge + Google Cloud Free-First Multi-Platform Autonomous Agent**
 
-> **核心设计哲学**：
-> 这是一个纯粹专属于个人的 **Personal Autonomous Agent**。
-> 核心架构由 **Google Cloud (`e2-micro` + Cloud Run + Spot GCE) + `gcloud` + Antigravity CLI (`agy`) + 可选 Cloudflare 边缘层** 协同闭环：
->
-> 1. **核心大脑与极简基础设施**：以 Google Cloud Always Free **`e2-micro` 常驻机（0 元月租）** 作为宿主机运行 **Server Shim (`packages/shim`)** 与 **Antigravity CLI (`agy`)**，借助原生 **`gcloud` CLI** 按需调度 Cloud Run 免费层与带物理 TTL 自毁的 Spot GCE；
-> 2. **高校平台全面插件化（Plugins / Skills）**：核心宿主纯净解耦、零平台硬编码。**超星学习通、智慧树（知到）、拼题 A（PTA）** 全部实现统一 `PlatformPlugin` 接口契约，按需挂载、独立迭代；
-> 3. **双轨认知漏斗（Gemini 4 Hydrogen）**：构建 `Level 0 题库 SHA-256 毫秒级防投毒缓存` → `Level 1 Gemini 4 Hydrogen Medium 整卷批量客观题` → `Level 2 Gemini 4 Hydrogen XHigh (1M Context 课件 RAG / 多模态看图 / 本地沙箱自愈)` 三级智能漏斗；
-> 4. **长时算力优先免费层（$0.00/月）**：日常边缘巡检、讨论审批与通知调度运行于 Cloudflare Workers + D1 免费层；重型算力按需走 Cloud Run Jobs 免费额度；高内存浏览器视频任务可拉起 `e2-small` Spot 临时 GCE（带 `EXIT` trap 与 `at` 物理 TTL 熔断）；
-> 5. **全链路安全与合规铁律**：Cloudflare ↔ Server Shim 全程使用 **HMAC-SHA256 + 5 分钟时间窗 + 持久化 Nonce 防重放**，Edge 默认 Fail-Closed 鉴权，作业默认以**安全草稿（`pyFlag=1`）暂存**，智慧树严格采用**真实 Chromium CDP 合规倍速播放**（不篡改前端隐藏检测、不绕过验证码）。
+基于 **Cloudflare Workers + D1** 与 **GCP Free-First (`e2-micro` + Cloud Run Jobs)** 的多平台个人云端自治 Agent。  
+原生集成 **超星学习通** 与 **PTA 拼题 A** 双生产级协议插件、本地 **五语言编程评测沙箱**、**Antigravity (`agy`)** 深度求解引擎、**Telegram 双向远程控制** 以及 **6 标签暗夜毛玻璃 Web 控制台**。
+
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Plugins: Chaoxing + PTA](https://img.shields.io/badge/Plugins-Chaoxing%20%7C%20PTA%20Ready-emerald.svg)
+![Engine: agy](https://img.shields.io/badge/Engine-Antigravity%20CLI-purple.svg)
+![Edge: Cloudflare Workers + D1](https://img.shields.io/badge/Edge-Cloudflare%20Workers%20%2B%20D1-f38020.svg)
+![Infra: GCP Free Tier](https://img.shields.io/badge/Cost-%240.00%20Free--First-success.svg)
+
+</div>
 
 ---
 
-## 目录
-- [一、 系统架构总览](#一-系统架构总览)
-- [二、 认知引擎：三级智能漏斗与防投毒机制](#二-认知引擎三级智能漏斗与防投毒机制)
-- [三、 选装平台插件生态一览（Plugins / Skills）](#三-选装平台插件生态一览plugins--skills)
-- [四、 算力梯队与成本控制（$0.00/月优先）](#四-算力梯队与成本控制000月优先)
-- [五、 作业草稿、通知去重与防漏推送机制](#五-作业草稿通知去重与防漏推送机制)
-- [六、 极简实操：从 0 到 1 部署指南](#六-极简实操从-0-到-1-部署指南)
-- [七、 常用 CLI 指令速查表](#七-常用-cli-指令速查表)
-- [八、 CI/CD 质量门禁与本地验证](#八-cicd-质量门禁与本地验证)
-- [九、 注意事项与已知边界 (Caveats)](#九-注意事项与已知边界-caveats)
-- [十、 TODO 与后续演进路线](#十-todo-与后续演进路线)
-- [十一、 安全规范与开源许可](#十一-安全规范与开源许可)
+## 🌟 核心特性一览
+
+- **🧩 插件化多平台统一架构 (`Chaoxing` × `PTA` × `Zhihuishu [TODO]`)**
+  - **超星学习通 (`chaoxing` v1.2.0)**：原生协议适配器，覆盖多类型签到、课程公告同步、全部课程章节任务点进度追踪 (`/api/courses/progress`)、课件批量拉取与 RAG 上下文构建、作业/重开测验识别与双轨求解、讨论区抓帖 + 课件 RAG 拟稿与审批发布。
+  - **PTA 拼题 A (`pta` v1.1.0)**：直连 `pintia.cn/api`，支持 **7 类题型**（编程题、单选、多选、判断、填空、程序填空、主观题）、远程题库实时监听与上新同步、**五语言本地沙箱编译对拍**、PTA 官方判题轮询、以及 **防 `OVERRIDDEN` 整卷答案合并提交**（默认仅保存提交题解，绝不越权调用 `/end` 提前交卷）。
+- **🖥️ 双面协同控制面 (Cloudflare Edge + Host Shim)**
+  - Cloudflare Workers 7×24h Cron 自主巡检任务、通知与登录态，并在遇到源站对数据中心 IP 的 `403` 拦截时（如 PTA Cloudflare 风控）自动桥接宿主机 Shim (`POST /pta/inspect`) 完成兜底探测。
+  - 提供 **6 标签实时暗夜毛玻璃监控看板**（作业与实验任务、话题讨论、考试与随堂测验、自动签到记录、在读课程概况、通知通道与架构）。
+- **🤖 Telegram 双向指挥中心 + 5 通道 4 层防重告警**
+  - 原生接入 Telegram Webhook (`/api/tg/webhook`) 与宿主机对话网关 (`/agent-chat`)：随时查状态、刷作业、强刷 PTA / 超星章节进度、维护个人待办，甚至直接用自然语言向本地 `agy` 下发任务。
+  - 支持 **Telegram、Bark、Server酱、PushPlus、通用 Webhook (Discord/飞书/钉钉)** 五通道并发推送，内置 4 层防重去重冷却与 UTC+8 听课窗口管理。
+- **🛡️ 安全优先与零预算友好的三层算力漏斗**
+  - **Tier 1 (`$0.00`)**：宿主机 `e2-micro` 本地五语言编译沙箱 (`javac` Java 17 / `g++` / `gcc` / `python3` / `node`) + Antigravity CLI (`agy`) 求解。
+  - **Tier 2 (`$0.00` 免费额度)**：Google Cloud Run Jobs 无服务器容器批处理与 Cloudflare Edge Workers。
+  - **Tier 3 (`~$0.001 / 次`)**：按需拉起临时 `e2-micro` Spot GCE 节点执行高负载作业并带 TTL 自动销毁。
 
 ---
 
-## 一、 系统架构总览
+## 🏗️ 全局系统架构
 
-```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│              Tier 0: Cloudflare 边缘控制面 (Workers + D1 + KV + DO)             │
-│  • Durable Objects: SignAgent (分时段巡检/退避冷却) & SolverAgent (队列/对账)  │
-│  • Cloudflare D1: pending_tasks / notices / discussions / question_bank / logs │
-│  • Dark Glassmorphic 看板 (审批提交、失败重试、忽略归档、状态监控)              │
-│  • 多通道推送引擎: Telegram Bot (400 自动纯文本降级)、Webhook、Server酱、Bark    │
-└───────────────────────────────┬───────────────────────────────┬───────────────┘
-                                │ HMAC-SHA256 + Nonce           │ StorageState / D1 Sync
-                                ▼                               ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│        Tier 1/2: Google Cloud 宿主机 (e2-micro) & 弹性算力 (Cloud Run / GCE)    │
-│                                                                               │
-│  【Server Shim 宿主执行节点 (packages/shim)】                                  │
-│    • 全局硬件单例互斥锁 + 60s 看门狗（避免低配 969MB VM OOM）                 │
-│    • Antigravity CLI (agy) 调用与跨进程并发单例锁                             │
-│    • Linux 本地沙箱编译单测 (gcc / g++ / python3 / node)                       │
-│                                                                               │
-│  【gcloud 弹性算力调度 (infra/gcp)】                                          │
-│    • Cloud Run Jobs 免费层: 批量重型任务（每月 36万 vCPU-秒）                  │
-│    • Ephemeral Spot GCE (spawn-ephemeral-gce.sh): 完工 EXIT trap + at 熔断自毁 │
-├───────────────────────────────────────────────────────────────────────────────┤
-│                   标准平台插件体系 (Platform Plugins / Skills)                  │
-│    ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐        │
-│    │  plugin-chaoxing  │  │ plugin-zhihuishu  │  │    plugin-pta     │        │
-│    │   (超星学习通)    │  │   (智慧树知到)    │  │     (拼题 A)      │        │
-│    └───────────────────┘  └───────────────────┘  └───────────────────┘        │
-│    统一遵循 PlatformPlugin 契约 (packages/core/plugin.ts)                      │
-└───────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    User["👤 用户终端\n浏览器 Web 看板 / CLI / Telegram"] -->|HTTPS + Auth Cookie / Bearer| Edge
+    TG["🤖 Telegram Webhook\n/api/tg/webhook"] <-->|双向指令 & 推送| Edge
+
+    subgraph Edge ["☁️ Cloudflare Edge Control Plane (7×24h Serverless)"]
+        Worker["Cloudflare Worker\nCron 巡检 · 状态机 · SSE · Dashboard"]
+        D1[("Cloudflare D1 SQLite\ntasks / courses / notices / signins / discussions / state_kv")]
+        Worker <--> D1
+    end
+
+    subgraph GCP ["🖥️ Google Cloud Free-First Host (e2-micro + Cloudflare Tunnel)"]
+        Shim["Host Server Shim (:8788)\n任务执行队列 · 超星/PTA 后台监听 · /pta/inspect 兜底 · /agent-chat"]
+        Sandbox["本地五语言沙箱\njavac (Java 17) / g++ / gcc / python3 / node"]
+        Agy["Antigravity CLI (agy)\ngemini-4-hydrogen-medium / xhigh\n(+ OpenAI-compatible Fallback)"]
+        Burst["Tier 2/3 弹性算力\nCloud Run Jobs / Ephemeral Spot GCE"]
+        Shim --> Sandbox
+        Shim --> Agy
+        Shim -.->|高负载扩容| Burst
+    end
+
+    Edge <-->|Zero-Trust Tunnel + Bearer/HMAC| Shim
+    Edge -->|原生 HTTP 探测| Chaoxing["📚 超星学习通"]
+    Edge -->|REST API + 403 Shim 兜底| PTA["🧪 PTA 拼题 A (pintia.cn)"]
+    Shim --> Chaoxing
+    Shim --> PTA
+    Shim -.->|TODO / 实验性 CDP| ZHS["🎓 智慧树 (TODO)"]
+
+    Edge --> Notify["🔔 5 通道通知总线\nTelegram · Bark · Server酱 · PushPlus · Webhook"]
 ```
 
 ---
 
-## 二、 认知引擎：三级智能漏斗与防投毒机制
+## 🧩 平台插件体系与真实能力边界
 
-系统严格贯彻 **三级智能漏斗（Tiered Intelligence Funnel）**，实现 **“小题零损耗，大题榨干 1M 上下文”**：
+通过 `pnpm afk plugins` 可随时检视已注册插件与能力标签：
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│           Level 0: 零 Token 题库缓存层 (SHA-256 + 课程隔离 + 防投毒)     │
-│   • sha256(courseScope + 题干 + 规范化选项) 毫秒级查库                   │
-│   • 自动拦截“无法查看/拒绝回答/占位模板”等毒化缓存条目，绝不复用错误答案 │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ 未命中
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│      Level 1: Gemini 4 Hydrogen Medium 极速批处理 (配额护盾)             │
-│   • 默认 AFK_FLASH_MODEL=gemini-4-hydrogen-medium                      │
-│   • 整卷单选/多选/判断题打包单次 Batch Prompt，零串行浪费               │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ 主观题 / 大题 / 编程题
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│      Level 2: Gemini 4 Hydrogen XHigh 深度推理与沙箱自愈                 │
-│   • 默认 AFK_PRO_MODEL=gemini-4-hydrogen-xhigh                         │
-│   • 注入课程全量 PPT/PDF/Word 提取文本 (1M Context RAG)                │
-│   • 自动预下载防盗链题目附件/图片供多模态理解                           │
-│   • PTA 算法题在本地沙箱实测编译/运行，WA/TLE/CE 闭环自愈至 AC          │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| 插件 ID | 名称与版本 | 状态 | 核心能力 | 实现与策略说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`chaoxing`** | 超星学习通自适应插件 (`v1.2.0`) | ✅ **已投产** | `courses`, `materials`, `homework`, `signin`, `discussions` | 原生 HTTP 会话与登录态缓存；支持课程列表、课程公告、全课程章节任务点进度抓取、课件 RAG 资料下载、多类型签到（普通/二维码/位置/手势/拍照）与自适应退避、讨论区拟稿审批及作业/重开测验安全草稿暂存 |
+| **`pta`** | PTA 拼题 A 编程评测与监听插件 (`v1.1.0`) | ✅ **已投产** | `courses`, `homework`, `sandbox` | 直连 `pintia.cn/api` 题目集/题目/提交历史；支持 Edge + Shim 7×24h 活跃题目集自动发现、本地 5 语言沙箱对拍 + 远程判题轮询、7 种题型统一作答与 **防 `OVERRIDDEN` 全量答案合并暂存**；内置 `PTASession` `HttpOnly` 完整度拦截校验 |
+| **`zhihuishu`** | 智慧树 / 知到合规播放插件 (`v1.1.0`) | 🚧 **TODO / 实验性** | `courses`, `homework`, `browser-cdp` | 仅保留新版 `studyvideoh5.zhihuishu.com/stuStudy` 的 Playwright CDP 合规倍速播放代码骨架；因网易易盾滑块验证码与高内存浏览器在 `e2-micro`（1GB RAM）上的限制，暂未投入无人值守运行 |
 
 ---
 
-## 三、 选装平台插件生态一览（Plugins / Skills）
+## 🧪 三层算力漏斗与安全提交机制
 
-核心宿主与特定教学平台解耦，所有适配器统一实现 [`PlatformPlugin`](./packages/core/plugin.ts#L34-L76)：
+1. **五语言本地免费沙箱 (`packages/core/sandbox.ts`)**：
+   - 自动识别或按 `language` 指定 `cpp` (`g++`)、`c` (`gcc`)、`python` (`python3`)、`java` (`javac` + `java`, 自动提取 `public class` 名)、`javascript` (`node`)。
+   - 在提交或调用高阶模型前，先在本地隔离临时目录完成语法解析/编译与标准输入输出样例对拍，仅当编译与用例通过（或显式强制校验）时才推进流程。
+2. **双模型路由与降级链 (`packages/core/solver.ts`)**：
+   - 支持本地 Antigravity CLI (`agy`) 调度 `gemini-4-hydrogen-medium` / `gemini-4-hydrogen-xhigh`，以及兼容 OpenAI 接口的模型兜底（如 DeepSeek API）。
+   - 解析/模型层异常时自动记录诊断并在 D1 `tasks` 中留痕，不会覆盖已有高分答案或盲目交卷。
+3. **默认草稿暂存与 PTA 防覆盖提交**：
+   - **超星作业/测验**：默认 `CHAOXING_AUTO_SUBMIT=false`，将求解结果写入超星安全草稿，由用户在看板一键确认或命令行指定 `--auto-submit` 才提交；且对独立考试类任务额外设置人工确认护栏 (`homework-reopen-and-exam-guard`)。
+   - **PTA 题目集**：提交前读取服务端已有 `last-submissions` / `problem-set-exams`，将新答案与旧答案按题号/类型整合并集后提交，避免触发 PTA `OVERRIDDEN` 状态，且全程 **不调用** `/end` 结束作答接口。
 
-| 插件 ID | 适配平台 | 核心能力与合规机制 | 驱动技术栈 |
+---
+
+## 💬 Telegram Bot 远程指令集
+
+配置 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` 与 Webhook（`/api/tg/webhook`，建议配合 `TELEGRAM_WEBHOOK_SECRET`）后，即可直接在 Telegram 中双向操控 Edge 与宿主机 `agy`：
+
+| 指令 / 触发词 | 别名 | 执行平面 | 功能说明 |
 | :--- | :--- | :--- | :--- |
-| **`chaoxing`** | 超星学习通 | • DES 登录、在读课程与课件 RAG 资料批量拉取<br>• 网页端作业扫描（`getAllWork` 状态反查）+ 防空壳主观题/附件人工上传守卫<br>• 作业安全草稿先行（`pyFlag=1`）+ 打回重做自动重新激活<br>• 讨论区抓取、AI 拟稿与幂等发布闭环（区分 `myReplied` 与自动归档过期讨论）<br>• 全类型签到协议（位置/拍照/手势/二维码）+ WebIM 信令解析基础 | 原生 HTTP + DES + Edge Durable Objects |
-| **`zhihuishu` *(TODO)*** | 智慧树 (知到) | • **🚧 状态：框架已搭好，整条实播闭环列为 TODO**<br>• 已具备合规 CDP 播放骨架（[`ZhihuishuAdapter`](./packages/adapters/zhihuishu/index.ts) + 原生 [`CdpClient`](./packages/adapters/web-agent/cdp-client.ts)），仅使用 `1.0x/1.25x/1.5x` 官方控件倍速与自然 `video.ended` 切课<br>• 待补齐：无头会话握手稳定性、易盾滑块/弹题半自动接管与云端 GCE 调度合并验证 | Chromium CDP + Cloudflare D1 Session 同步 |
-| **`pta`** | 拼题 A (PTA) | • 浏览器 Profile Cookie 持久化免登 + DOM 题面提取<br>• 本地 Linux 沙箱（`gcc`/`g++`/`python3`/`node`）评测并迭代修复至 AC | Chromium Profile + 本地代码沙箱 |
+| `/start` / `/help` | — | Cloudflare Edge | 查看机器人状态与常用指令菜单 |
+| `/status` | `状态` | Cloudflare Edge | 查询 D1 中在读课程数、任务数、签到累计、题库缓存及 Shim 配置状态 |
+| `/tasks` | `作业` | Cloudflare Edge | 按超星 / PTA 分组列出最近待办作业、草稿与完成状态 |
+| `/progress` | `进度` | Cloudflare Edge | 读取 D1 已缓存的超星全部课程章节任务点进度汇总 |
+| `/progress!` | `刷新进度` | Shim (`POST /agent-chat`) | 实时登录超星抓取全部在读课程最新章节完成率并同步回写 D1 |
+| `/pta` / `/pta!` | `刷新PTA` | Shim (`POST /agent-chat`) | 实时扫描 `pintia.cn` 活跃题目集与作答状态，同步 D1 并返回明细 |
+| `/todos` | `待办` | Shim (`POST /agent-chat`) | 查看本地轻量个人待办清单 |
+| `/todo <内容>` | — | Shim (`POST /agent-chat`) | 新增一条个人待办事项 |
+| `/done <关键词或序号>` | — | Shim (`POST /agent-chat`) | 勾选完成并归档对应个人待办 |
+| `/news` | `资讯` | Shim (`POST /agent-chat`) | 拉取并展示超星课程公告与近期通知摘要 |
+| `/activity` | `日志` | Shim (`POST /agent-chat`) | 查看 Shim 最近调度执行与事件日志 |
+| `/evolve` | — | Shim (`POST /agent-chat`) | 查看当前引擎演进与宿主机巡检健康状态 |
+| *任意自然语言消息* | — | Shim -> `agy` | 异步投递至宿主机 Antigravity CLI (`agy`) 自主处理并回传结果 |
 
 ---
 
-## 四、 算力梯队与成本控制（$0.00/月优先）
+## 🔔 五通道通知与 4 层防重去重机制
 
-| 算力等级 | 适用场景 | 基础设施与免费额度 | 预估月费 |
-| :--- | :--- | :--- | :---: |
-| **Tier 0** | 24/7 定时巡检、通知箱与作业轮询、D1 记忆库、Web 看板、多通道消息推送 | **Cloudflare Workers + D1 + KV + Durable Objects**（免费层） | **$0.00** |
-| **Tier 1 (常驻)** | Server Shim 守护、轻量 HTTP 任务、超星课件提取与 `agy` 调度 | **Google Cloud Always Free `e2-micro`**（`us-west1` 1 台常驻，30GB 磁盘） | **$0.00** |
-| **Tier 1 (弹性)** | 批量课件向量化、重型作业批处理 | **Google Cloud Run Jobs 免费层**（每月 `360,000` vCPU-秒） | **$0.00** |
-| **Tier 2 (突发)** | 需完整 Chromium 内存（建议 `e2-small` 2GB）的智慧树等浏览器任务 | **Spot GCE 临时实例**（[`spawn-ephemeral-gce.sh`](./infra/gcp/spawn-ephemeral-gce.sh)：完工 `EXIT` trap 秒级自毁 + `at` TTL 兜底，最小权限 `sa-antigravity-worker`） | **按秒微额 (<$1)** |
-
----
-
-## 五、 作业草稿、通知去重与防漏推送机制
-
-1. **作业生命周期与审批门**：
-   - 新作业发现后进入 `pending` → 派发 `dispatched` → Server Shim 完成草稿（`pyFlag=1`）后回调 `awaiting_approval`（暂存草稿）→ 在看板确认或开启自动提交后进入 `submitting` → `submitted`。
-   - 超时未响应（> 15 分钟）由 `SolverAgent.reconcileDispatchedTasks()` 自动对账回退；随堂测验/考试自动识别并归档 `ignored`，防误代做。
-2. **多通道推送可靠性与去重**：
-   - **Telegram 400 自动降级**：[`edge/src/notify.ts`](./edge/src/notify.ts#L89-L127) 先发送 Markdown，一旦因课程名或 URL 中的 `_` / `[` 触发 HTTP 400，立即自动降级纯文本重发，避免静默丢消息。
-   - **通知箱全量提醒**：[`edge/src/store.ts`](./edge/src/store.ts#L755-L785) 对 48h 内全部首次见到的未过期通知推送（含教室上课、调课、实验等普通重要通知）；单批超过 5 条时通过 `notice_overflow_batch` 汇总补发，不静默截断。
-   - **四重去重防刷屏**：
-     - 同一 `workId` 在网页扫描与通知箱之间共享去重，已建档通知的作业不再重复推「新作业通知」；
-     - 同一 `activeId` 签到失败仅首次推送异常详情；
-     - `mobilelearn` 机房 IP 封禁告警冷却拉长至 `12` 小时；
-     - 每日 `08:30` / `21:00` (UTC+8) 简报通过 D1 `digest_lock` 做同分钟幂等锁定。
+- **5 通道并行通知总线 (`edge/src/notify.ts`)**：支持 **Telegram Bot、Bark、Server酱、PushPlus、Webhook**。
+- **4 层防漏推防重复机制**：
+  1. **冷却与单次失败去重**：超星 `mobilelearn` 若遭遇机房 IP 封禁，写入 `blockedCooldownUntilMs` 触发 **12 小时告警冷却**；同一 `activeId` 签到失败仅首次告警；PTA 检查与新题目集推送内置 12 小时/指纹去重，避免周期轮询刷屏。
+  2. **D1 分布式防重锁 (`LOCK:<key>`)**：通过 Cloudflare D1 原子状态锁拦截 Cron 与手动请求并发造成的重复推送。
+  3. **摘要指纹状态差对比 (`last_summary`)**：全量汇总仅在任务指纹真正变化时触发简报，无变动零打扰。
+  4. **公告溢出合并 + UTC+8 窗口控制**：新公告超过 5 条时逐条推送前 5 条并自动合并推送剩余汇总 (`notice_overflow_batch`)；高频率签到监听支持通过 `SIGN_LISTEN_WINDOWS`（默认 `08:15-11:40,13:00-16:20,18:00-19:35`）精确限定于北京时间授课时段。
 
 ---
 
-## 六、 极简实操：从 0 到 1 部署指南
+## 🚀 快速开始与部署
 
-### 1. 初始化主机与环境
+### 1. 环境准备
+
+- **本地 / 宿主机依赖**：Node.js >= 20、`pnpm`
+- **沙箱编译器按需安装**（用于 C/C++/Python/Java/JS 本地编程题验证）：
+  - Java 17+: `javac` & `java`
+  - C/C++: `gcc` / `g++`
+  - Python 3: `python3`
+- **Antigravity CLI**：已在宿主机配置好 `agy`（或配置 `AFK_SOLVER_PROVIDER=openai` 与 `OPENAI_API_KEY` 作为备选模型后端）
+
 ```bash
-git clone https://github.com/fgh23333/afk-cloud.git
+git clone https://github.com/YOUR_USERNAME/afk-cloud.git
 cd afk-cloud
 pnpm install
 cp .env.example .env
-# 编辑 .env 填入 CHAOXING_PHONE / CHAOXING_PASSWORD / AFK_EDGE_WORKER_URL / AFK_EDGE_BEARER_TOKEN / AFK_SHIM_SECRET 等
+cp edge/wrangler.jsonc.example edge/wrangler.jsonc
 ```
 
-### 2. 部署轻量边缘控制面（Cloudflare Workers + D1）
+### 2. 配置环境变量
+
+编辑 `.env`（已被 `.gitignore` 严格忽略，**切勿提交到仓库**）。核心变量分类如下（完整模板见 [.env.example](./.env.example)）：
+
+- **超星 / PTA 登录与策略**：
+  - `CHAOXING_PHONE`、`CHAOXING_PASSWORD`、`CHAOXING_REALNAME`、`CHAOXING_FID`、`CHAOXING_AUTO_SUBMIT`
+  - `CHAOXING_SIGN_LON`、`CHAOXING_SIGN_LAT`、`CHAOXING_SIGN_ADDRESS`（位置签到参数）
+  - `PTA_SESSION_COOKIE`（含 `HttpOnly` 的完整 Cookie 串，亦支持写入 D1 会话表）
+  - `HOMEWORK_SCAN_INTERVAL_MINUTES`（默认 `10`）、`SIGN_LISTEN_WINDOWS`、`AUTO_PUBLISH_DISCUSSIONS`（默认 `false`）
+  - `PTA_WATCH_ENABLED`（默认 `true`）、`PTA_WATCH_INTERVAL_MINUTES`（默认 `10`）
+- **AI 求解路由**：
+  - `AFK_SOLVER_PROVIDER`（默认 `agy`）、`AFK_FLASH_MODEL`（`gemini-4-hydrogen-medium`）、`AFK_PRO_MODEL`（`gemini-4-hydrogen-xhigh`）
+  - 备选 OpenAI 兼容接口：`OPENAI_API_KEY`、`OPENAI_BASE_URL`
+- **Cloudflare Edge & Shim 安全连接**：
+  - `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`AFK_EDGE_WORKER_URL`
+  - `AFK_EDGE_BEARER_TOKEN`、`DASHBOARD_PASSWORD`、`AFK_SHIM_SECRET`、`AFK_SHIM_URL`
+  - `AFK_TASK_HOST_ALLOWLIST`（默认 `chaoxing.com,zhihuishu.com,pintia.cn`，Fail-Closed SSRF 域白名单）
+- **GCP Infra 与弹性算力**：
+  - `GCP_PROJECT_ID`、`GCP_REGION`、`GCP_ZONE`、`GCP_SERVICE_ACCOUNT`
+  - `CLOUD_RUN_JOB_NAME`、`GCE_BURST_MACHINE_TYPE`（`e2-micro`）、`GCE_BURST_TTL_MINUTES`、`GCE_BURST_USE_SPOT`
+- **通知与 Telegram Bot**：
+  - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`TELEGRAM_WEBHOOK_SECRET`
+  - `WEBHOOK_URL`、`SERVERCHAN_KEY`、`PUSHPLUS_TOKEN`、`BARK_KEY`
+
+### 3. 一键自动化基础设施编排
+
+项目提供端到端 CLI 与 `infra/gcp/*.sh` 脚本（支持 `--dry-run` 预演）：
+
 ```bash
-npx wrangler login
-pnpm afk setup-cf
+# 查看全量编排预演（Cloudflare D1 + Worker + GCP VM + Cloud Run Jobs + IAM 护栏）
+pnpm afk setup-all --dry-run
+
+# 执行 Cloudflare Edge 迁移与 Worker 部署
+pnpm afk:setup-cf
+# 或使用底层 workspace 命令
+pnpm edge:migrate:remote
+pnpm edge:deploy
+
+# 执行 GCP 底座与弹性算力配置
+pnpm afk:setup-gcp
 ```
 
-### 3. 启动本机 Server Shim（供 Edge 安全派发作业与讨论拟稿）
+`infra/gcp/` 运维脚本清单（共 7 个，均纳入 CI `bash -n` 静态检查）：
+- `bootstrap-gcp-node.sh`：初始化 Ubuntu/Debian 云主机与 Node/pnpm/浏览器/沙箱运行环境
+- `provision-free-vm.sh`：创建 GCP Always-Free `e2-micro` VM
+- `run-shim-tunnel.sh`：配置 Cloudflare Tunnel + Host Shim (`systemd`) 常驻守护
+- `setup-iam-guardrails.sh`：配置最小权限服务账号与安全护栏
+- `deploy-cloud-run-job.sh` / `deploy-cloud-run-service.sh`：部署 Tier 2 Cloud Run 批处理与常驻服务
+- `spawn-ephemeral-gce.sh`：拉起带 TTL 自毁的临时 Spot GCE 突发节点
+
+### 4. 导入 PTA Cookie 与启动宿主机 Shim
+
+由于 `PTASession` 带有 `HttpOnly` 标记（详见下方注意事项），请从浏览器开发者工具请求头/Application 中复制完整 Cookie 导入持久化 Profile 并推送云端：
+
 ```bash
+# 导入 PTA 完整 Cookie 并自动推云同步到 D1
+pnpm afk profile import-cookie --platform pta --cookie "PTASession=...; JSESSIONID=..."
+
+# 检查环境、登录态与 Cloudflare Edge 健康状态 (/health)
+pnpm afk:status
+
+# 启动宿主机 Shim（含超星周期巡检、PTA 监听、agy 执行器与 Telegram agent-chat 网桥）
 pnpm shim
-# 生产机建议使用 systemd 托管 (afk-shim.service) + cloudflared (afk-tunnel.service)
-```
-
-### 4. 配置 GCP 最小权限（如需调度 Cloud Run / 临时 Spot GCE）
-```bash
-bash infra/gcp/setup-iam-guardrails.sh
 ```
 
 ---
 
-## 七、 常用 CLI 指令速查表
+## 💻 CLI 命令速查手册
 
-| 指令 | 说明 |
-| :--- | :--- |
-| `pnpm afk status` | **全局自检**：检查 `.env`、Chromium、登录态与各服务连通性 |
-| `pnpm afk plugins` / `skills` | **插件体系一览**：查看已注册的 `chaoxing`、`pta`、`zhihuishu` 插件与能力清单 |
-| `pnpm afk scan` | **课程与作业扫描**：扫描在读课程待办作业；加 `--progress` 可同步章节任务点进度 |
-| `pnpm afk solve` | **双轨作业求解**：缓存 → Flash 批量客观题 → Pro 主观/大题，安全暂存草稿 (`--auto-submit` 可直接提交) |
-| `pnpm afk discuss` | **讨论区自动拟稿**：结合课件 RAG 为未回复话题生成草稿供审批或发布 |
-| `pnpm afk materials` | **课件批量下载**：下载全量课程 PPT/PDF/Word 资料构建 1M 上下文 |
-| `pnpm afk signin` | **本地/代理签到扫描**：执行全类型签到打卡 |
-| `pnpm afk zhihuishu --url "<URL>" --rate 1.5 --headed` | **[TODO / 实验性] 智慧树合规播放**：已注册骨架入口，支持 `zhs` / `watch` 别名、最高 `1.5x` 倍速与 `--headed` 窗口；整条真机续播与 GCE 闭环待完善（见 [TODO](#十-todo-与后续演进路线)） |
-| `pnpm afk profile import-cookie --platform zhihuishu --cookie '<Cookie>'` | **导入浏览器 Cookie 并上云**：持久化至 `.cache/browser-profiles/` 并同步到 Edge D1；也支持 `push` / `pull` |
-| `pnpm afk burst --mode cloud-run\|gce` | **调度弹性算力**：触发 Cloud Run Job 或带物理 TTL 的 Spot GCE |
-| `pnpm afk setup-cf` / `setup-vm` / `setup-gcp` | **自动化基础设施编排**：Cloudflare 边缘一键开通、GCP 常驻机及安全围栏初始化 |
+基础入口：`pnpm afk <command> [options]`（支持 `pnpm afk help` / `--help` / `-h`）
 
----
-
-## 八、 CI/CD 质量门禁与本地验证
-
-GitHub Actions 包含两条工作流（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 与 [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml)）：
-
-1. **PR / Push 门禁（`ci.yml`）**：
-   - **全量双端静态类型检查**（`pnpm typecheck`）：同时校验根目录 `packages/` + `tests/` 与 Cloudflare Worker `edge/tsconfig.json`；
-   - **完整集成与安全测试套件**（`pnpm test`）：包含核心链路、频控退避、签到状态机、讨论幂等、失败重试、题库防投毒、HMAC/Nonce 安全加固、打回重做/通知去重、智慧树 CDP 插件以及 Edge auth/notify/溢出汇总覆盖测试，全部通过隔离锁变量运行；
-   - **孤儿测试文件守卫**：校验 `tests/*.test.ts` 下每一个测试文件都已接入 [`package.json`](./package.json) 的 `test` 脚本；
-   - **Edge Worker 离线打包校验**：通过 `wrangler deploy --dry-run` 验证 Edge 代码可无报错打包构建；
-   - **运维脚本语法门禁**：对 `infra/gcp/*.sh` 全部执行 `bash -n` 静态语法检查；
-   - **凭证泄露与 SQL 幂等审计**：拦截 `.env` / 密钥文件 / 硬编码 Token 或Cookie 入库，并强制要求 `edge/migrations/*.sql` 全部带有 `IF NOT EXISTS`。
-2. **主分支持续交付与自动回滚（`deploy.yml`）**：
-   - `edge/**` 合入 `main` 时自动执行类型检查、远程 D1 迁移、`wrangler deploy --keep-vars`，并对 `/health` 进行 5 次观测探测，失败即自动 `wrangler rollback`。
-
-本地完整验证命令（低内存主机建议配合隔离锁环境变量）：
-```bash
-pnpm typecheck
-AFK_LOCK_FILE="/tmp/afk-test-lock-$$.lock" pnpm test
-```
+| 命令 / 快捷脚本 | 常用参数 | 功能说明 |
+| :--- | :--- | :--- |
+| `status` (`pnpm afk:status`) | — | 环境自检、本地 Profile/登录态及 Edge `/health` 探测 |
+| `plugins` / `skills` | — | 查看已注册平台插件、版本号与能力矩阵 |
+| `scan` (`pnpm afk:scan`) | `--platform chaoxing\|pta\|all` `--progress` | 扫描超星在读课程与待办作业，或扫描 PTA 活跃题目集 |
+| `progress` / `chapters` (`pnpm afk:progress`) | — | 扫描超星全部课程章节任务点完成进度并同步至 D1 看板 |
+| `solve` (`pnpm afk:solve`) | `--platform chaoxing\|pta\|all` `--auto-submit` `--tier local\|cloud-run\|gce` | 双轨求解待办作业（默认安全草稿暂存） |
+| `pta` (`pnpm afk:pta`) | `scan \| solve \| watch` `--id <psId>` `--auto-submit` `--interval <min>` | PTA 拼题 A 专项扫描、本地沙箱求解暂存与后台监听 |
+| `discuss` (`pnpm afk:discuss`) | `--auto-submit` | 抓取超星讨论区话题、结合课件 RAG 拟稿及审批/发布 |
+| `materials` / `download` (`pnpm afk:materials`) | — | 批量下载超星课程资料构建本地 RAG 上下文 |
+| `signin` (`pnpm afk:signin`) | — | 手动触发一次超星全课程活动签到巡检 |
+| `poll` (`pnpm afk:poll`) | `--loop` `--interval <min>` | 拉取 D1 待执行队列，并同步巡检超星与 PTA |
+| `profile` | `<status\|import-cookie\|push\|pull>` `--platform pta\|zhihuishu` `--cookie "..."` | 管理本地持久化 Profile 登录态及与 D1 的加密/安全同步 |
+| `web` | `--platform pta\|zhihuishu` | 启动挂载持久化 Profile 的 CDP 浏览器实例（配合人工登录导出状态） |
+| `notify` / `digest` | — | 手动触发一次全平台汇总简报推送 |
+| `shim` (`pnpm shim`) | `--host 127.0.0.1` `--port 8788` | 启动宿主机 Server Shim |
+| `setup-cf` / `setup-vm` / `setup-gcp` / `setup-all` | `--dry-run` | 自动化编排 Cloudflare 边缘层（Workers + 5 份 D1 SQL 迁移）与 GCP 基础设施 |
+| `burst` | `--mode cloud-run\|gce` | 手动触发 Tier 2/3 弹性算力扩容任务 |
+| `zhihuishu` / `zhs` / `watch` | — | `[TODO / 实验性]` 智慧树合规真实播放守护 |
 
 ---
 
-## 九、 注意事项与已知边界 (Caveats)
+## 🧪 CI/CD 与质量覆盖率门禁
 
-1. **⚠️ 超星 `mobilelearn` 海外机房 IP 封禁**：
-   - 经实测，**Cloudflare Workers**（`104.23.213.x`）与 **GCP 云主机**（`35.247.85.194`）均会被 `mobilelearn.chaoxing.com` 拦截并返回 `当前ip [...] 已被封禁，请勿使用vpn、代理等网络`。
-   - 目前 Edge 侧通过 `notice.chaoxing.com` 通知箱、网页作业与讨论区仍可正常工作，但**实时主动签到扫描必须经由国内网络、校园网或非风控住宅代理出口执行**。
-2. **⚠️ 签到监听时段与频控退避**：
-   - 默认签到扫描窗口限制在 UTC+8 `08:15-11:40, 13:00-16:20, 18:00-19:35`（通过 `SIGN_LISTEN_WINDOWS` 配置，设为 `*` 可放开），且按每批 4 门加随机抖动轮转；触发「请勿频繁操作」后将按 `15m → 30m → 60m → 120m` 指数退避，单次探测异常则锁定 15 分钟。
-3. **⚠️ 智慧树（知到）真实播放与人机验证边界**：
-   - 智慧树登录页（含学号登录）受 **网易易盾滑块（`initNECaptcha`）** 强制保护；本插件严格不破解、不绕过验证码，需先在本地浏览器登录后通过 `profile import-cookie --platform zhihuishu` 导入 `zhihuishu.com` Cookie，或使用 `--headed` 打开窗口由本人完成验证。
-   - 宿主机 `e2-micro`（总内存 969 MB）默认触发 `< 220 MB` 内存守卫防 OOM；云端调度建议使用 `--tier gce` 拉起 `e2-small` Spot 实例。无头模式下若播放中途弹出滑块或随堂测验，会立即暂停、截图并通过 Edge 发送 Telegram 告警后退出等待人工接管。
-4. **⚠️ 统一时区与测试锁隔离**：
-   - 全系统业务时间、Cron 窗口与日志均以 **UTC+8 (`Asia/Shanghai`)** 为准。
-   - 在运行宿主机 `afk-shim.service` 的同一台机器上跑测试时，务必设置临时锁路径（如 `AFK_LOCK_FILE=/tmp/test.lock`），避免干扰线上正在执行的 `agy` 单例锁。
+`.github/workflows/ci.yml` 与本地 `pnpm typecheck && pnpm test` 共同覆盖以下门禁：
 
----
-
-## 十、 TODO 与后续演进路线
-
-### 1. 学习通与 Edge 控制面 TODO
-- [ ] **签到干净出口代理 / WebIM 被动监听闭环**：接入国内住宅/校园网出口代理专责承接 `mobilelearn` 签到请求，并打通 [`packages/adapters/chaoxing/webim.ts`](./packages/adapters/chaoxing/webim.ts) 群聊信令监听与毫秒级签到回调。
-- [ ] **在读课程章节任务点看板合并上线**：审核并合入 `/api/courses/progress` 章节完成率统计与看板进度卡片。
-- [ ] **Telegram 交互增强**：为签到码/手势通知接入 Telegram Bot Inline Keyboard 快速人工回传通道。
-
-### 2. 智慧树（知到）插件与相关模块 TODO *(暂缓推进)*
-- [ ] **合入与完善 GCE 临时实例调度及 `gologin` 握手**：将本地验证中的 [`spawn-ephemeral-gce.sh`](./infra/gcp/spawn-ephemeral-gce.sh) 私有包分发、`e2-small` 默认机型、[`browser-profile.ts`](./packages/core/browser-profile.ts) V8 内存配额放宽及 [`ZhihuishuAdapter`](./packages/adapters/zhihuishu/index.ts) 的 `gologin?fromurl=...` 前置握手整理合入主分支。
-- [ ] **海外无头环境下 `SESSION` / 易盾滑块 / 弹题接管闭环**：核查并解决 `studyservice-api.zhihuishu.com` 在无头模式下跳转首页问题；打通无头遇易盾滑块（`#captchaYidun`）或随堂弹题（`.dialog-test`）截图回传 Telegram 与人工响应后恢复播放的半自动接管流程。
-- [ ] **学号登录与 `--headed` 本地真机实播验收**：补充本地桌面 Chromium 有头模式完整播放一节至自动切换下一未完成小节、D1 学习进度真实增长以及 Cookie 自动保活续期的端到端验证。
-- [ ] **智慧树测试扩展**：在 [`tests/zhihuishu-plugin.test.ts`](./tests/zhihuishu-plugin.test.ts) 中补充 `gologin?fromurl=...` 入口导航、官网首页回跳重入及通知截图路径回归测试。
-
-### 3. CI/CD 与测试演进 TODO
-- [ ] **测试覆盖率与真实行为验证深化**：持续提高 Edge Worker、Server Shim 与适配器分支的断言覆盖，逐步减少脆弱的模拟逻辑，增加端到端真实集成检查。
+- **全仓严格类型检查 (`pnpm typecheck`)**：同时检查主工程与 `edge/tsconfig.json` Cloudflare Workers 类型约束。
+- **CLI 与插件契约冒烟**：校验 `cli --help`、`cli plugins` 同时输出 `[chaoxing]`、`[pta]`、`[zhihuishu]`，以及 `setup-cf --dry-run`、`setup-gcp --dry-run`。
+- **11 个全量自动化测试套件 (`pnpm test`)**：
+  1. `tests/smoke.test.ts`：核心模块与协议适配器基础冒烟
+  2. `tests/ratelimit-backoff.test.ts`：速率限制、指数退避与冷却状态机
+  3. `tests/signin-and-submitting.test.ts`：多类型签到解析与安全提交护栏
+  4. `tests/discussion-idempotency.test.ts`：讨论区发帖幂等性、拟稿与审批隔离
+  5. `tests/failed-task-retry.test.ts`：失败任务重试与状态机流转
+  6. `tests/solver-cache-guard.test.ts`：题库缓存隔离、高分防护与安全重用
+  7. `tests/security-hardening.test.ts`：加密签名、鉴权中间件与凭证脱敏护栏
+  8. `tests/homework-reopen-and-exam-guard.test.ts`：重开/打回作业识别与独立考试人工护栏
+  9. `tests/zhihuishu-plugin.test.ts`：智慧树插件注册、CDP 骨架状态与内存防护
+  10. `tests/pta-plugin.test.ts`：PTA 7 题型解析、防 `OVERRIDDEN` 合并（零 `/end`）、Java 17/多语言沙箱对拍与 Edge/Shim 监听去重及 `403` 兜底降级
+  11. `tests/ci-and-edge-coverage.test.ts`：Edge Fail-Closed 鉴权与 SSRF 白名单、5 通道通知并发、超 5 条通知溢出合并、`mobilelearn` 12h 封禁冷却、`SIGN_LISTEN_WINDOWS`、以及“所有 `tests/*.test.ts` 必须纳管于 `package.json`”完整性校验
+- **Edge Dry-Run 打包、SQL 幂等与防泄漏检查**：校验 `wrangler deploy --dry-run`（CI 临时模板注入）、D1 迁移文件 `0001`–`0005` 的 `IF NOT EXISTS` 幂等性、`infra/gcp/*.sh` 全量 `bash -n`，以及 `.env` / `wrangler.jsonc` / 硬编码秘钥扫描。
 
 ---
 
-## 十一、 安全规范与开源许可
+## ⚠️ 注意事项与安全护栏 (Caveats)
 
-1. **绝对零凭据入库**：严禁将 `.env`、`wrangler.jsonc`、私钥、`CASTGC`、手机号或明文密码提交到 Git 历史。
-2. **Cloudflare 受管资源隔离**：自动化脚本仅允许操作带 `afk-` 或 `afk-cloud-` 前缀的受管资源，严禁改动账户下其他无关资源。
-3. **开源许可**：基于 [MIT License](./LICENSE) 开源，仅供个人效率自动化与 Agent 工程实践交流使用，请自觉遵守所属高校学术与课程规范。
+- **超星机房 IP 风控**：`mobilelearn.chaoxing.com` 对海外云机房 IP（包括 Cloudflare Edge 节点与海外 GCP VM）存在较严格风控，若触发封禁会进入 **12 小时告警冷却** 并在 Dashboard 展示受限提示，此时建议配合宿主机本土代理或等待自动冷却。
+- **PTA Cookie 的 `PTASession` 为 `HttpOnly`**：在浏览器 Console 中执行 `document.cookie` **无法** 读出 `PTASession`。请务必在登录 `pintia.cn` 后通过开发者工具 `Application -> Cookies` 或 `Network` 请求头复制包含 `PTASession=...` 的完整 Cookie 字符串，交由 `pnpm afk profile import-cookie --platform pta --cookie "..."` 导入；代码内已增加 `HttpOnly` 缺失拦截保护，防止不完整 Cookie 覆盖云端有效会话。
+- **PTA 安全提交原则**：系统默认且强制禁止在无人确认下自动调用结束考试 `/end` 接口，并始终合并服务端已提交答案以防止 `OVERRIDDEN` 覆盖误伤。
+- **智慧树 (`zhihuishu`) 当前属于实验性 TODO**：因网易易盾滑块验证机制与无头 Chromium 浏览器在 `e2-micro`（1GB RAM + 2GB Swap）上的内存消耗，暂不建议在无人工干预的 24/7 云端生产环境中开启无人托管。
+- **时区与跨进程锁**：`SIGN_LISTEN_WINDOWS` 固定基于 **UTC+8**（北京时间）判定，运行并行任务或单元测试时需依赖 `AFK_LOCK_FILE` 文件锁保证单实例互斥。
+
+---
+
+## 🗺️ Roadmap / TODO
+
+- [ ] **智慧树 (`zhihuishu`) 插件生产化**：完善网易易盾验证码检测与 Telegram 人工接管回传闭环，优化无头浏览器内存占用或支持远程轻量浏览器节点。
+- [ ] **超星 `mobilelearn` 代理池与 WebIM 常驻**：支持国内住宅代理按课程/签到路由配置，探索 WebIM 实时长连接捕获以实现秒级签到触发。
+- [ ] **Telegram Inline Keyboard 交互按钮**：为待审批讨论拟稿、安全草稿作业与异常告警增加 Telegram 行内确认按钮（一键发布草稿 / 一键重试 / 一键忽略）。
+- [ ] **容器化多账号发行版**：提供标准 Docker / DevContainer 一键部署镜像，便于社区开发者零门槛私有化托管。
+
+---
+
+<div align="center">
+
+Made with ☁️ **Cloudflare Workers + D1** · 🤖 **Google Antigravity CLI (`agy`)** · 🐧 **GCP Always-Free `e2-micro`**
+
+</div>

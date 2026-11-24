@@ -5,6 +5,7 @@ import { formatUtc8Now } from '../../core/types';
 import { getManagedBrowserStatus, startManagedBrowser, stopManagedBrowser } from './browser';
 import { handleAgentChatRequest } from './agent-chat';
 import { triggerDiscussionProcessing } from './discussions';
+import { runPtaMonitorCycle, startPtaMonitor, stopPtaMonitor } from './pta-monitor';
 import { enqueueJob, getJob, listJobs, pendingQueueLength, releaseLock, startAgyWatchdog } from './runner';
 import {
   assertShimStartupSecurity,
@@ -257,6 +258,15 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
         return;
       }
 
+      // 9. POST /pta/inspect (接收 Edge 下发或手动触发的 PTA 监听扫描并同步 D1)
+      if (pathname === '/pta/inspect' && method === 'POST') {
+        const body = parseJson<Record<string, unknown>>(raw);
+        const force = body.force !== false;
+        const result = await runPtaMonitorCycle({ force });
+        sendJson(res, result.ok ? 200 : 502, result);
+        return;
+      }
+
       throw new HttpError(404, 'Endpoint Not Found');
     } catch (err: any) {
       const status = err instanceof HttpError || err instanceof ValidationError ? err.status : 500;
@@ -283,12 +293,16 @@ if (require.main === module) {
   server.listen(cfg.port, cfg.host, () => {
     // 启动宿主机 60s 看门狗巡检与孤儿进程回收器
     startAgyWatchdog();
+    // 启动 PTA (pintia.cn) 后台监听周期巡检（随 PTA_WATCH_ENABLED 开关控制）
+    startPtaMonitor();
 
     process.on('SIGTERM', () => {
+      stopPtaMonitor();
       releaseLock();
       process.exit(0);
     });
     process.on('SIGINT', () => {
+      stopPtaMonitor();
       releaseLock();
       process.exit(0);
     });

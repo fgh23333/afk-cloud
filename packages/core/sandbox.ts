@@ -20,12 +20,12 @@ export interface SandboxRunResult {
  */
 export async function runCodeInLocalSandbox(options: {
   code: string;
-  language: 'python' | 'cpp' | 'c' | 'javascript';
+  language: 'python' | 'cpp' | 'c' | 'javascript' | 'java';
   sampleInput?: string;
   expectedOutput?: string;
   timeoutMs?: number;
 }): Promise<SandboxRunResult> {
-  const timeoutMs = options.timeoutMs || 8000;
+  const timeoutMs = options.timeoutMs || (options.language === 'java' ? 12000 : 8000);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-sandbox-'));
   const startTime = Date.now();
 
@@ -43,6 +43,29 @@ export async function runCodeInLocalSandbox(options: {
       fs.writeFileSync(srcFile, options.code, 'utf8');
       runCmd = 'node';
       runArgs = [srcFile];
+    } else if (options.language === 'java') {
+      const publicMatch = options.code.match(/\bpublic\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
+      const mainClassMatch = options.code.match(
+        /\bclass\s+([A-Za-z_][A-Za-z0-9_]*)[^{]*\{[\s\S]*?\bpublic\s+static\s+void\s+main\b/
+      );
+      const className = publicMatch?.[1] || mainClassMatch?.[1] || 'Main';
+      const srcFile = path.join(tmpDir, `${className}.java`);
+      fs.writeFileSync(srcFile, options.code, 'utf8');
+
+      try {
+        await execFileAsync('javac', ['-encoding', 'UTF-8', srcFile], { timeout: 25000 });
+      } catch (compileErr: any) {
+        return {
+          passed: false,
+          stage: 'compile',
+          stdout: compileErr?.stdout || '',
+          stderr: compileErr?.stderr || compileErr?.message || 'Java compilation failed',
+          exitCode: 1,
+          durationMs: Date.now() - startTime,
+        };
+      }
+      runCmd = 'java';
+      runArgs = ['-cp', tmpDir, className];
     } else if (options.language === 'cpp' || options.language === 'c') {
       const ext = options.language === 'cpp' ? 'cpp' : 'c';
       const compiler = options.language === 'cpp' ? 'g++' : 'gcc';

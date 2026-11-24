@@ -467,6 +467,7 @@ export class ZhihuishuAdapter implements PlatformAdapter, PlatformPlugin {
       const res = await triggerCloudBurst({
         mode: 'gce',
         taskCommand: cmd,
+        machineType: process.env.GCE_BURST_MACHINE_TYPE || 'e2-small',
         ttlMinutes: Math.min(360, maxMinutes + 15),
         dryRun: options.dryRun,
       });
@@ -553,15 +554,28 @@ export class ZhihuishuAdapter implements PlatformAdapter, PlatformPlugin {
       if (savedState?.cookies?.length) {
         await client.setCookies(savedState.cookies);
       }
-      await client.navigate(targetUrl);
-      await new Promise((r) => setTimeout(r, 3500));
+      const entryUrl =
+        savedState?.cookies?.length && targetUrl.includes('studyvideoh5.zhihuishu.com')
+          ? `https://studyservice-api.zhihuishu.com/login/gologin?fromurl=${encodeURIComponent(targetUrl)}`
+          : targetUrl;
+      await client.navigate(entryUrl);
+      await new Promise((r) => setTimeout(r, 5000));
 
       const expr = buildZhihuishuInspectExpression(rate);
       console.log(blue(`[Zhihuishu] 已连接真机播放器，目标倍速: ${rate}x | 最大时长: ${maxMinutes} 分钟`));
 
+      let homepageBounceCount = 0;
       while (Date.now() < deadlineMs) {
         const info = await client.evaluate<ZhihuishuDomInspection>(expr);
         lastState = info;
+
+        if (info.url.startsWith('https://www.zhihuishu.com') && homepageBounceCount < 2) {
+          homepageBounceCount++;
+          console.log(yellow(`[Zhihuishu] 检测到跳转回官网首页，重新进入课程播放页 (第 ${homepageBounceCount} 次)...`));
+          await client.navigate(targetUrl);
+          await new Promise((r) => setTimeout(r, 4000));
+          continue;
+        }
 
         if (Date.now() - lastCookieSyncMs >= 120_000) {
           lastCookieSyncMs = Date.now();
@@ -632,14 +646,15 @@ export class ZhihuishuAdapter implements PlatformAdapter, PlatformPlugin {
           };
         }
 
-        const logKey = `${info.status}|${info.currentLessonTitle}|${info.completedLessons}/${info.totalLessons}|${info.playbackRate}`;
+        const logKey = `${info.status}|${info.url}|${info.currentLessonTitle}|${info.completedLessons}/${info.totalLessons}|${info.playbackRate}`;
         if (logKey !== lastLogKey || info.action !== 'watching') {
           lastLogKey = logKey;
           const pct = info.duration > 0 ? `${Math.round((info.currentTime / info.duration) * 100)}%` : '0%';
+          const extraUrl = info.status === 'loading' ? ` (${info.url})` : '';
           console.log(
             blue(
               `[Zhihuishu] ${info.status} (${info.completedLessons}/${info.totalLessons}) ` +
-                `[${info.currentLessonTitle || '加载中'}] ${pct} @ ${info.playbackRate}x`
+                `[${info.currentLessonTitle || '加载中'}] ${pct} @ ${info.playbackRate}x${extraUrl}`
             )
           );
         }

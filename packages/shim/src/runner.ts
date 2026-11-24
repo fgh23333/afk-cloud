@@ -489,7 +489,49 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
     throw new Error(`超星作业当前状态 [${st || '未知'}] 无需或无法作答`);
   }
 
-  const detail = await getHomeworkDetail(found, cookies);
+  let detail: Awaited<ReturnType<typeof getHomeworkDetail>>;
+  try {
+    detail = await getHomeworkDetail(found, cookies);
+  } catch (detailErr: any) {
+    const errMsg = String(detailErr?.message || detailErr || '');
+    if (errMsg.includes('章节任务点未达标')) {
+      let progressHint = '';
+      try {
+        const { scanCourseChapterProgress } = await import('../../adapters/chaoxing/index');
+        const { syncCourseChapterProgressToEdge } = await import('../../core/d1-bridge');
+        const prog = await scanCourseChapterProgress(resolvedCourse, cookies);
+        await syncCourseChapterProgressToEdge([
+          {
+            courseId: prog.courseId,
+            classId: prog.classId,
+            courseName: prog.courseName,
+            totalChapters: prog.totalChapters,
+            completedChapters: prog.completedChapters,
+            pendingChapters: prog.pendingChapters,
+            totalUnfinishedPoints: prog.totalUnfinishedPoints,
+            completionRate: prog.completionRate,
+          },
+        ]).catch(() => false);
+        if (prog.pendingChapters > 0) {
+          const topNames = prog.chapters
+            .filter((ch) => ch.status === 'pending')
+            .slice(0, 3)
+            .map((ch) => `${ch.title}(待完成${ch.unfinishedPoints}个任务点)`)
+            .join('、');
+          progressHint = `；当前章节完成率 ${prog.completionRate}%，待完成章节 ${prog.pendingChapters}/${prog.totalChapters}（${topNames}）`;
+        }
+      } catch {
+        // 章节进度补充查询异常不阻断状态归档
+      }
+      job.phase = 'awaiting_approval';
+      job.summary = `⚠️ 作业《${found.title}》受限于${errMsg}${progressHint}，请先完成前置章节任务点`.slice(0, 2000);
+      job.updatedAt = formatUtc8Now();
+      console.log(`[Shim Runner] 作业 [${job.jobId}] 前置章节任务点未达标，已联动章节进度巡检并转为 awaiting_approval`);
+      await notifyEdgeCallback(job);
+      return;
+    }
+    throw detailErr;
+  }
   if (!detail.questions || detail.questions.length === 0 || requiresManualAttachmentUpload(detail.questions)) {
     const isReturned = st.includes('打回') || st.includes('重做') || st.includes('退回');
     job.phase = 'awaiting_approval';
@@ -543,6 +585,48 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
 }
 
 /**
+ * PTA (pintia.cn) 纯 HTTP 原生作答 / 提交链路（无需无头浏览器，支持草稿暂存、整组防覆盖提交与 Java/C++/Py 沙箱）
+ */
+export async function processPtaTask(job: TaskJob, mode: 'draft' | 'submit'): Promise<void> {
+  const { PtaAdapter, parsePtaTaskIdentifiers } = await import('../../adapters/pta/index');
+  const { problemSetId } = parsePtaTaskIdentifiers(job);
+  if (!problemSetId) {
+    throw new Error(`无法从任务 [${job.jobId}] 解析 PTA 题目集 ID (taskUrl=${job.taskUrl})`);
+  }
+
+  const pta = new PtaAdapter();
+  const status = await pta.queryTaskStatus({
+    workId: problemSetId,
+    workAnswerId: '0',
+    title: job.jobId,
+    statusText: '',
+    isPending: true,
+    canEdit: true,
+    courseId: 'pta',
+    classId: 'EXERCISE',
+  });
+
+  if (status === 'submitted') {
+    job.phase = 'submitted';
+    job.summary = `PTA 题目集 [${problemSetId}] 已全部作答提交，已自动同步完成`;
+    job.updatedAt = formatUtc8Now();
+    console.log(`[Shim Runner] 检测到 PTA 题目集 [${problemSetId}] 已完成，直接回传 submitted`);
+    await notifyEdgeCallback(job);
+    return;
+  }
+
+  const autoSubmit = mode === 'submit';
+  const outcome = await pta.solveProblemSetById(problemSetId, autoSubmit);
+
+  job.qa = outcome.qa.slice(0, 500);
+  job.phase = autoSubmit ? 'submitted' : 'draft_saved';
+  job.summary = outcome.summary.slice(0, 2000);
+  job.updatedAt = formatUtc8Now();
+  console.log(`[Shim Runner] PTA 任务 ${job.jobId} (${mode}) 完成：${job.summary}`);
+  await notifyEdgeCallback(job);
+}
+
+/**
  * 模式 1: solve-draft
  * agy 打开真实作业页面，读题，逐题解答并保存草稿，【绝对不要点提交】
  */
@@ -560,6 +644,12 @@ async function processDraftTask(job: TaskJob): Promise<void> {
   // 超星作业直接走纯 HTTP 原生适配器（同步真实已交状态 + 提取题目 + 双轨求解 + 暂存草稿）
   if (job.platform.toLowerCase() === 'chaoxing' || job.taskUrl.includes('chaoxing.com')) {
     await processChaoxingTask(job, 'draft');
+    return;
+  }
+
+  // PTA (pintia.cn) 直接走纯 HTTP REST + 本地代码沙箱适配器（无需重型无头浏览器）
+  if (job.platform.toLowerCase() === 'pta' || job.taskUrl.includes('pintia.cn')) {
+    await processPtaTask(job, 'draft');
     return;
   }
 
@@ -639,6 +729,11 @@ async function processSubmitTask(job: TaskJob): Promise<void> {
 
   if (job.platform.toLowerCase() === 'chaoxing' || job.taskUrl.includes('chaoxing.com')) {
     await processChaoxingTask(job, 'submit');
+    return;
+  }
+
+  if (job.platform.toLowerCase() === 'pta' || job.taskUrl.includes('pintia.cn')) {
+    await processPtaTask(job, 'submit');
     return;
   }
 
@@ -743,8 +838,8 @@ export function reapStaleAgyProcesses(): void {
     }, 500);
   }
 
-  // 2. POSIX 环境下仅扫描 afk shim 遗留的无头 worker (agy -p ... --disable-slash-commands)，绝不误杀 remote-control / 交互会话
-  if (process.platform !== 'win32' && !lock && !isWorkerRunning) {
+  // 2. POSIX 环境下仅扫描 afk shim 遗留的无头 worker (agy -p ... --disable-slash-commands)，绝不误杀 remote-control / 交互会话（单测模式下跳过外部 ps 阻塞）
+  if (process.platform !== 'win32' && !lock && !isWorkerRunning && process.env.NODE_ENV !== 'test') {
     try {
       const output = execSync('ps -eo pid=,args=', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       for (const line of output.trim().split('\n')) {

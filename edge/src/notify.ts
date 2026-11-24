@@ -130,6 +130,45 @@ export async function sendNotification(
   await Promise.allSettled(promises);
 }
 
+export interface ChapterProgressBriefCourse {
+  courseName: string;
+  totalUnfinishedPoints?: number;
+  completionRate?: number;
+  pendingChapters?: number;
+}
+
+/**
+ * 格式化课程章节任务点进度摘要（供 Telegram /status 与每日定时简报复用）
+ */
+export function formatChapterProgressSummary(
+  stats: {
+    chapterTrackedCoursesCount?: number;
+    chapterUnfinishedPointsCount?: number;
+  },
+  courses?: ChapterProgressBriefCourse[]
+): string {
+  const unfinishedTotal = Math.max(0, Number(stats.chapterUnfinishedPointsCount) || 0);
+  const trackedCourses = Math.max(0, Number(stats.chapterTrackedCoursesCount) || 0);
+  if (unfinishedTotal <= 0 && trackedCourses <= 0) {
+    return '';
+  }
+
+  const pendingCourses = (courses || []).filter((c) => (Number(c.totalUnfinishedPoints) || 0) > 0);
+  if (unfinishedTotal > 0) {
+    const topDetail = pendingCourses
+      .slice(0, 3)
+      .map((c) => {
+        const rate = typeof c.completionRate === 'number' ? ` · ${c.completionRate}%` : '';
+        return `《${c.courseName}》待完成 ${c.totalUnfinishedPoints} 个${rate}`;
+      })
+      .join('；');
+    const detailSuffix = topDetail ? `：${topDetail}${pendingCourses.length > 3 ? ' 等' : ''}` : '';
+    return `⚠️ 待完成任务点 ${unfinishedTotal} 个（已跟踪 ${trackedCourses || pendingCourses.length} 门课）${detailSuffix}`;
+  }
+
+  return `已跟踪 ${trackedCourses} 门课（章节任务点全部完成 ✅）`;
+}
+
 /**
  * 生成并推送定期/按需全景任务简报（Daily / On-Demand Digest）
  */
@@ -141,6 +180,9 @@ export async function sendDigestNotification(
     submittedCount: number;
     signinCount: number;
     questionBankCount: number;
+    chapterTrackedCoursesCount?: number;
+    chapterUnfinishedPointsCount?: number;
+    unfinishedCourses?: ChapterProgressBriefCourse[];
     recentTasks: Array<{
       platform: string;
       course_name: string;
@@ -167,14 +209,18 @@ export async function sendDigestNotification(
           .join('\n')
       : '🎉 当前各平台暂无积压待办任务';
 
-  const summaryText = [
+  const chapterSummary = formatChapterProgressSummary(stats, stats.unfinishedCourses);
+  const summaryLines = [
     `🕒 统计时间：${nowUtc8()}`,
     `📊 任务总览：⏳ 待完成 ${stats.pendingCount} | 📝 草稿暂存 ${stats.draftCount} | ✅ 已提交 ${stats.submittedCount}`,
     `📍 累计签到：${stats.signinCount} 次 | 🧠 题库缓存：${stats.questionBankCount} 题`,
-    ``,
-    `📋 近期任务动态：`,
-    taskLines,
-  ].join('\n');
+  ];
+  if (chapterSummary) {
+    summaryLines.push(`📖 章节进度：${chapterSummary}`);
+  }
+  summaryLines.push('', '📋 近期任务动态：', taskLines);
+
+  const summaryText = summaryLines.join('\n');
 
   await sendNotification(`afk-cloud ${triggerReason}`, summaryText, env);
   return summaryText;

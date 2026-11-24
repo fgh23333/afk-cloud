@@ -512,7 +512,8 @@ async function runTests() {
         assert.strictEqual(qState.allowed, false, '到达每小时调用上限时 quota 状态应为 disallowed');
 
         const shimServer = createShimServer({ secret: testSecret });
-        await new Promise<void>((resolve) => shimServer.listen(8799, '127.0.0.1', () => resolve()));
+        await new Promise<void>((resolve) => shimServer.listen(0, '127.0.0.1', () => resolve()));
+        const shimPort = (shimServer.address() as any).port;
         try {
           const body = JSON.stringify({
             jobId: 'quota-blocked-job',
@@ -521,7 +522,7 @@ async function runTests() {
             mode: 'draft',
           });
           const hdrs = await signRequest({ secret: testSecret, method: 'POST', pathWithQuery: '/task', body });
-          const res = await fetch('http://127.0.0.1:8799/task', {
+          const res = await fetch(`http://127.0.0.1:${shimPort}/task`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...hdrs },
             body,
@@ -578,7 +579,9 @@ async function runTests() {
         if (origAgyBin !== undefined) process.env.AGY_BIN = origAgyBin;
       }
 
-      // 占锁时非上下文 invokeAgy 必须拒绝并发启动
+      // 占锁时非上下文 invokeAgy 必须拒绝并发启动（显式设置独立 AFK_LOCK_FILE 避免与宿主机运行中的 agy-autopilot 冲突）
+      const origLockFile = process.env.AFK_LOCK_FILE;
+      process.env.AFK_LOCK_FILE = path.join(os.tmpdir(), `afk-agy-test-lock-${process.pid}.lock`);
       assert.strictEqual(acquireLock('external-holder-job'), true);
       process.env.AGY_BIN = '/nonexistent-agy-bin';
       try {
@@ -588,6 +591,8 @@ async function runTests() {
         );
       } finally {
         releaseLock('external-holder-job');
+        if (origLockFile === undefined) delete process.env.AFK_LOCK_FILE;
+        else process.env.AFK_LOCK_FILE = origLockFile;
         if (origAgyBin === undefined) delete process.env.AGY_BIN;
         else process.env.AGY_BIN = origAgyBin;
       }

@@ -211,6 +211,38 @@ export async function triggerEdgeDigestNotification(): Promise<{ sent: boolean; 
   return (await res.json()) as { sent: boolean; summary?: string };
 }
 
+export interface EdgeCourseChapterProgressItem {
+  courseId: string;
+  classId: string;
+  courseName: string;
+  totalChapters: number;
+  completedChapters: number;
+  pendingChapters: number;
+  totalUnfinishedPoints: number;
+  completionRate: number;
+  updatedAt?: string;
+}
+
+/**
+ * 将扫描到的在读课程章节任务点进度同步至 Cloudflare Edge (D1 / KV) 供看板汇总展示
+ */
+export async function syncCourseChapterProgressToEdge(
+  items: EdgeCourseChapterProgressItem[]
+): Promise<boolean> {
+  const conn = buildEdgeAuthHeaders();
+  if (!conn || items.length === 0) return false;
+  try {
+    const res = await fetch(`${conn.edgeUrl}/api/courses/progress`, {
+      method: 'POST',
+      headers: conn.headers,
+      body: JSON.stringify({ items }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export interface EdgeDiscussionItem {
   discussion_id: string;
   topic_id: string;

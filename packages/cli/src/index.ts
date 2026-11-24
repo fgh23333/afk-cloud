@@ -2,6 +2,7 @@ import fs from 'fs';
 import { blue, cyan, green, red, yellow } from 'kolorist';
 import path from 'path';
 import { ChaoxingAdapter } from '../../adapters/chaoxing';
+import { hasPtaAuthCookie, PtaAdapter } from '../../adapters/pta';
 import { WEB_PLATFORM_PRESETS, WebBrowserAdapter } from '../../adapters/web-agent';
 import {
   detectChromiumExecutable,
@@ -63,8 +64,11 @@ async function runStatus(): Promise<void> {
   console.log(
     ` 🌐 无头浏览器 : ${chromeExe ? green(chromeExe) : yellow('未检测到 Chromium (安装 chromium 后可操控 PTA/智慧树)')}`
   );
+  const ptaHasAuth = Boolean(
+    process.env.PTA_SESSION_COOKIE || (ptaState && hasPtaAuthCookie(ptaState.cookies || []))
+  );
   console.log(
-    ` 🔐 Web登录态  : PTA=${ptaState ? green(`${ptaState.cookies.length} Cookies`) : yellow('待导入')} | 智慧树=${zhsState ? green(`${zhsState.cookies.length} Cookies`) : yellow('待导入')}`
+    ` 🔐 Web登录态  : PTA=${ptaHasAuth ? green(`${ptaState?.cookies.length || 1} Cookies (已含会话凭证)`) : ptaState ? yellow(`${ptaState.cookies.length} Cookies (缺少 PTASession，需重导)`) : yellow('待导入')} | 智慧树=${zhsState ? green(`${zhsState.cookies.length} Cookies`) : yellow('待导入')}`
   );
   console.log(
     ` 🗄️  Edge D1    : ${process.env.AFK_EDGE_WORKER_URL ? green(process.env.AFK_EDGE_WORKER_URL) : yellow('仅本地缓存 (.cache/)')}`
@@ -89,11 +93,47 @@ async function runStatus(): Promise<void> {
   console.log(cyan(`======================================================\n`));
 }
 
+function printCliHelp(): void {
+  console.log(cyan(`\nafk-cloud v1.1.0 — 个人云端自治 Agent CLI`));
+  console.log(`
+用法: pnpm afk <command> [options]
+
+核心指令:
+  status                         环境自检、登录态与 Cloudflare Edge 健康探测
+  plugins | skills               查看已注册的平台插件与能力清单
+  scan [--platform chaoxing|pta|all] [--progress]
+                                 扫描在读课程、待办作业或 PTA 活跃题目集
+  progress | chapters            扫描超星全部课程章节任务点进度并同步到看板
+  solve [--platform chaoxing|pta|all] [--auto-submit] [--tier local|cloud-run|gce]
+                                 双轨求解待办作业（默认安全草稿暂存）
+  pta [scan|solve|watch]         PTA 拼题 A 专项指令（支持 --id <psId> --auto-submit --interval <min>）
+  discuss [--auto-submit]        超星讨论区抓帖、课件 RAG 拟稿与审批/发布
+  materials | download           批量下载超星课程资料构建 RAG 上下文
+  signin                         执行超星活动签到巡检
+  poll [--loop] [--interval 10]  拉取 D1 队列并同时巡检超星与 PTA
+  profile <status|import-cookie|push|pull> [--platform pta|zhihuishu] [--cookie "..."]
+                                 管理浏览器 Profile 登录态与 D1 双向同步
+  web [--platform pta|zhihuishu] 启动挂载持久化 Profile 的无头 CDP 浏览器
+  zhihuishu | zhs | watch        [TODO/实验性] 智慧树合规定速播放守护
+  notify | digest                手动触发一次全平台汇总简报推送
+  shim [--host 127.0.0.1] [--port 8788]
+                                 启动宿主机 Server Shim 服务
+  setup-cf | setup-vm | setup-gcp | setup-all [--dry-run]
+                                 自动化编排 Cloudflare 边缘层与 GCP 基础设施
+  burst --mode cloud-run|gce     触发弹性算力任务
+  help                           显示本帮助信息
+`);
+}
+
 async function main(): Promise<void> {
   loadDotEnv();
 
   const args = process.argv.slice(2);
   const cmd = args[0] || 'status';
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h' || args.includes('--help') || args.includes('-h')) {
+    printCliHelp();
+    return;
+  }
   const autoSubmit = args.includes('--auto-submit') || args.includes('-s');
   const dryRun = args.includes('--dry-run');
 
@@ -108,7 +148,23 @@ async function main(): Promise<void> {
     }
 
     case 'scan': {
-      await chaoxing.scanPendingHomework();
+      const targetPlatform = (getFlagValue(args, '--platform') || 'chaoxing').toLowerCase();
+      if (targetPlatform === 'pta' || targetPlatform === 'all') {
+        const pta = new PtaAdapter();
+        await pta.scanPendingHomework();
+      }
+      if (targetPlatform !== 'pta') {
+        await chaoxing.scanPendingHomework();
+        if (args.includes('--progress') || args.includes('--chapters')) {
+          await chaoxing.scanAllCourseChapterProgress(true);
+        }
+      }
+      break;
+    }
+
+    case 'progress':
+    case 'chapters': {
+      await chaoxing.scanAllCourseChapterProgress(true);
       break;
     }
 
@@ -132,7 +188,59 @@ async function main(): Promise<void> {
 
       const flashModel = getFlagValue(args, '--flash-model');
       const proModel = getFlagValue(args, '--pro-model');
-      await chaoxing.solveAllPendingHomework(autoSubmit, { flashModel, proModel });
+      const targetPlatform = (getFlagValue(args, '--platform') || 'chaoxing').toLowerCase();
+      if (targetPlatform === 'pta' || targetPlatform === 'all') {
+        const pta = new PtaAdapter();
+        await pta.solveAllPendingHomework(autoSubmit, {
+          flashModel,
+          proModel,
+          force: args.includes('--force'),
+        });
+      }
+      if (targetPlatform !== 'pta') {
+        await chaoxing.solveAllPendingHomework(autoSubmit, { flashModel, proModel });
+      }
+      break;
+    }
+
+    case 'pta': {
+      const subCmd = (args[1] || 'scan').toLowerCase();
+      const psId = getFlagValue(args, '--id') || getFlagValue(args, '--ps');
+      const flashModel = getFlagValue(args, '--flash-model');
+      const proModel = getFlagValue(args, '--pro-model');
+      const force = args.includes('--force');
+      const pta = new PtaAdapter();
+
+      if (subCmd === 'solve') {
+        if (psId) {
+          const outcome = await pta.solveProblemSetById(psId, autoSubmit, {
+            flashModel,
+            proModel,
+            force,
+          });
+          console.log(green(`✅ [PTA] ${outcome.title}: ${outcome.summary}`));
+        } else {
+          await pta.solveAllPendingHomework(autoSubmit, { flashModel, proModel, force });
+        }
+      } else if (subCmd === 'watch' || subCmd === 'listen') {
+        const { runPtaMonitorCycle } = await import('../../shim/src/pta-monitor');
+        const intervalMin = Math.max(1, parseInt(getFlagValue(args, '--interval') || '10', 10));
+        const autoSolve = args.includes('--auto-solve');
+        const runTick = async () => {
+          const monitorRes = await runPtaMonitorCycle({ force: true });
+          console.log(monitorRes.ok ? green(`🛰️ ${monitorRes.msg}`) : yellow(`⚠️ ${monitorRes.msg}`));
+          if (autoSolve && monitorRes.pendingCount > 0) {
+            await pta.solveAllPendingHomework(autoSubmit, { flashModel, proModel, force });
+          }
+        };
+        await runTick();
+        console.log(green(`🔄 PTA 持续监听已开启 (轮询间隔 ${intervalMin} 分钟${autoSolve ? '，已开启自动作答' : '，仅发现告警与同步'})`));
+        setInterval(() => {
+          runTick().catch((e) => console.error(red(`[PTA 监听异常] ${e?.message || e}`)));
+        }, intervalMin * 60 * 1000);
+      } else {
+        await pta.scanPendingHomework(true);
+      }
       break;
     }
 
@@ -350,6 +458,11 @@ async function main(): Promise<void> {
             solveOptions: { proModel },
           })
           .catch((e) => console.warn(yellow(`[Edge Pull] 讨论区拟稿同步提示: ${e?.message || e}`)));
+
+        const { runPtaMonitorCycle } = await import('../../shim/src/pta-monitor');
+        await runPtaMonitorCycle({ force: true }).catch((e) =>
+          console.warn(yellow(`[Edge Pull] PTA 巡检提示: ${e?.message || e}`))
+        );
       };
 
       await runOnce();

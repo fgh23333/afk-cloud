@@ -117,13 +117,21 @@ async function runAllTests() {
     });
     assert.strictEqual(sandboxRes.passed, true, '沙箱代码执行结果应与样例输出 42 完全一致');
 
-    const ptaWeb = new WebBrowserAdapter('pta');
-    const profilePaths = getBrowserProfilePaths('pta');
-    await ptaWeb.importCookieString('PTASession=mock_session_token; JSESSIONID=mock_jsid', '.pintia.cn');
-    const savedState = readLocalStorageState('pta');
-    assert.ok(fs.existsSync(profilePaths.userDataDir), 'PTA userDataDir Profile 目录应已创建');
-    assert.strictEqual(savedState?.cookies.length, 2, 'PTA storage-state.json 应持久化 2 个 Cookie');
-    fs.rmSync(profilePaths.storageStatePath, { force: true });
+    const tmpProfilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-profile-test-'));
+    const prevProfilesDir = process.env.AFK_BROWSER_PROFILES_DIR;
+    process.env.AFK_BROWSER_PROFILES_DIR = tmpProfilesRoot;
+    try {
+      const ptaWeb = new WebBrowserAdapter('pta');
+      const profilePaths = getBrowserProfilePaths('pta');
+      await ptaWeb.importCookieString('PTASession=mock_session_token; JSESSIONID=mock_jsid', '.pintia.cn');
+      const savedState = readLocalStorageState('pta');
+      assert.ok(fs.existsSync(profilePaths.userDataDir), 'PTA userDataDir Profile 目录应已创建');
+      assert.strictEqual(savedState?.cookies.length, 2, 'PTA storage-state.json 应持久化 2 个 Cookie');
+    } finally {
+      if (prevProfilesDir === undefined) delete process.env.AFK_BROWSER_PROFILES_DIR;
+      else process.env.AFK_BROWSER_PROFILES_DIR = prevProfilesDir;
+      fs.rmSync(tmpProfilesRoot, { recursive: true, force: true });
+    }
 
     console.log(
       ` ✅ [Test 3/6 PASS] 编程沙箱评测 (${sandboxRes.durationMs}ms) 与 PTA/智慧树无头浏览器 Profile 持久化验证通过`
@@ -230,15 +238,15 @@ async function runAllTests() {
     assert.strictEqual(isAllowedTaskUrl('https://evil.attacker.com/chaoxing.com'), false, '恶意伪装域名必须被拦截');
     assert.strictEqual(isAllowedTaskUrl('https://user:pass@mooc1.chaoxing.com'), false, '内嵌凭据 URL 必须被拦截');
 
-    // 3. 启动带安全加固的测试 Shim Server
+    // 3. 启动带安全加固的测试 Shim Server (使用动态随机端口 0 避免与并发测试或残留进程发生 EADDRINUSE 端口冲突)
     const testSecret = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     process.env.NODE_ENV = 'test';
     process.env.AFK_SHIM_SECRET = testSecret;
     const { resetJobForTest } = await import('../packages/shim/src/runner');
     resetJobForTest('test-job-auth-101');
-    const testPort = 8798;
     const server = createShimServer({ secret: testSecret });
-    await new Promise<void>((resolve) => server.listen(testPort, '127.0.0.1', () => resolve()));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const testPort = (server.address() as any).port;
 
     try {
       // 3.1 公开存活探针
@@ -415,14 +423,16 @@ async function runAllTests() {
     );
     const { forwardTaskToCloudRun } = await import('../packages/core/sandbox');
 
-    // 1. 验证群聊文本消息中的签到 URL 识别抽取
+    // 1. 验证群聊文本消息中的签到 URL 识别抽取（含签到码与二维码 enc 提取）
     const rawMsg1 = {
-      data: '同学请注意，老师已发布签到：https://mobilelearn.chaoxing.com/newsign/preSign?courseId=267230708&classId=155058274&activePrimaryId=5000181110795&appType=15',
+      data: '同学请注意，老师已发布签到（签到码：8426）：https://mobilelearn.chaoxing.com/newsign/preSign?courseId=267230708&classId=155058274&activePrimaryId=5000181110795&appType=15&enc=a1b2c3d4e5f60123456789abcdef0123',
     };
     const s1 = parseWebIMMessage(rawMsg1);
     assert.ok(s1 && s1.type === 'sign', '应准确从文本消息中提取签到信令');
     assert.strictEqual(s1?.activeId, '5000181110795', '应准确提取 activePrimaryId');
     assert.strictEqual(s1?.courseId, '267230708', '应准确提取 courseId');
+    assert.strictEqual(s1?.signCode, '8426', '应从消息正文中提取 4-8 位签到码');
+    assert.strictEqual(s1?.enc, 'a1b2c3d4e5f60123456789abcdef0123', '应从签到链接中提取二维码 enc');
 
     // 2. 验证 ext 结构化载荷识别
     const rawMsg2 = {
@@ -431,13 +441,16 @@ async function runAllTests() {
         courseId: '268090261',
         atype: 'sign',
         name: '周四机房签到20261112',
+        signCode: '1357',
       },
     };
     const s2 = parseWebIMMessage(rawMsg2);
     assert.ok(s2 && s2.type === 'sign', '应准确从 ext 结构体中解析签到');
     assert.strictEqual(s2?.activeId, '6000181740534');
+    assert.strictEqual(s2?.signCode, '1357');
 
-    // 3. 验证 ChaoxingWebIMListener 事件分发
+    // 3. 验证 ChaoxingWebIMListener 事件分发与闪签幂等去重执行 + 章节任务点进度解析
+    const { parseCourseChapterProgressHtml } = await import('../packages/adapters/chaoxing/webim');
     let capturedSignal: any = null;
     const listener = new ChaoxingWebIMListener({
       cookies: {
@@ -454,6 +467,204 @@ async function runAllTests() {
     });
     listener.handleRawMessage(rawMsg1);
     assert.ok(capturedSignal && capturedSignal.activeId === '5000181110795', '监听器事件分发应正常触发');
+
+    let execCount = 0;
+    const exec1 = await listener.handleFlashSignSignal(s1!, {
+      courses: [{ courseId: '267230708', classId: '155058274', courseName: '数据结构与算法' }],
+      realname: '测试同学',
+      signExecutor: async (act, course, _cookies, _name, _locs, enc, signCode) => {
+        execCount++;
+        return `[签到码签到成功] ${course.courseName} activeId=${act.id} code=${signCode || ''} enc=${(enc || '').slice(0, 6)}`;
+      },
+    });
+    assert.strictEqual(exec1.executed, true, '首次闪签信令应触发执行');
+    assert.strictEqual(exec1.courseName, '数据结构与算法');
+    assert.ok(exec1.result.includes('code=8426'), '应向签到执行器透传 signCode 与 enc');
+
+    const exec2 = await listener.handleFlashSignSignal(s1!, {
+      signExecutor: async () => {
+        execCount++;
+        return 'dup';
+      },
+    });
+    assert.strictEqual(exec2.executed, false, '同 activeId 重复群消息必须被幂等拦截');
+    assert.strictEqual(exec2.skipped, true);
+    assert.strictEqual(exec2.reason, 'duplicate_active_id');
+    assert.strictEqual(execCount, 1, '签到执行器仅应被调用 1 次');
+
+    const sampleChapterHtml = `
+      <div class="timeline">
+        <div id="cur900101">
+          <span class="articlename" title="1.1 绪论与基本概念">1.1 绪论与基本概念</span>
+          <input class="jobUnfinishCount" value="0" />
+          <span class="icon_yiwanc"></span>
+        </div>
+        <div id="cur900102">
+          <span class="articlename" title="1.2 线性表的顺序表示">1.2 线性表的顺序表示</span>
+          <input class="jobUnfinishCount" value="2" />
+        </div>
+      </div>
+    `;
+    const chapterProg = parseCourseChapterProgressHtml(sampleChapterHtml, {
+      courseId: '267230708',
+      classId: '155058274',
+      courseName: '数据结构与算法',
+    });
+    assert.strictEqual(chapterProg.totalChapters, 2);
+    assert.strictEqual(chapterProg.completedChapters, 1);
+    assert.strictEqual(chapterProg.pendingChapters, 1);
+    assert.strictEqual(chapterProg.totalUnfinishedPoints, 2);
+    assert.strictEqual(chapterProg.completionRate, 50);
+    assert.strictEqual(chapterProg.chapters[1].title, '1.2 线性表的顺序表示');
+    assert.strictEqual(chapterProg.chapters[1].status, 'pending');
+
+    // 验证 Edge 课程章节进度快照合并与看板聚合契约
+    const { getCourseChapterProgressMap, saveCourseChapterProgressItems } = await import('../edge/src/store');
+    const { getDashboardData } = await import('../edge/src/dashboard');
+    let savedSessionJson = '';
+    const mockProgEnv: any = {
+      DB: {
+        prepare(sql: string) {
+          const execAll = async () => {
+            if (sql.includes('FROM enrolled_courses')) {
+              return {
+                results: [
+                  {
+                    course_id: '267230708',
+                    class_id: '155058274',
+                    course_name: '数据结构与算法',
+                    cpi: '9988',
+                    teacher_name: '李老师',
+                  },
+                ],
+              };
+            }
+            if (sql.includes('COUNT(*)')) return { results: [{ cnt: 0 }] };
+            return { results: [] };
+          };
+          const makeBound = (args: unknown[]) => ({
+            all: execAll,
+            first: async () => {
+              if (sql.includes('FROM sessions WHERE platform = ? AND account = ?')) {
+                if (args[0] === 'chaoxing_chapter_progress' && savedSessionJson) {
+                  return { cookie_json: savedSessionJson, expires_at: Date.now() + 3600000 };
+                }
+                return null;
+              }
+              const r = await execAll();
+              return r.results?.[0] ?? null;
+            },
+            run: async () => {
+              if (sql.includes('INSERT INTO sessions') && args[0] === 'chaoxing_chapter_progress') {
+                savedSessionJson = String(args[2] || '');
+              }
+              return { success: true };
+            },
+          });
+          return {
+            bind: (...args: unknown[]) => makeBound(args),
+            all: execAll,
+            first: async () => {
+              const r = await execAll();
+              return r.results?.[0] ?? null;
+            },
+            run: async () => ({ success: true }),
+          };
+        },
+        async batch(stmts: any[]) {
+          const out = [];
+          for (const s of stmts) out.push(await s.all());
+          return out;
+        },
+      },
+    };
+    const upCount = await saveCourseChapterProgressItems(mockProgEnv, [
+      {
+        courseId: chapterProg.courseId,
+        classId: chapterProg.classId,
+        courseName: chapterProg.courseName,
+        totalChapters: chapterProg.totalChapters,
+        completedChapters: chapterProg.completedChapters,
+        pendingChapters: chapterProg.pendingChapters,
+        totalUnfinishedPoints: chapterProg.totalUnfinishedPoints,
+        completionRate: chapterProg.completionRate,
+      },
+    ]);
+    assert.strictEqual(upCount, 1, '应成功持久化 1 门课程的章节任务点进度快照');
+    const progMap = await getCourseChapterProgressMap(mockProgEnv);
+    assert.strictEqual(progMap['267230708']?.completionRate, 50);
+    const progDash = await getDashboardData(mockProgEnv);
+    assert.strictEqual(progDash.stats.chapterTrackedCoursesCount, 1);
+    assert.strictEqual(progDash.stats.chapterUnfinishedPointsCount, 2);
+    assert.strictEqual(progDash.courses?.[0]?.completionRate, 50);
+    assert.strictEqual(progDash.courses?.[0]?.totalUnfinishedPoints, 2);
+
+    const { formatChapterProgressSummary } = await import('../edge/src/notify');
+    const progSummaryLine = formatChapterProgressSummary(progDash.stats, progDash.courses);
+    assert.ok(
+      progSummaryLine.includes('待完成任务点 2 个') &&
+        progSummaryLine.includes('《数据结构与算法》待完成 2 个 · 50%'),
+      '章节进度摘要应准确展示待完成任务点数与课程完成率明细'
+    );
+    const progDigestText = await sendDigestNotification(
+      {},
+      {
+        ...progDash.stats,
+        unfinishedCourses: (progDash.courses || []).filter((c) => (c.totalUnfinishedPoints || 0) > 0),
+        recentTasks: [],
+      },
+      '章节进度简报测试'
+    );
+    assert.ok(
+      progDigestText.includes('📖 章节进度：') && progDigestText.includes('待完成任务点 2 个'),
+      '每日定时简报在存在未完成章节任务点时应自动附带章节进度提醒'
+    );
+
+    const { formatProgressScanReport, handleAgentChatRequest } = await import(
+      '../packages/shim/src/agent-chat'
+    );
+    const formattedScanReport = formatProgressScanReport([
+      {
+        courseId: '267230708',
+        classId: '155058274',
+        courseName: '数据结构与算法',
+        totalChapters: 2,
+        completedChapters: 1,
+        pendingChapters: 1,
+        totalUnfinishedPoints: 2,
+        completionRate: 50,
+      },
+      {
+        courseId: '268000001',
+        classId: '155000001',
+        courseName: '计算机网络',
+        totalChapters: 4,
+        completedChapters: 4,
+        pendingChapters: 0,
+        totalUnfinishedPoints: 0,
+        completionRate: 100,
+      },
+    ]);
+    assert.ok(
+      formattedScanReport.includes('共跟踪 2 门课，1 门存在待完成任务点（合计 2 个）') &&
+        formattedScanReport.includes('1. 《数据结构与算法》 50% (1/2 章) — ⚠️ 待完成 2 个任务点'),
+      '本机章节进度扫描报告应按待完成任务点降序排列并输出统计摘要'
+    );
+    const prevPhone = process.env.CHAOXING_PHONE;
+    const prevPwd = process.env.CHAOXING_PASSWORD;
+    try {
+      delete process.env.CHAOXING_PHONE;
+      delete process.env.CHAOXING_PASSWORD;
+      const noCredRes = await handleAgentChatRequest('/progress!');
+      assert.strictEqual(noCredRes.accepted, false, '未配置学习通凭据时 /progress! 应优雅拒绝');
+      assert.ok(
+        noCredRes.immediateReply?.includes('未配置 CHAOXING_PHONE'),
+        '未配置凭据时应返回明确提示且不拉起重型 AGY 进程'
+      );
+    } finally {
+      if (prevPhone !== undefined) process.env.CHAOXING_PHONE = prevPhone;
+      if (prevPwd !== undefined) process.env.CHAOXING_PASSWORD = prevPwd;
+    }
 
     // 4. 验证 Cloud Run 容器配置与脚本文件
     const dockerfileShim = fs.readFileSync(path.join(__dirname, '../infra/docker/Dockerfile.shim'), 'utf8');
@@ -1153,7 +1364,11 @@ async function runAllTests() {
   console.log(`\n🎉 全部 12 项核心自检与安全链路测试 100% 通过！\n`);
 }
 
-runAllTests().catch((err) => {
-  console.error('❌ 测试失败:', err);
-  process.exit(1);
-});
+runAllTests()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('❌ 测试失败:', err);
+    process.exit(1);
+  });

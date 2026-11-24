@@ -1,13 +1,17 @@
 {
   "name": "afk-cloud",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "license": "MIT",
-  "description": "Personal Autonomous Cloud Agent (Edge Cloudflare Workers+D1 + Antigravity CLI + Free-First Cloud Run & Ephemeral GCE Burst)",
+  "description": "Personal Autonomous Cloud Agent with Chaoxing & PTA Plugins (Edge Cloudflare Workers+D1 + Antigravity CLI + Free-First Cloud Run & Ephemeral GCE Burst)",
   "scripts": {
     "afk": "tsx packages/cli/src/index.ts",
     "afk:signin": "tsx packages/cli/src/index.ts signin",
     "afk:scan": "tsx packages/cli/src/index.ts scan",
     "afk:solve": "tsx packages/cli/src/index.ts solve",
+    "afk:pta": "tsx packages/cli/src/index.ts pta",
+    "afk:progress": "tsx packages/cli/src/index.ts progress",
+    "afk:discuss": "tsx packages/cli/src/index.ts discuss",
+    "afk:poll": "tsx packages/cli/src/index.ts poll",
     "afk:materials": "tsx packages/cli/src/index.ts materials",
     "afk:burst": "tsx packages/cli/src/index.ts burst",
     "afk:setup-cf": "tsx packages/cli/src/index.ts setup-cf",
@@ -22,7 +26,7 @@
     "edge:migrate:remote": "pnpm --filter @afk-cloud/edge migrate:remote",
     "preview": "tsx scripts/preview-server.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p edge/tsconfig.json",
-    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts && tsx tests/security-hardening.test.ts && tsx tests/homework-reopen-and-exam-guard.test.ts && tsx tests/zhihuishu-plugin.test.ts && tsx tests/ci-and-edge-coverage.test.ts"
+    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts && tsx tests/security-hardening.test.ts && tsx tests/homework-reopen-and-exam-guard.test.ts && tsx tests/zhihuishu-plugin.test.ts && tsx tests/pta-plugin.test.ts && tsx tests/ci-and-edge-coverage.test.ts"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",

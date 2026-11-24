@@ -1,5 +1,5 @@
 import { blue, green, red, yellow } from 'kolorist';
-import { syncTasksToEdgeDashboard } from '../../core/d1-bridge';
+import { syncCourseChapterProgressToEdge, syncTasksToEdgeDashboard } from '../../core/d1-bridge';
 import { PlatformPlugin, PluginContext, PluginManifest } from '../../core/plugin';
 import { solveHomeworkDualTrack } from '../../core/solver';
 import {
@@ -20,6 +20,7 @@ import { getOrUploadPhotoObject, submitPhotoSign } from './photo';
 import { ChaoxingCookies, chaoxingLogin, getChaoxingCourses } from './session';
 import { DEFAULT_SHOU_LOCATIONS, performChaoxingSign, scanCourseActivities, SignLocation } from './signin';
 import { DiscussionRunSummary, solvePendingDiscussions } from './discussions';
+import { CourseChapterProgressSummary, scanCourseChapterProgress } from './webim';
 
 export * from './des';
 export * from './discussions';
@@ -351,5 +352,51 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
     const cookies = await this.ensureAuth();
     const courses = await getChaoxingCourses(cookies);
     return solvePendingDiscussions(courses, cookies, options);
+  }
+
+  /**
+   * 扫描全部在读课程的章节任务点完成进度并同步至 Edge 看板
+   */
+  public async scanAllCourseChapterProgress(
+    syncToEdge = true
+  ): Promise<CourseChapterProgressSummary[]> {
+    const cookies = await this.ensureAuth();
+    const courses = await getChaoxingCourses(cookies);
+    const summaries: CourseChapterProgressSummary[] = [];
+
+    console.log(blue(`\n======================================================`));
+    console.log(blue(` 📊 正在巡检在读 ${courses.length} 门课程的章节任务点进度 📊`));
+    console.log(blue(`======================================================\n`));
+
+    for (const c of courses) {
+      try {
+        const summary = await scanCourseChapterProgress(c, cookies);
+        summaries.push(summary);
+        const badge =
+          summary.pendingChapters > 0
+            ? yellow(`[待完成 ${summary.pendingChapters}/${summary.totalChapters} 章 · ${summary.totalUnfinishedPoints} 任务点]`)
+            : green(`[已完成 ${summary.completionRate}%]`);
+        console.log(`${badge} 《${c.courseName}》 (ID: ${c.courseId}) | 完成率: ${summary.completionRate}%`);
+      } catch (err: any) {
+        console.log(red(`[章节进度跳过] 《${c.courseName}》: ${err?.message || err}`));
+      }
+    }
+
+    if (syncToEdge && summaries.length > 0) {
+      await syncCourseChapterProgressToEdge(
+        summaries.map((s) => ({
+          courseId: s.courseId,
+          classId: s.classId,
+          courseName: s.courseName,
+          totalChapters: s.totalChapters,
+          completedChapters: s.completedChapters,
+          pendingChapters: s.pendingChapters,
+          totalUnfinishedPoints: s.totalUnfinishedPoints,
+          completionRate: s.completionRate,
+        }))
+      );
+    }
+
+    return summaries;
   }
 }
