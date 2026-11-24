@@ -21,8 +21,8 @@
     "edge:migrate:local": "pnpm --filter @afk-cloud/edge migrate:local",
     "edge:migrate:remote": "pnpm --filter @afk-cloud/edge migrate:remote",
     "preview": "tsx scripts/preview-server.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts && tsx tests/security-hardening.test.ts && tsx tests/homework-reopen-and-exam-guard.test.ts && tsx tests/zhihuishu-plugin.test.ts"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p edge/tsconfig.json",
+    "test": "tsx tests/smoke.test.ts && tsx tests/ratelimit-backoff.test.ts && tsx tests/signin-and-submitting.test.ts && tsx tests/discussion-idempotency.test.ts && tsx tests/failed-task-retry.test.ts && tsx tests/solver-cache-guard.test.ts && tsx tests/security-hardening.test.ts && tsx tests/homework-reopen-and-exam-guard.test.ts && tsx tests/zhihuishu-plugin.test.ts && tsx tests/ci-and-edge-coverage.test.ts"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",
