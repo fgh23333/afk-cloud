@@ -8,7 +8,7 @@ on:
 
 jobs:
   verify:
-    name: Typecheck, Smoke Tests & Security Gate
+    name: Typecheck, Tests, Bundle & Security Gate
     runs-on: ubuntu-latest
 
     steps:
@@ -29,23 +29,84 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Static Typecheck
+      - name: Static Typecheck (Core, Adapters, Tests & Edge)
         run: pnpm typecheck
 
-      - name: Core Smoke & Integration Tests
+      - name: Orphaned Test File Guard
+        run: |
+          echo "🔍 检查 tests/*.test.ts 是否全部纳入 pnpm test 执行列表..."
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const testCmd = String(pkg.scripts?.test || "");
+            const files = fs.readdirSync("tests").filter((f) => f.endsWith(".test.ts")).sort();
+            const missing = files.filter((f) => !testCmd.includes(`tests/${f}`));
+            if (missing.length > 0) {
+              console.error("❌ 发现未接入 package.json scripts.test 的测试文件:", missing);
+              process.exit(1);
+            }
+            console.log(`✅ 全部 ${files.length} 个测试文件均已受 CI 门禁覆盖`);
+          '
+
+      - name: Core, Adapter, Edge & Security Tests
+        env:
+          AFK_LOCK_FILE: ${{ runner.temp }}/afk-ci-test.lock
         run: pnpm test
+
+      - name: CLI & Plugin Registry Dry-Run Smoke
+        run: |
+          echo "🔍 验证 CLI 入口与插件注册/编排指令 Dry-Run..."
+          ./node_modules/.bin/tsx packages/cli/src/index.ts plugins | grep -q '\[zhihuishu\]'
+          ./node_modules/.bin/tsx packages/cli/src/index.ts setup-cf --dry-run >/dev/null
+          ./node_modules/.bin/tsx packages/cli/src/index.ts setup-gcp --dry-run >/dev/null
+          echo "✅ CLI 与插件系统 Dry-Run 验证通过"
+
+      - name: Edge Worker Bundle Dry-Run Check
+        env:
+          CI: 'true'
+          CLOUDFLARE_API_TOKEN: ''
+          CLOUDFLARE_ACCOUNT_ID: ''
+        run: |
+          echo "🔍 验证 Cloudflare Edge Worker 离线 ESBuild 打包兼容性..."
+          TMP_WRANGLER_CFG="${{ runner.temp }}/wrangler-ci.json"
+          TMP_WRANGLER_OUT="${{ runner.temp }}/wrangler-ci-out"
+          cat > "$TMP_WRANGLER_CFG" << JSON
+          {
+            "name": "afk-ci-dryrun",
+            "main": "$(pwd)/edge/src/index.ts",
+            "compatibility_date": "2024-11-01",
+            "compatibility_flags": ["nodejs_compat"],
+            "d1_databases": [{ "binding": "DB", "database_name": "afk-cloud-db", "database_id": "00000000-0000-0000-0000-000000000000" }],
+            "kv_namespaces": [{ "binding": "CHAOXING_KV", "id": "00000000000000000000000000000000" }],
+            "durable_objects": { "bindings": [{ "name": "SIGN_AGENT", "class_name": "SignAgent" }, { "name": "SOLVER_AGENT", "class_name": "SolverAgent" }] },
+            "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SignAgent", "SolverAgent"] }]
+          }
+          JSON
+          TMPDIR="${{ runner.temp }}" npx --prefix edge wrangler deploy --config "$TMP_WRANGLER_CFG" --dry-run --outdir "$TMP_WRANGLER_OUT"
+          echo "✅ Edge Worker 打包校验通过"
+
+      - name: Shell Scripts Syntax Check (bash -n)
+        run: |
+          echo "🔍 对 infra/gcp/*.sh 执行静态语法校验..."
+          for file in infra/gcp/*.sh; do
+            echo "Checking $file..."
+            bash -n "$file"
+          done
+          echo "✅ Shell 运维脚本全部通过语法检查"
 
       - name: Security & Leak Detection Gate
         run: |
-          echo "🔍 扫描敏感凭证与秘钥泄露风险..."
-          # 检查是否存在未加密 .env 或明文秘钥提交
-          if git ls-files | grep -E '^(\.env|\.env\.local)$'; then
-            echo "❌ 发现本地环境文件被 Git 追踪，请从仓库中移除！"
+          echo "🔍 扫描敏感凭证、密钥与个人凭据泄露风险..."
+          if git ls-files | grep -E '(^|/)\.env(\.local)?$|^edge/wrangler\.jsonc$|\.(pem|key|p12)$'; then
+            echo "❌ 发现本地环境或密钥文件被 Git 追踪，请立即从仓库移除！"
             exit 1
           fi
-          # 检查 migrations 中是否存在明文密码
           if grep -rnEi "(password\s*=\s*'[^']+'|secret\s*=\s*'[^']+')" edge/migrations/; then
             echo "❌ 迁移脚本中禁止硬编码明文凭证！"
+            exit 1
+          fi
+          if git ls-files -z -- packages/ edge/src/ infra/ .github/ tests/ | xargs -0 grep -nE -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|TGT-[0-9]+-[A-Za-z0-9]+-passport\.zhihuishu\.com'; then
+            echo "❌ 检测到疑似真实私钥、Telegram Bot Token 或 CASTGC Cookie 写入仓库，触发安全拦截！"
             exit 1
           fi
           echo "✅ 零凭据入库安全铁律校验通过"
@@ -55,7 +116,6 @@ jobs:
           echo "🔍 验证所有 D1 迁移脚本有效性与幂等性..."
           for file in edge/migrations/*.sql; do
             echo "Checking $file..."
-            # 验证所有建表和建索引语句均具备 IF NOT EXISTS 保护
             if grep -E 'CREATE TABLE ' "$file" | grep -v 'IF NOT EXISTS'; then
               echo "❌ 迁移文件 $file 中的建表语句缺少 IF NOT EXISTS 幂等保护"
               exit 1
