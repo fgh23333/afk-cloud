@@ -1,4 +1,4 @@
-import { EdgeEnv, listDiscussions, nowUtc8 } from './store';
+import { CourseChapterProgressSnapshot, EdgeEnv, getCourseChapterProgressMap, listDiscussions, nowUtc8 } from './store';
 import { extractInfoFromContent, parseTimeToMs } from './chaoxing';
 
 export interface DashboardData {
@@ -18,6 +18,8 @@ export interface DashboardData {
     discussionPendingCount?: number;
     discussionDraftCount?: number;
     discussionSubmittedCount?: number;
+    chapterTrackedCoursesCount?: number;
+    chapterUnfinishedPointsCount?: number;
   };
   sessions: Array<{
     platform: string;
@@ -87,6 +89,12 @@ export interface DashboardData {
     classId: string;
     cpi?: string;
     teacherName?: string;
+    totalChapters?: number;
+    completedChapters?: number;
+    pendingChapters?: number;
+    totalUnfinishedPoints?: number;
+    completionRate?: number;
+    progressUpdatedAt?: string;
   }>;
   discussions?: Array<{
     discussionId: string;
@@ -192,7 +200,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
     const homeworkMap = new Map<string, HomeworkItem>();
     const courseMap = new Map<
       string,
-      { courseName: string; courseId: string; classId: string; cpi?: string; teacherName?: string }
+      NonNullable<DashboardData['courses']>[number]
     >();
 
     const getStatusPriority = (status: string): number => {
@@ -258,18 +266,24 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         }
       }
 
-      // 兜底提取 workId（统一兼容 chaoxing-notice-work-<workId>-<classId> 与 chaoxing-hw-<workId>）
+      // 兜底提取 workId（统一兼容 chaoxing-* 与 pta-ps-*）
+      const ptaPsMatch = t.platform === 'pta' ? t.task_id.match(/^pta-(?:ps-)?(\d{10,})$/) : null;
       const workIdMatch =
         t.task_id.match(/^chaoxing-(?:notice-)?work-(\d+)/) ||
         t.task_id.match(/^chaoxing-hw-(\d+)$/);
-      const rawWorkId = workIdMatch ? workIdMatch[1] : payloadWorkId;
-      if (!directUrl && rawWorkId && t.course_id && t.class_id) {
-        directUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${t.course_id}&classId=${t.class_id}&cpi=&workId=${rawWorkId}`;
+      const rawWorkId = ptaPsMatch ? ptaPsMatch[1] : workIdMatch ? workIdMatch[1] : payloadWorkId;
+      if (!directUrl && rawWorkId) {
+        if (t.platform === 'pta') {
+          directUrl = `https://pintia.cn/problem-sets/${rawWorkId}/exam`;
+        } else if (t.course_id && t.class_id) {
+          directUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${t.course_id}&classId=${t.class_id}&cpi=&workId=${rawWorkId}`;
+        }
       }
 
-      const courseUrl = t.course_id && t.class_id
-        ? `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${t.course_id}&clazzid=${t.class_id}&vc=1`
-        : '';
+      const courseUrl =
+        t.platform !== 'pta' && t.course_id && t.class_id
+          ? `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${t.course_id}&clazzid=${t.class_id}&vc=1`
+          : '';
 
       // 核心免 403 路由铁律：
       // 1. 若有 noticeUrl，优先指向官方通知卡片入口。用户在浏览器点击即可带齐合法签名和 Cookie 答题，绝对不会触发 403 跨域盗链防护。
@@ -296,7 +310,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         courseUrl,
       };
 
-      const dedupKey = rawWorkId ? `work_${rawWorkId}` : t.task_id;
+      const dedupKey = t.platform === 'pta' ? t.task_id : rawWorkId ? `work_${rawWorkId}` : t.task_id;
       const existing = homeworkMap.get(dedupKey);
       if (!existing) {
         homeworkMap.set(dedupKey, candidate);
@@ -343,7 +357,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         });
       }
 
-      if (t.course_id && t.course_name && !courseMap.has(t.course_id)) {
+      if (t.platform !== 'pta' && t.course_id && t.course_name && !courseMap.has(t.course_id)) {
         courseMap.set(t.course_id, {
           courseName: t.course_name,
           courseId: t.course_id,
@@ -380,6 +394,39 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           classId: ec.class_id,
           cpi: ec.cpi || '',
           teacherName: ec.teacher_name || '',
+        });
+      }
+    }
+
+    const chapterProgressMap = await getCourseChapterProgressMap(env);
+    let chapterTrackedCoursesCount = 0;
+    let chapterUnfinishedPointsCount = 0;
+    for (const [cid, prog] of Object.entries(chapterProgressMap)) {
+      if (!prog || typeof prog !== 'object') continue;
+      chapterTrackedCoursesCount++;
+      chapterUnfinishedPointsCount += Math.max(0, Number(prog.totalUnfinishedPoints) || 0);
+      const existingCourse = courseMap.get(cid);
+      if (existingCourse) {
+        courseMap.set(cid, {
+          ...existingCourse,
+          totalChapters: Number(prog.totalChapters) || 0,
+          completedChapters: Number(prog.completedChapters) || 0,
+          pendingChapters: Number(prog.pendingChapters) || 0,
+          totalUnfinishedPoints: Number(prog.totalUnfinishedPoints) || 0,
+          completionRate: typeof prog.completionRate === 'number' ? prog.completionRate : 100,
+          progressUpdatedAt: prog.updatedAt || '',
+        });
+      } else {
+        courseMap.set(cid, {
+          courseName: prog.courseName || `课程_${cid}`,
+          courseId: cid,
+          classId: prog.classId || '',
+          totalChapters: Number(prog.totalChapters) || 0,
+          completedChapters: Number(prog.completedChapters) || 0,
+          pendingChapters: Number(prog.pendingChapters) || 0,
+          totalUnfinishedPoints: Number(prog.totalUnfinishedPoints) || 0,
+          completionRate: typeof prog.completionRate === 'number' ? prog.completionRate : 100,
+          progressUpdatedAt: prog.updatedAt || '',
         });
       }
     }
@@ -658,6 +705,8 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         discussionPendingCount,
         discussionDraftCount,
         discussionSubmittedCount,
+        chapterTrackedCoursesCount,
+        chapterUnfinishedPointsCount,
       },
       sessions,
       tasks,
@@ -687,7 +736,7 @@ export function renderDashboardHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>超星任务与学习监控看板 | Cloudflare Serverless</title>
+  <title>afk-cloud 个人云端自治看板 | 超星 × PTA · Cloudflare Serverless</title>
   <link rel="icon" href="https://mooc1.chaoxing.com/favicon.ico">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -721,10 +770,10 @@ export function renderDashboardHtml(): string {
       </div>
       <div>
         <h1 class="text-base font-bold tracking-tight text-white flex items-center gap-2">
-          学习通全维智能监控看板 · afk-cloud 个人云端自治看板
+          afk-cloud 个人云端自治看板
           <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Cloudflare 边缘托管</span>
         </h1>
-        <p class="text-xs text-slate-400">Google Cloud 守护 + agy 深度求解 + 7×24h 自动巡检</p>
+        <p class="text-xs text-slate-400">超星学习通 × PTA 拼题 A 多平台接入 · Google Cloud 守护 + agy 深度求解 + 7×24h 自动巡检</p>
       </div>
     </div>
 
@@ -1264,7 +1313,7 @@ export function renderDashboardHtml(): string {
           : '<span class="text-[11px] text-slate-400 truncate max-w-[150px]">' + safeCourseName + '</span>';
 
         const answerBtn = hw.url
-          ? '<a href="' + escapeHtml(hw.url) + '" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition active:scale-95 shadow-md shadow-sky-900/30 flex items-center gap-1" title="' + (hw.noticeUrl ? '在超星官方平台打开作业通知卡片作答（免403防阻断）' : '在超星平台打开作答界面') + '"><span>🔗 打开作答界面 &rarr;</span></a>'
+          ? '<a href="' + escapeHtml(hw.url) + '" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition active:scale-95 shadow-md shadow-sky-900/30 flex items-center gap-1" title="' + (hw.platform === 'pta' ? '在 PTA (pintia.cn) 打开题目集作答' : hw.noticeUrl ? '在超星官方平台打开作业通知卡片作答（免403防阻断）' : '在超星平台打开作答界面') + '"><span>🔗 打开作答界面 &rarr;</span></a>'
           : '';
 
         return \`
@@ -1406,21 +1455,39 @@ export function renderDashboardHtml(): string {
         return;
       }
 
-      container.innerHTML = courses.map(c => \`
+      container.innerHTML = courses.map(c => {
+        const hasProgress = typeof c.totalChapters === 'number' && c.totalChapters > 0;
+        const rate = hasProgress ? Math.min(100, Math.max(0, Number(c.completionRate || 0))) : null;
+        const pendingCh = Number(c.pendingChapters || 0);
+        const unfinishPts = Number(c.totalUnfinishedPoints || 0);
+        const progressHtml = hasProgress ? \`
+          <div class="pt-1.5 space-y-1">
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="text-slate-400">章节任务点: <span class="\${pendingCh > 0 ? 'text-amber-300' : 'text-emerald-300'} font-medium">\${c.completedChapters || 0}/\${c.totalChapters} 章</span>\${unfinishPts > 0 ? \` (待完成 \${unfinishPts} 点)\` : ''}</span>
+              <span class="font-mono \${rate === 100 ? 'text-emerald-400' : 'text-sky-300'}">\${rate}%</span>
+            </div>
+            <div class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div class="h-full rounded-full \${rate === 100 ? 'bg-emerald-500' : 'bg-sky-500'}" style="width: \${rate}%"></div>
+            </div>
+          </div>
+        \` : '';
+        return \`
         <div class="glass-card rounded-xl p-3.5 flex flex-col justify-between text-xs space-y-2.5 border border-slate-800 hover:border-slate-700 transition">
           <div class="space-y-1">
-            <div class="font-bold text-white text-sm line-clamp-1" title="\${c.courseName}">\${c.courseName}</div>
-            <div class="text-[11px] text-slate-400 font-mono">ID: \${c.courseId} · 班级: \${c.classId || '-'}</div>
-            \${c.teacherName ? \`<div class="text-[11px] text-slate-400">授课教师: <span class="text-slate-300">\${c.teacherName}</span></div>\` : ''}
+            <div class="font-bold text-white text-sm line-clamp-1" title="\${escapeHtml(c.courseName)}">\${escapeHtml(c.courseName)}</div>
+            <div class="text-[11px] text-slate-400 font-mono">ID: \${escapeHtml(c.courseId)} · 班级: \${escapeHtml(c.classId || '-')}</div>
+            \${c.teacherName ? \`<div class="text-[11px] text-slate-400">授课教师: <span class="text-slate-300">\${escapeHtml(c.teacherName)}</span></div>\` : ''}
+            \${progressHtml}
           </div>
           <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between">
             <span class="text-[10px] text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-500/10">● 活跃监听中</span>
-            <a href="https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=\${c.courseId}&clazzid=\${c.classId}&vc=1&cpi=\${c.cpi || ''}" target="_blank" class="text-[11px] text-sky-400 hover:underline">
+            <a href="https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=\${encodeURIComponent(c.courseId || '')}&clazzid=\${encodeURIComponent(c.classId || '')}&vc=1&cpi=\${encodeURIComponent(c.cpi || '')}" target="_blank" class="text-[11px] text-sky-400 hover:underline">
               进入课程 &rarr;
             </a>
           </div>
         </div>
-      \`).join('');
+      \`;
+      }).join('');
     }
 
     const publishingDiscussionIds = new Set();

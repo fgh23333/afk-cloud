@@ -16,12 +16,20 @@ import {
   scanDiscussionsBatch,
 } from './discussions';
 import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
-import { ExtendedNotifyEnv, sendDigestNotification, sendNotification, sendTelegramReply } from './notify';
+import { runPtaInspectionCycle } from './pta';
+import {
+  ExtendedNotifyEnv,
+  formatChapterProgressSummary,
+  sendDigestNotification,
+  sendNotification,
+  sendTelegramReply,
+} from './notify';
 import { signRequest, timingSafeEqualString, verifySignedRequest } from './request-signing';
 import { SignAgent } from './sign-agent';
 import { SolverAgent } from './solver-agent';
 import {
   getCachedSession,
+  getCourseChapterProgressMap,
   listDiscussions,
   logExecution,
   lookupQuestionCache,
@@ -29,6 +37,7 @@ import {
   nowUtc8,
   resolveCanonicalPendingTaskId,
   saveCachedSession,
+  saveCourseChapterProgressItems,
   saveDiscussionDraft,
   saveEnrolledCourses,
   saveNotices,
@@ -237,6 +246,15 @@ export default {
           await handleEdgeHeartbeat(env, shouldCheckHomework);
         }
 
+        // 每 10 分钟同步执行 PTA (pintia.cn) 活跃题目集监听
+        if (shouldCheckHomework) {
+          try {
+            await runPtaInspectionCycle(env);
+          } catch (e: any) {
+            console.warn(`[PTA scheduled 异常] ${e?.message || e}`);
+          }
+        }
+
         // SolverAgent 状态对账兜底 (查超时未响应的 dispatched 任务)
         if (env.SOLVER_AGENT) {
           try {
@@ -302,6 +320,7 @@ export default {
               env,
               {
                 ...data.stats,
+                unfinishedCourses: (data.courses || []).filter((c) => (c.totalUnfinishedPoints || 0) > 0),
                 recentTasks: data.tasks,
               },
               '每日定时任务简报'
@@ -448,7 +467,7 @@ async function handleEdgeFetch(
       const isHealthy = d1Status === 'healthy' || (!env.DB && d1Status === 'unconfigured');
       const healthData = {
         status: isHealthy ? 'healthy' : 'degraded',
-        version: '1.0.8',
+        version: '1.1.0',
         timestamp: nowUtc8(),
         latency_ms: Date.now() - startTime,
         auth_enforced: isAuthEnforced(env),
@@ -491,8 +510,10 @@ async function handleEdgeFetch(
         await sendTelegramReply(
           [
             '🤖 Personal Agent 已就绪！你可以直接发自然语言，或使用快捷指令：',
-            '/status — 查看学习通队列与服务状态',
+            '/status — 查看学习通与 PTA 队列及服务状态',
             '/tasks — 查看当前待处理作业',
+            '/pta — 实时查看 PTA (pintia.cn) 题目集作答状态',
+            '/progress — 查看各课程章节进度（发 /progress! 触发本机实时刷新）',
             '/todos — 查看个人待办清单',
             '/todo <内容> — 新增个人待办',
             '/done <编号或关键词> — 完成待办',
@@ -508,15 +529,41 @@ async function handleEdgeFetch(
       if (text === '/status' || text === '状态') {
         const data = await getDashboardData(env);
         const s = data.stats;
-        await sendTelegramReply(
-          [
-            `📊 当前状态 (${nowUtc8()})`,
-            `• 待办作业: ${s.pendingCount} | 草稿: ${s.draftCount} | 已交: ${s.submittedCount} | 失败: ${s.failedCount}`,
-            `• 讨论区: 待回复 ${s.discussionPendingCount} | 草稿 ${s.discussionDraftCount}`,
-          ].join('\n'),
-          env
-        );
+        const chapterLine = formatChapterProgressSummary(s, data.courses);
+        const statusLines = [
+          `📊 当前状态 (${nowUtc8()})`,
+          `• 待办作业: ${s.pendingCount} | 草稿: ${s.draftCount} | 已交: ${s.submittedCount} | 失败: ${s.failedCount}`,
+          `• 讨论区: 待回复 ${s.discussionPendingCount} | 草稿 ${s.discussionDraftCount}`,
+        ];
+        if (chapterLine) {
+          statusLines.push(`• 章节进度: ${chapterLine}`);
+        }
+        await sendTelegramReply(statusLines.join('\n'), env);
         return corsJson({ ok: true });
+      }
+
+      if (text === '/progress' || text === '进度') {
+        const data = await getDashboardData(env);
+        const tracked = (data.courses || []).filter((c) => typeof c.totalChapters === 'number' && c.totalChapters > 0);
+        if (tracked.length > 0) {
+          const lines = tracked.slice(0, 12).map((c, idx) => {
+            const unfinish = Number(c.totalUnfinishedPoints) || 0;
+            const badge = unfinish > 0 ? `⚠️ 待完成 ${unfinish} 个任务点` : '✅ 全部完成';
+            return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}`;
+          });
+          await sendTelegramReply(
+            `📖 课程章节任务点进度（发送 \`/progress!\` 或 \`刷新进度\` 可触发本机实时重扫）：\n${lines.join('\n')}`,
+            env
+          );
+          return corsJson({ ok: true });
+        }
+        const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+        const shimSecret = env.AFK_SHIM_SECRET;
+        if (!shimUrl || !shimSecret) {
+          await sendTelegramReply('📖 当前暂无已同步的课程章节进度快照（可在宿主机运行 `pnpm afk progress` 扫描同步）。', env);
+          return corsJson({ ok: true });
+        }
+        // Edge 尚无快照时自动透传至本机 Shim (/agent-chat) 触发首次扫描
       }
 
       if (text === '/tasks' || text === '作业') {
@@ -817,27 +864,39 @@ async function handleEdgeFetch(
         return corsJson({ error: 'Unauthorized: Access Denied' }, 401);
       }
       const bypassCooldown = url.searchParams.get('bypassCooldown') === '1';
+      let result: any;
       if (env.SIGN_AGENT) {
         try {
           const signStub = env.SIGN_AGENT.get(env.SIGN_AGENT.idFromName('default'));
-          const result = await (signStub as any).checkInspection({
+          result = await (signStub as any).checkInspection({
             force: true,
             checkHomework: true,
             scanDiscussions: true,
             bypassCooldown,
           });
-          return corsJson(result, result?.success ? 200 : 500);
         } catch (e: any) {
           console.warn(`[SignAgent /check 异常] ${e?.message || e}，回退至原生巡检`);
         }
       }
-      const result = await runChaoxingInspectionCycle(env, {
-        force: true,
-        checkHomework: true,
-        scanDiscussions: true,
-        bypassCooldown,
-      });
-      return corsJson(result, result.success ? 200 : 500);
+      if (!result) {
+        result = await runChaoxingInspectionCycle(env, {
+          force: true,
+          checkHomework: true,
+          scanDiscussions: true,
+          bypassCooldown,
+        });
+      }
+      const ptaResult = await runPtaInspectionCycle(env, { force: true }).catch((e: any) => ({
+        success: false,
+        configured: false,
+        totalSets: 0,
+        activeCount: 0,
+        pendingCount: 0,
+        newTasksNotified: 0,
+        msg: e?.message || String(e),
+        time: nowUtc8(),
+      }));
+      return corsJson({ ...result, pta: ptaResult }, result?.success ? 200 : 500);
     }
 
     // 7. /api/agent/callback 专用回调通道（具备 HMAC 签名 + Nonce 防重放）
@@ -952,6 +1011,19 @@ async function handleEdgeFetch(
         return corsJson({ courses, count: courses.length, time: nowUtc8() });
       }
 
+      // 查询或批量上报在读课程章节任务点进度快照
+      if (url.pathname === '/api/courses/progress' && request.method === 'GET') {
+        const progressMap = await getCourseChapterProgressMap(env);
+        return corsJson({ ok: true, progress: progressMap, count: Object.keys(progressMap).length, time: nowUtc8() });
+      }
+
+      if (url.pathname === '/api/courses/progress' && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const items = Array.isArray(body) ? body : Array.isArray(body.items) ? body.items : [];
+        const updated = await saveCourseChapterProgressItems(env, items);
+        return corsJson({ ok: true, updated, time: nowUtc8() });
+      }
+
       // 手动刷新通知箱消息
       if ((url.pathname === '/api/notices/refresh' || url.pathname === '/api/notices') && (request.method === 'GET' || request.method === 'POST')) {
         const phone = env.CHAOXING_PHONE || env.PHONE || '';
@@ -975,6 +1047,7 @@ async function handleEdgeFetch(
           env,
           {
             ...data.stats,
+            unfinishedCourses: (data.courses || []).filter((c) => (c.totalUnfinishedPoints || 0) > 0),
             recentTasks: data.tasks,
           },
           '手动触发任务简报'
@@ -992,6 +1065,12 @@ async function handleEdgeFetch(
         }
         await sendNotification(title.slice(0, 120), content.slice(0, 1500), env);
         return corsJson({ success: true, time: nowUtc8() });
+      }
+
+      // PTA (pintia.cn) 主动巡检与监听状态查询
+      if ((url.pathname === '/api/pta/scan' || url.pathname === '/api/pta/check') && (request.method === 'GET' || request.method === 'POST')) {
+        const ptaRes = await runPtaInspectionCycle(env, { force: true });
+        return corsJson(ptaRes, ptaRes.success ? 200 : 500);
       }
 
       // 获取当前 D1 队列待办
@@ -1460,15 +1539,20 @@ async function dispatchSingleTask(
   }
 
   if (!taskUrl) {
-    const noticeMatch = String(task.task_id || '').match(/^chaoxing-notice-(?:work|exam)-(\d+)-(\d+)/);
-    const hwMatch = String(task.task_id || '').match(/^chaoxing-(?:work|hw)-(\d+)(?:-(\d+))?/);
-    let rawWorkId = '';
-    if (noticeMatch) {
-      rawWorkId = noticeMatch[1];
-    } else if (hwMatch) {
-      rawWorkId = hwMatch[1] !== String(task.course_id || '') ? hwMatch[1] : '';
+    if (task.platform === 'pta') {
+      const ptaId = String(task.task_id || '').replace(/^pta-(?:ps-)?/, '');
+      taskUrl = ptaId ? `https://pintia.cn/problem-sets/${ptaId}/exam` : 'https://pintia.cn/problem-sets';
+    } else {
+      const noticeMatch = String(task.task_id || '').match(/^chaoxing-notice-(?:work|exam)-(\d+)-(\d+)/);
+      const hwMatch = String(task.task_id || '').match(/^chaoxing-(?:work|hw)-(\d+)(?:-(\d+))?/);
+      let rawWorkId = '';
+      if (noticeMatch) {
+        rawWorkId = noticeMatch[1];
+      } else if (hwMatch) {
+        rawWorkId = hwMatch[1] !== String(task.course_id || '') ? hwMatch[1] : '';
+      }
+      taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${task.course_id}&classId=${task.class_id}&cpi=&workId=${rawWorkId}`;
     }
-    taskUrl = `https://mooc1.chaoxing.com/mooc2/work/dowork?courseId=${task.course_id}&classId=${task.class_id}&cpi=&workId=${rawWorkId}`;
   }
 
   // 安全防线 1：URL 域名白名单与 HTTPS 校验

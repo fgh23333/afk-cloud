@@ -21,12 +21,47 @@ const NEWS_PATH = path.join(AUTOPILOT_DIR, 'news-digest.md');
 const ACTIVITY_PATH = path.join(AUTOPILOT_DIR, 'activity.log');
 const GEMINI_CONFIG_DIR = path.join(HOME, '.gemini/config');
 const EVOLVE_COOLDOWN_MS = 5 * 60 * 1000;
+const PROGRESS_SCAN_COOLDOWN_MS = 2 * 60 * 1000;
 
 let chatBusy = false;
 const MAX_CHAT_QUEUE = 10;
 const chatQueue: string[] = [];
 let queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let lastEvolveAtMs = 0;
+let progressScanBusy = false;
+let lastProgressScanAtMs = 0;
+
+export function formatProgressScanReport(
+  summaries: Array<{
+    courseId: string;
+    classId: string;
+    courseName: string;
+    totalChapters: number;
+    completedChapters: number;
+    pendingChapters: number;
+    totalUnfinishedPoints: number;
+    completionRate: number;
+  }>
+): string {
+  if (!Array.isArray(summaries) || summaries.length === 0) {
+    return '📖 未扫描到在读课程的章节任务点数据。';
+  }
+  const totalUnfinished = summaries.reduce((acc, s) => acc + (Number(s.totalUnfinishedPoints) || 0), 0);
+  const unfinishedCourses = summaries.filter((s) => (Number(s.totalUnfinishedPoints) || 0) > 0);
+  const header =
+    totalUnfinished > 0
+      ? `⚠️ 共跟踪 ${summaries.length} 门课，${unfinishedCourses.length} 门存在待完成任务点（合计 ${totalUnfinished} 个）：`
+      : `✅ 共跟踪 ${summaries.length} 门课，章节任务点全部完成！`;
+  const sorted = [...summaries].sort(
+    (a, b) => (Number(b.totalUnfinishedPoints) || 0) - (Number(a.totalUnfinishedPoints) || 0)
+  );
+  const lines = sorted.slice(0, 12).map((c, idx) => {
+    const unfinish = Number(c.totalUnfinishedPoints) || 0;
+    const badge = unfinish > 0 ? `⚠️ 待完成 ${unfinish} 个任务点` : '✅ 全部完成';
+    return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}`;
+  });
+  return [header, ...lines].join('\n');
+}
 
 function readTailLines(filePath: string, count: number): string[] {
   if (!fs.existsSync(filePath)) return [];
@@ -259,6 +294,89 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
     const lines = readTailLines(ACTIVITY_PATH, 10);
     void replyViaEdge('📜 最近自主活动记录', lines.length ? lines.join('\n') : '暂无活动记录。');
     return { accepted: true };
+  }
+
+  if (
+    trimmed === '/progress' ||
+    trimmed === '/progress!' ||
+    trimmed === '进度' ||
+    trimmed === '刷新进度'
+  ) {
+    if (progressScanBusy) {
+      return {
+        accepted: false,
+        immediateReply: '⏳ 章节任务点进度扫描正在后台运行中，请稍候查收结果。',
+      };
+    }
+    const now = Date.now();
+    const forceRefresh = trimmed === '/progress!' || trimmed === '刷新进度';
+    if (!forceRefresh && now - lastProgressScanAtMs < PROGRESS_SCAN_COOLDOWN_MS) {
+      const remainSec = Math.ceil((PROGRESS_SCAN_COOLDOWN_MS - (now - lastProgressScanAtMs)) / 1000);
+      return {
+        accepted: false,
+        immediateReply: `⏳ 章节进度扫描处于 2 分钟防抖冷却期，请 ${remainSec} 秒后再试（或发送 \`/progress!\` 强制刷新）。`,
+      };
+    }
+    const phone = process.env.CHAOXING_PHONE || '';
+    const password = process.env.CHAOXING_PASSWORD || '';
+    if (!phone || !password) {
+      return {
+        accepted: false,
+        immediateReply: '⚠️ 本机未配置 CHAOXING_PHONE / CHAOXING_PASSWORD，无法扫描章节任务点进度。',
+      };
+    }
+
+    progressScanBusy = true;
+    lastProgressScanAtMs = now;
+    appendActivity('[Telegram /progress] 触发本机学习通章节任务点进度扫描与看板同步');
+
+    void (async () => {
+      try {
+        const { ChaoxingAdapter } = await import('../../adapters/chaoxing/index');
+        const adapter = new ChaoxingAdapter(phone, password);
+        const summaries = await adapter.scanAllCourseChapterProgress(true);
+        const report = formatProgressScanReport(summaries);
+        appendActivity(`[Telegram /progress] 已同步 ${summaries.length} 门课程章节进度快照`);
+        await replyViaEdge('📖 章节进度已实时刷新并同步看板', report);
+      } catch (err: any) {
+        const errMsg = `扫描失败：${String(err?.message || err).slice(0, 300)}`;
+        appendActivity(`[Telegram /progress Error] ${errMsg}`);
+        await replyViaEdge('⚠️ 章节进度扫描失败', errMsg);
+      } finally {
+        progressScanBusy = false;
+      }
+    })();
+
+    return {
+      accepted: true,
+      immediateReply: '🔄 已在本机后台启动学习通各课程章节任务点进度扫描，完成后自动同步看板并推送明细…',
+    };
+  }
+
+  if (trimmed === '/pta' || trimmed.toLowerCase() === 'pta' || trimmed === '刷新PTA' || trimmed === '/pta!') {
+    void (async () => {
+      try {
+        const { PtaAdapter } = await import('../../adapters/pta/index');
+        const pta = new PtaAdapter();
+        const { totalSets, activeSets } = await pta.scanOverviews();
+        if (activeSets.length === 0) {
+          await replyViaEdge('💻 PTA 题目集巡检', `已连接 pintia.cn（历史总计 ${totalSets} 套），当前暂无未过期活跃题目集。`);
+          return;
+        }
+        const lines = activeSets.map((ov, i) => {
+          const stateText = ov.isCompleted
+            ? `✅ 已作答完毕 (${ov.exam?.score ?? ov.acceptedCount}/${ov.totalScore})`
+            : ov.exam
+              ? `⏳ 待完成 ${ov.noAnswerCount}/${ov.totalProblems} 题`
+              : '🆕 未开始作答';
+          return `${i + 1}. 《${ov.problemSet.name}》\n   ${stateText} | 截止: ${ov.deadlineUtc8}`;
+        });
+        await replyViaEdge('💻 PTA 实时状态', `活跃题目集 ${activeSets.length} 套（累计 ${totalSets} 套）：\n${lines.join('\n')}`);
+      } catch (err: any) {
+        await replyViaEdge('⚠️ PTA 巡检异常', String(err?.message || err).slice(0, 350));
+      }
+    })();
+    return { accepted: true, immediateReply: '💻 正在实时连接 PTA (pintia.cn) 检查活跃题目集并同步状态，请稍候…' };
   }
 
   if (trimmed === '/evolve') {

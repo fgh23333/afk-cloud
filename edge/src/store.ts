@@ -772,10 +772,12 @@ export async function saveNoticesWithEvents(
           ) {
             kind = 'exam';
           } else if (n.workInfo && !n.workInfo.isExpired) {
+            // 若该作业已由网页巡检提前建档并通知，则跳过通知箱重复新作业推送
             if (workCreatedByNotice) {
               kind = 'homework';
             }
           } else if (n.title.trim()) {
+            // 48h 内其余课程/教学新通知一律归为 important（防止“速来教室上课”等未命中窄关键词的通知漏推）
             kind = 'important';
           }
 
@@ -882,6 +884,83 @@ export async function getEnrolledCoursesFromD1(
   } catch {
     return [];
   }
+}
+
+export interface CourseChapterProgressSnapshot {
+  courseId: string;
+  classId: string;
+  courseName?: string;
+  totalChapters: number;
+  completedChapters: number;
+  pendingChapters: number;
+  totalUnfinishedPoints: number;
+  completionRate: number;
+  updatedAt?: string;
+}
+
+/**
+ * 读取缓存的各课程章节任务点进度快照 (复用 sessions 表 platform='chaoxing_chapter_progress', account='all' 免新建表迁移)
+ */
+export async function getCourseChapterProgressMap(
+  env: EdgeEnv
+): Promise<Record<string, CourseChapterProgressSnapshot>> {
+  const cached = await getCachedSession<Record<string, CourseChapterProgressSnapshot>>(
+    env,
+    'chaoxing_chapter_progress',
+    'all'
+  );
+  return cached && typeof cached === 'object' ? cached : {};
+}
+
+/**
+ * 批量合并并持久化课程章节任务点进度快照 (默认 30 天 TTL)
+ */
+export async function saveCourseChapterProgressItems(
+  env: EdgeEnv,
+  items: CourseChapterProgressSnapshot[]
+): Promise<number> {
+  if (!Array.isArray(items) || items.length === 0) return 0;
+  const current = await getCourseChapterProgressMap(env);
+  const ts = nowUtc8();
+  let updated = 0;
+
+  for (const item of items) {
+    const cid = String(item?.courseId || '').trim();
+    if (!cid) continue;
+    const totalChapters = Math.max(0, Number(item.totalChapters) || 0);
+    const pendingChapters = Math.max(0, Number(item.pendingChapters) || 0);
+    const completedChapters = Math.max(
+      0,
+      Number.isFinite(Number(item.completedChapters))
+        ? Number(item.completedChapters)
+        : totalChapters - pendingChapters
+    );
+    const totalUnfinishedPoints = Math.max(0, Number(item.totalUnfinishedPoints) || 0);
+    const completionRate =
+      typeof item.completionRate === 'number' && Number.isFinite(item.completionRate)
+        ? Math.min(100, Math.max(0, Math.round(item.completionRate)))
+        : totalChapters > 0
+          ? Math.round((completedChapters / totalChapters) * 100)
+          : 100;
+
+    current[cid] = {
+      courseId: cid,
+      classId: String(item.classId || current[cid]?.classId || ''),
+      courseName: String(item.courseName || current[cid]?.courseName || ''),
+      totalChapters,
+      completedChapters,
+      pendingChapters,
+      totalUnfinishedPoints,
+      completionRate,
+      updatedAt: item.updatedAt || ts,
+    };
+    updated++;
+  }
+
+  if (updated > 0) {
+    await saveCachedSession(env, 'chaoxing_chapter_progress', 'all', current, 30 * 24 * 3600);
+  }
+  return updated;
 }
 
 export interface DiscussionRecord {
