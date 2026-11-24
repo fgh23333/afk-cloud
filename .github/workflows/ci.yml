@@ -56,6 +56,8 @@ jobs:
       - name: CLI & Plugin Registry Dry-Run Smoke
         run: |
           echo "🔍 验证 CLI 入口与插件注册/编排指令 Dry-Run..."
+          ./node_modules/.bin/tsx packages/cli/src/index.ts --help >/dev/null
+          ./node_modules/.bin/tsx packages/cli/src/index.ts plugins | grep -q '\[pta\]'
           ./node_modules/.bin/tsx packages/cli/src/index.ts plugins | grep -q '\[zhihuishu\]'
           ./node_modules/.bin/tsx packages/cli/src/index.ts setup-cf --dry-run >/dev/null
           ./node_modules/.bin/tsx packages/cli/src/index.ts setup-gcp --dry-run >/dev/null
