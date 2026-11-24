@@ -208,6 +208,17 @@ export class WebBrowserAdapter implements PlatformAdapter, PlatformPlugin {
     }
 
     writeLocalStorageState(this.name, existing);
+    if (
+      this.name === 'pta' &&
+      !existing.cookies.some((c) => c.name === 'PTASession' && Boolean(c.value))
+    ) {
+      console.log(
+        yellow(
+          '[Cookie 提示] 未检测到 HttpOnly 会话凭证 PTASession（若仅从浏览器 console 复制 document.cookie 会丢失登录态），已跳过云端 D1 覆盖以防破坏已有会话。请从 DevTools Application -> Cookies 或请求头 Cookie 中复制完整 Cookie。'
+        )
+      );
+      return;
+    }
     const syncRes = await pushBrowserProfileToCloud(this.name);
     console.log(green(`[Cookie 导入完成] ${syncRes.msg}`));
   }

@@ -41,7 +41,10 @@ export interface ProfilePaths {
  */
 export function getBrowserProfilePaths(platform: PlatformName | string): ProfilePaths {
   const cleanName = platform.toLowerCase().replace(/[^a-z0-9_-]/g, '');
-  const baseDir = path.resolve(process.cwd(), '.cache', 'browser-profiles', cleanName);
+  const rootDir = process.env.AFK_BROWSER_PROFILES_DIR
+    ? path.resolve(process.env.AFK_BROWSER_PROFILES_DIR)
+    : path.resolve(process.cwd(), '.cache', 'browser-profiles');
+  const baseDir = path.join(rootDir, cleanName);
   const userDataDir = path.join(baseDir, 'user-data');
   const storageStatePath = path.join(baseDir, 'storage-state.json');
 
@@ -233,7 +236,7 @@ export function launchHeadlessBrowserWithProfile(options: {
     '--disable-gpu',
     '--disable-software-rasterizer',
     '--renderer-process-limit=1',
-    '--js-flags=--max-old-space-size=128',
+    `--js-flags=--max-old-space-size=${process.env.AFK_CHROME_MAX_OLD_SPACE_MB || '256'}`,
     '--disable-extensions',
     '--disable-background-networking',
     '--disable-default-apps',

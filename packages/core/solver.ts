@@ -288,7 +288,7 @@ async function solveComplexWithPro(
   }
   const isProgramming =
     question.type === 'programming' ||
-    /编程|算法实现|代码实现|时间复杂度|C语言|C\+\+|Python|函数实现/i.test(question.title);
+    /编程|算法实现|代码实现|时间复杂度|C语言|C\+\+|Python|Java|函数实现/i.test(question.title);
 
   let feedbackHistory = '';
   const maxAttempts = isProgramming && options?.enableSandboxTest !== false ? 3 : 1;
@@ -317,11 +317,11 @@ ${
 
       // 若带有明确样例输入输出，提取代码块进入本地沙箱验证
       if (isProgramming && question.sampleInput && question.sampleOutput) {
-        const codeBlockMatch = rawAns.match(/```(?:python|cpp|c\+\+|c|javascript|js)?\s*\n([\s\S]*?)```/i);
+        const codeBlockMatch = rawAns.match(/```(?:java|python|py|cpp|c\+\+|c|javascript|js)?\s*\n([\s\S]*?)```/i);
         const pureCode = codeBlockMatch ? codeBlockMatch[1] : rawAns;
-        const lang = question.languageHint || 'python';
+        const lang = question.languageHint || (/public\s+class\s+/i.test(pureCode) ? 'java' : 'python');
 
-        if (lang === 'python' || lang === 'cpp' || lang === 'c' || lang === 'javascript') {
+        if (lang === 'python' || lang === 'cpp' || lang === 'c' || lang === 'javascript' || lang === 'java') {
           const testRes = await runCodeInLocalSandbox({
             code: pureCode,
             language: lang,
