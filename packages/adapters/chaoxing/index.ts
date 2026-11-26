@@ -355,17 +355,31 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   }
 
   /**
-   * 扫描全部在读课程的章节任务点完成进度并同步至 Edge 看板
+   * 扫描全部（或按课程关键词过滤的）在读课程章节任务点完成进度并同步至 Edge 看板
    */
   public async scanAllCourseChapterProgress(
-    syncToEdge = true
+    syncToEdge = true,
+    courseFilter?: string
   ): Promise<CourseChapterProgressSummary[]> {
     const cookies = await this.ensureAuth();
-    const courses = await getChaoxingCourses(cookies);
+    const allCourses = await getChaoxingCourses(cookies);
+    const kw = (courseFilter || '').trim().toLowerCase();
+    const courses = kw
+      ? allCourses.filter(
+          (c) =>
+            (c.courseName || '').toLowerCase().includes(kw) ||
+            c.courseId.toLowerCase() === kw ||
+            c.classId.toLowerCase() === kw
+        )
+      : allCourses;
     const summaries: CourseChapterProgressSummary[] = [];
 
     console.log(blue(`\n======================================================`));
-    console.log(blue(` 📊 正在巡检在读 ${courses.length} 门课程的章节任务点进度 📊`));
+    console.log(
+      blue(
+        ` 📊 正在巡检${kw ? `匹配「${courseFilter}」的` : '在读'} ${courses.length} 门课程的章节任务点进度 📊`
+      )
+    );
     console.log(blue(`======================================================\n`));
 
     for (const c of courses) {
@@ -376,7 +390,11 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
           summary.pendingChapters > 0
             ? yellow(`[待完成 ${summary.pendingChapters}/${summary.totalChapters} 章 · ${summary.totalUnfinishedPoints} 任务点]`)
             : green(`[已完成 ${summary.completionRate}%]`);
-        console.log(`${badge} 《${c.courseName}》 (ID: ${c.courseId}) | 完成率: ${summary.completionRate}%`);
+        const pendingHint =
+          summary.pendingChapterTitles.length > 0
+            ? ` | 待刷: ${summary.pendingChapterTitles.slice(0, 3).join('、')}${summary.pendingChapterTitles.length > 3 ? ' 等' : ''}`
+            : '';
+        console.log(`${badge} 《${c.courseName}》 (ID: ${c.courseId}) | 完成率: ${summary.completionRate}%${pendingHint}`);
       } catch (err: any) {
         console.log(red(`[章节进度跳过] 《${c.courseName}》: ${err?.message || err}`));
       }
@@ -393,6 +411,7 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
           pendingChapters: s.pendingChapters,
           totalUnfinishedPoints: s.totalUnfinishedPoints,
           completionRate: s.completionRate,
+          pendingChapterTitles: s.pendingChapterTitles,
         }))
       );
     }

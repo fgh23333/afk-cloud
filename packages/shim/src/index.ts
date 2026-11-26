@@ -277,7 +277,7 @@ export function createShimServer(overrides: Partial<ShimSecurityConfig> = {}): h
   });
 
   server.headersTimeout = 15_000;
-  server.requestTimeout = 30_000;
+  server.requestTimeout = 45_000;
   return server;
 }
 

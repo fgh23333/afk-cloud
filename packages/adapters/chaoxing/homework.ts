@@ -4,6 +4,12 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { resolveAgyWorkdir } from '../../core/agy-invoke';
 import {
+  extractReadableTextFromBuffer,
+  looksLikeHtmlBuffer,
+  parseChaoxingViewerHtml,
+  sniffFileExtension,
+} from '../../core/file-extract';
+import {
   CourseInfo,
   HomeworkDetail,
   HomeworkSummary,
@@ -18,32 +24,55 @@ const BROWSER_UA =
 const CHAOXING_REFERER = 'https://mooc1-1.chaoxing.com/';
 const MAX_QUESTION_IMAGE_BYTES = 5 * 1024 * 1024;
 
+function resolveChaoxingAssetUrl(rawUrl: string, chaoxingOrigin = 'https://mooc1-1.chaoxing.com'): string {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '';
+  if (s.startsWith('//')) return `https:${s}`;
+  if (s.startsWith('/')) return `${chaoxingOrigin.replace(/\/+$/, '')}${s}`;
+  return s;
+}
+
+function isDecorativeChaoxingIcon(urlOrSrc: string): boolean {
+  return /fileTypeImages\/|\/js\/editor|icon_[a-z]+\.(?:gif|png)|favicon\.ico|spacer\.gif/i.test(urlOrSrc);
+}
+
 /**
  * 预下载超星防盗链题面图片（携带 Cookie 与 Referer: https://mooc1-1.chaoxing.com/）至 agy 沙箱可读目录
  */
 export async function downloadChaoxingQuestionImage(
   imgUrl: string,
   courseCookie: string,
-  workId: string
+  workId: string,
+  options?: { allowInTest?: boolean; chaoxingOrigin?: string }
 ): Promise<string | null> {
-  if (!imgUrl || !/^https?:\/\//i.test(imgUrl) || process.env.NODE_ENV === 'test') {
+  const resolvedUrl = resolveChaoxingAssetUrl(imgUrl, options?.chaoxingOrigin);
+  if (
+    !resolvedUrl ||
+    !/^https?:\/\//i.test(resolvedUrl) ||
+    isDecorativeChaoxingIcon(resolvedUrl) ||
+    (process.env.NODE_ENV === 'test' && !options?.allowInTest)
+  ) {
     return null;
   }
   try {
     const safeWorkDir = String(workId || 'common').replace(/[^a-zA-Z0-9_-]/g, '_');
     const assetDir = path.join(resolveAgyWorkdir(), 'homework_assets', safeWorkDir);
     fs.mkdirSync(assetDir, { recursive: true });
-    const extMatch = new URL(imgUrl).pathname.match(/\.(png|jpe?g|gif|webp|bmp|svg)$/i);
-    const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
-    const hash = crypto.createHash('sha1').update(imgUrl).digest('hex').slice(0, 12);
-    const localPath = path.join(assetDir, `img_${hash}${ext}`);
-    if (fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
-      return localPath;
+    const extMatch = new URL(resolvedUrl).pathname.match(/\.(png|jpe?g|gif|webp|bmp|svg)$/i);
+    const hintedExt = extMatch ? extMatch[0].toLowerCase() : '.png';
+    const hash = crypto.createHash('sha1').update(resolvedUrl).digest('hex').slice(0, 12);
+    const cachedCandidate = path.join(assetDir, `img_${hash}${hintedExt}`);
+    if (
+      fs.existsSync(cachedCandidate) &&
+      fs.statSync(cachedCandidate).size > 0 &&
+      !looksLikeHtmlBuffer(fs.readFileSync(cachedCandidate).subarray(0, 512))
+    ) {
+      return cachedCandidate;
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await fetch(imgUrl, {
+      const res = await fetch(resolvedUrl, {
         headers: {
           Cookie: courseCookie,
           Referer: CHAOXING_REFERER,
@@ -53,7 +82,15 @@ export async function downloadChaoxingQuestionImage(
       });
       if (!res.ok) return null;
       const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length === 0 || buf.length > MAX_QUESTION_IMAGE_BYTES) return null;
+      if (buf.length === 0 || buf.length > MAX_QUESTION_IMAGE_BYTES || looksLikeHtmlBuffer(buf)) return null;
+      const sniffedExt = sniffFileExtension(buf, {
+        url: resolvedUrl,
+        contentType: res.headers.get('content-type') || '',
+      });
+      const finalExt = ['.png', '.jpg', '.gif', '.webp', '.svg', '.bmp'].includes(sniffedExt)
+        ? sniffedExt
+        : hintedExt;
+      const localPath = path.join(assetDir, `img_${hash}${finalExt}`);
       fs.writeFileSync(localPath, buf);
       return localPath;
     } finally {
@@ -65,69 +102,276 @@ export async function downloadChaoxingQuestionImage(
 }
 
 /**
- * 预下载超星题干附件（.doc/.docx/.pdf/.txt/.md 等）至 agy 沙箱可读目录并尝试提取可读文本摘要
+ * 从超星 /ueditorupload/read HTML 浏览壳页面中提取真实文件下载直链（如 https://d0.cldisk.com/download/...）
+ */
+export function extractClDiskDownloadUrlFromHtml(rawHtml: string): string | null {
+  if (!rawHtml) return null;
+  return parseChaoxingViewerHtml(rawHtml).directDownloadUrl || null;
+}
+
+/**
+ * 从二进制/文本 Buffer 中提取可读文本摘要（兼容 Word OLE2 UTF-16LE / DOCX XML / PDF / UTF-8）
+ */
+export function extractReadableAttachmentText(buf: Buffer, ext: string): string {
+  return extractReadableTextFromBuffer(buf, ext, 3500).text;
+}
+
+export interface DownloadedAttachmentResult {
+  localPath?: string;
+  extractedText?: string;
+  pageImages?: string[];
+  failedReason?: string;
+}
+
+async function fetchChaoxingAssetBuffer(
+  targetUrl: string,
+  courseCookie: string,
+  timeoutMs = 12000
+): Promise<{ ok: boolean; status: number; buf: Buffer; contentType: string; contentDisposition: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(targetUrl, {
+      headers: {
+        Cookie: courseCookie,
+        Referer: CHAOXING_REFERER,
+        'User-Agent': BROWSER_UA,
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    const contentType = res.headers.get('content-type') || '';
+    const contentDisposition = res.headers.get('content-disposition') || '';
+    if (!res.ok) {
+      return { ok: false, status: res.status, buf: Buffer.alloc(0), contentType, contentDisposition };
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { ok: true, status: res.status, buf, contentType, contentDisposition };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 预下载超星题干附件（支持 /ueditorupload/read HTML 浏览壳解包、/ananas/status/<objectId> 直链+PDF+页截图拉取与多格式正文提取）
  */
 export async function downloadChaoxingQuestionAttachment(
   attUrl: string,
   label: string,
   courseCookie: string,
-  workId: string
-): Promise<{ localPath: string; extractedText?: string } | null> {
-  if (!attUrl || process.env.NODE_ENV === 'test') {
+  workId: string,
+  options?: { allowInTest?: boolean; chaoxingOrigin?: string }
+): Promise<DownloadedAttachmentResult | null> {
+  if (!attUrl || (process.env.NODE_ENV === 'test' && !options?.allowInTest)) {
     return null;
   }
-  const resolvedUrl = attUrl.startsWith('//')
-    ? `https:${attUrl}`
-    : attUrl.startsWith('/')
-      ? `https://mooc1-1.chaoxing.com${attUrl}`
-      : attUrl;
+  const chaoxingOrigin = (options?.chaoxingOrigin || 'https://mooc1-1.chaoxing.com').replace(/\/+$/, '');
+  const resolvedUrl = resolveChaoxingAssetUrl(attUrl, chaoxingOrigin);
   if (!/^https?:\/\//i.test(resolvedUrl)) {
     return null;
   }
+
   try {
     const safeWorkDir = String(workId || 'common').replace(/[^a-zA-Z0-9_-]/g, '_');
     const assetDir = path.join(resolveAgyWorkdir(), 'homework_assets', safeWorkDir);
     fs.mkdirSync(assetDir, { recursive: true });
-    const extSource = `${label || ''} ${new URL(resolvedUrl).pathname}`;
-    const extMatch = extSource.match(/\.(txt|md|csv|json|html?|docx?|pdf|pptx?|xlsx?|c|cpp|py|java)$/i);
-    const ext = extMatch ? extMatch[0].toLowerCase() : '.bin';
     const hash = crypto.createHash('sha1').update(resolvedUrl).digest('hex').slice(0, 12);
-    const localPath = path.join(assetDir, `att_${hash}${ext}`);
 
-    if (!fs.existsSync(localPath) || fs.statSync(localPath).size === 0) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
+    // 清理历史上误把网页外壳存下的 .bin 缓存文件
+    const staleBinPath = path.join(assetDir, `att_${hash}.bin`);
+    if (fs.existsSync(staleBinPath) && looksLikeHtmlBuffer(fs.readFileSync(staleBinPath).subarray(0, 512))) {
       try {
-        const res = await fetch(resolvedUrl, {
-          headers: {
-            Cookie: courseCookie,
-            Referer: CHAOXING_REFERER,
-            'User-Agent': BROWSER_UA,
-          },
-          signal: controller.signal,
-        });
-        if (!res.ok) return null;
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length === 0 || buf.length > MAX_QUESTION_IMAGE_BYTES) return null;
-        fs.writeFileSync(localPath, buf);
-      } finally {
-        clearTimeout(timer);
+        fs.unlinkSync(staleBinPath);
+      } catch {}
+    }
+
+    // 检查本地是否已有非外壳且有效的文档/截图缓存
+    const existingFiles = fs.readdirSync(assetDir).filter((f) => f.startsWith(`att_${hash}`));
+    const cachedDocFile = existingFiles.find(
+      (f) => !/_p\d+\.(png|jpe?g)$/i.test(f) && !f.endsWith('.bin') && !f.endsWith('.html')
+    );
+    const cachedPageImgs = existingFiles
+      .filter((f) => /^att_[a-f0-9]+_p\d+\.(png|jpe?g)$/i.test(f))
+      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
+      .map((f) => path.join(assetDir, f));
+
+    if (cachedDocFile) {
+      const fullPath = path.join(assetDir, cachedDocFile);
+      const cachedBuf = fs.readFileSync(fullPath);
+      if (cachedBuf.length > 0 && !looksLikeHtmlBuffer(cachedBuf)) {
+        const ext = path.extname(cachedDocFile).toLowerCase();
+        const extracted = extractReadableTextFromBuffer(cachedBuf, ext, 3500);
+        if (extracted.text.length >= 10 || cachedPageImgs.length > 0) {
+          return {
+            localPath: fullPath,
+            ...(extracted.text.length >= 10 ? { extractedText: extracted.text } : {}),
+            ...(cachedPageImgs.length > 0 ? { pageImages: cachedPageImgs } : {}),
+          };
+        }
       }
     }
 
-    let extractedText = '';
-    const buf = fs.readFileSync(localPath);
-    if (['.txt', '.md', '.csv', '.json', '.html', '.htm', '.c', '.cpp', '.py', '.java'].includes(ext)) {
-      extractedText = buf.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 1500);
-    } else if (['.doc', '.docx', '.pdf'].includes(ext)) {
-      const str = buf.toString('utf8');
-      const chunks = str.match(/[\u4e00-\u9fa5a-zA-Z0-9，。！？；：“”（）\-_.,:()]{4,}/g) || [];
-      const readable = chunks.filter((c) => /[\u4e00-\u9fa5]/.test(c)).join(' ');
-      extractedText = readable.replace(/\s+/g, ' ').trim().slice(0, 1500);
+    let docBuf: Buffer | null = null;
+    let docExt = '.bin';
+    let docUrlUsed = resolvedUrl;
+    let docContentType = '';
+    let docContentDisposition = '';
+    let docFilenameHint = label || '';
+    const pageImages: string[] = [...cachedPageImgs];
+    let pdfFallbackBuf: Buffer | null = null;
+
+    let objectId = '';
+    try {
+      const u = new URL(resolvedUrl);
+      objectId = u.searchParams.get('objectId') || u.searchParams.get('objectid') || '';
+    } catch {}
+
+    let directDownloadUrl = '';
+    const initialFetch = await fetchChaoxingAssetBuffer(resolvedUrl, courseCookie);
+    if (!initialFetch.ok) {
+      return { failedReason: `HTTP ${initialFetch.status} 下载失败` };
     }
-    return { localPath, ...(extractedText.length >= 10 ? { extractedText } : {}) };
-  } catch {
-    return null;
+
+    if (looksLikeHtmlBuffer(initialFetch.buf)) {
+      const viewer = parseChaoxingViewerHtml(initialFetch.buf.toString('utf8'), resolvedUrl);
+      if (viewer.isLoginPage) {
+        return { failedReason: '超星附件鉴权失效（重定向至登录页）' };
+      }
+      if (viewer.objectId) objectId = viewer.objectId;
+      if (viewer.directDownloadUrl) directDownloadUrl = viewer.directDownloadUrl;
+      if (viewer.filename) docFilenameHint = viewer.filename;
+    } else if (initialFetch.buf.length > 0 && initialFetch.buf.length <= MAX_QUESTION_IMAGE_BYTES * 2) {
+      docBuf = initialFetch.buf;
+      docContentType = initialFetch.contentType;
+      docContentDisposition = initialFetch.contentDisposition;
+    }
+
+    // 通过 /ananas/status/<objectId> 同时拿原文件下载直链、服务器转码 PDF 及分页高清 PNG 截图
+    if (!docBuf && objectId) {
+      try {
+        const statusRes = await fetchChaoxingAssetBuffer(
+          `${chaoxingOrigin}/ananas/status/${objectId}`,
+          courseCookie,
+          10000
+        );
+        if (statusRes.ok && statusRes.buf.length > 0) {
+          const statusJson = JSON.parse(statusRes.buf.toString('utf8')) as {
+            download?: string;
+            pdf?: string;
+            thumb?: string;
+            filename?: string;
+            pagenum?: number;
+          };
+          if (statusJson.filename) docFilenameHint = statusJson.filename;
+          if (!directDownloadUrl && statusJson.download) {
+            directDownloadUrl = statusJson.download;
+          }
+
+          if (statusJson.pdf) {
+            const pdfRes = await fetchChaoxingAssetBuffer(statusJson.pdf, courseCookie, 12000).catch(() => null);
+            if (
+              pdfRes?.ok &&
+              pdfRes.buf.length > 0 &&
+              pdfRes.buf.length <= MAX_QUESTION_IMAGE_BYTES * 2 &&
+              !looksLikeHtmlBuffer(pdfRes.buf)
+            ) {
+              pdfFallbackBuf = pdfRes.buf;
+            }
+          }
+
+          if (statusJson.thumb && pageImages.length === 0) {
+            const thumbBase = statusJson.thumb.endsWith('/') ? statusJson.thumb : `${statusJson.thumb}/`;
+            const pageLimit = Math.min(Math.max(Number(statusJson.pagenum) || 3, 1), 6);
+            for (let p = 1; p <= pageLimit; p++) {
+              const pRes = await fetchChaoxingAssetBuffer(`${thumbBase}${p}.png`, courseCookie, 8000).catch(() => null);
+              if (!pRes?.ok || pRes.buf.length === 0 || looksLikeHtmlBuffer(pRes.buf)) break;
+              const pExt = sniffFileExtension(pRes.buf, { url: `${p}.png` });
+              if (pExt !== '.png' && pExt !== '.jpg') break;
+              const pagePath = path.join(assetDir, `att_${hash}_p${p}${pExt}`);
+              fs.writeFileSync(pagePath, pRes.buf);
+              pageImages.push(pagePath);
+            }
+          }
+        }
+      } catch {
+        // /ananas/status 不可用时继续回退到 directDownloadUrl / PDF
+      }
+    }
+
+    if (!docBuf && directDownloadUrl) {
+      const candRes = await fetchChaoxingAssetBuffer(directDownloadUrl, courseCookie, 12000).catch(() => null);
+      if (
+        candRes?.ok &&
+        candRes.buf.length > 0 &&
+        candRes.buf.length <= MAX_QUESTION_IMAGE_BYTES * 2 &&
+        !looksLikeHtmlBuffer(candRes.buf)
+      ) {
+        docBuf = candRes.buf;
+        docUrlUsed = directDownloadUrl;
+        docContentType = candRes.contentType;
+        docContentDisposition = candRes.contentDisposition;
+      }
+    }
+
+    if (!docBuf && pdfFallbackBuf) {
+      docBuf = pdfFallbackBuf;
+      docExt = '.pdf';
+    }
+
+    if (!docBuf || docBuf.length === 0) {
+      if (pageImages.length > 0) {
+        return { localPath: pageImages[0], pageImages };
+      }
+      return { failedReason: '附件仅返回网页外壳且无法解析出真实文件流或预览页' };
+    }
+
+    docExt = sniffFileExtension(docBuf, {
+      filename: docFilenameHint,
+      label,
+      url: docUrlUsed,
+      contentDisposition: docContentDisposition,
+      contentType: docContentType,
+    });
+
+    if (docExt === '.html') {
+      if (pageImages.length > 0) {
+        return { localPath: pageImages[0], pageImages };
+      }
+      return { failedReason: '附件响应为 HTML 页面而非文档正文' };
+    }
+
+    const localPath = path.join(assetDir, `att_${hash}${docExt}`);
+    fs.writeFileSync(localPath, docBuf);
+
+    let extracted = extractReadableTextFromBuffer(docBuf, docExt, 3500);
+    if (extracted.text.length < 20 && pdfFallbackBuf) {
+      const pdfExtracted = extractReadableTextFromBuffer(pdfFallbackBuf, '.pdf', 3500);
+      if (pdfExtracted.text.length > extracted.text.length) {
+        extracted = pdfExtracted;
+      }
+      const pdfCachePath = path.join(assetDir, `att_${hash}.pdf`);
+      if (!fs.existsSync(pdfCachePath)) {
+        fs.writeFileSync(pdfCachePath, pdfFallbackBuf);
+      }
+    }
+
+    const hasReadableText = extracted.text.length >= 10;
+    const isDirectImageOrText =
+      ['.png', '.jpg', '.gif', '.webp', '.svg', '.bmp', '.txt', '.md', '.csv', '.json', '.c', '.cpp', '.py', '.java'].includes(docExt);
+
+    if (!hasReadableText && pageImages.length === 0 && !isDirectImageOrText) {
+      return {
+        failedReason: `已下载 ${docExt} 原文件(${docBuf.length}B)但未提取到可读文字且无分页预览图`,
+      };
+    }
+
+    return {
+      localPath,
+      ...(hasReadableText ? { extractedText: extracted.text } : {}),
+      ...(pageImages.length > 0 ? { pageImages } : {}),
+    };
+  } catch (err: any) {
+    return { failedReason: err?.message || '附件处理异常' };
   }
 }
 
@@ -366,16 +610,30 @@ export async function getHomeworkDetail(
     const score = scoreM ? parseFloat(scoreM[1] || scoreM[2]) : undefined;
 
     const attachments: string[] = [];
+    const seenAttachUrls = new Set<string>();
     titleEl.querySelectorAll('a[href]').forEach((a) => {
       const href = (a.getAttribute('href') || '').trim();
       const label = (a.textContent || '').trim();
       if (href && !href.startsWith('javascript:')) {
+        seenAttachUrls.add(href);
         attachments.push(`[附件: ${label || '文件'} (${href})]`);
+      }
+    });
+    titleEl.querySelectorAll('[objectid], iframe[data*="objectid"]').forEach((el) => {
+      const dataAttr = el.getAttribute('data') || '';
+      const oidMatch = dataAttr.match(/['"]?objectid['"]?\s*:\s*['"]([a-f0-9]{16,64})['"]/i);
+      const oid = (el.getAttribute('objectid') || (oidMatch ? oidMatch[1] : '') || '').trim();
+      if (oid) {
+        const pseudoUrl = `/ueditorupload/read?objectId=${oid}`;
+        if (!Array.from(seenAttachUrls).some((u) => u.includes(oid))) {
+          seenAttachUrls.add(pseudoUrl);
+          attachments.push(`[附件: 文档_${oid.slice(0, 8)} (${pseudoUrl})]`);
+        }
       }
     });
     titleEl.querySelectorAll('img[src]').forEach((img) => {
       const src = (img.getAttribute('src') || '').trim();
-      if (src && !src.startsWith('data:')) {
+      if (src && !src.startsWith('data:') && !isDecorativeChaoxingIcon(src)) {
         attachments.push(`[图片: ${src}]`);
       }
     });
@@ -391,9 +649,9 @@ export async function getHomeworkDetail(
     });
   });
 
-  // 预下载超星题干图片与附件至本地，附上本地路径与提取文本供多模态/Pro读取（规避 p.ananas.chaoxing.com 403 防盗链与空壳附件题）
+  // 预下载超星题干图片与附件至本地，附上本地路径、分页截图与提取文本供多模态/Pro读取（规避 p.ananas.chaoxing.com 403 防盗链与空壳附件题）
   for (const q of questions) {
-    const imgMatches = Array.from(q.title.matchAll(/\[图片:\s*(https?:\/\/[^\]\s]+)\]/g));
+    const imgMatches = Array.from(q.title.matchAll(/\[图片:\s*([^\]\s]+)\]/g));
     for (const m of imgMatches) {
       const imgUrl = m[1];
       const localPath = await downloadChaoxingQuestionImage(imgUrl, session.courseCookie, homework.workId);
@@ -406,11 +664,20 @@ export async function getHomeworkDetail(
       const label = (m[1] || '文件').trim();
       const attUrl = (m[2] || '').trim();
       const dl = await downloadChaoxingQuestionAttachment(attUrl, label, session.courseCookie, homework.workId);
-      if (dl) {
+      if (dl?.localPath) {
+        const pageImgPart =
+          dl.pageImages && dl.pageImages.length > 0
+            ? ` | 附件页面截图(可用read_file查看): ${dl.pageImages.join(', ')}`
+            : '';
         const snippet = dl.extractedText ? ` | 附件摘要: ${dl.extractedText}` : '';
         q.title = q.title.replace(
           m[0],
-          `[附件: ${label} (${attUrl} | 本地已缓存: ${dl.localPath}${snippet})]`
+          `[附件: ${label} (${attUrl} | 本地已缓存: ${dl.localPath}${pageImgPart}${snippet})]`
+        );
+      } else if (dl?.failedReason) {
+        q.title = q.title.replace(
+          m[0],
+          `[附件: ${label} (${attUrl} | 附件不可读: ${dl.failedReason})]`
         );
       }
     }

@@ -71,6 +71,7 @@ export interface CourseChapterProgressSummary {
   pendingChapters: number;
   totalUnfinishedPoints: number;
   completionRate: number;
+  pendingChapterTitles: string[];
   chapters: ChapterPointItem[];
 }
 
@@ -216,10 +217,12 @@ export function parseCourseChapterProgressHtml(
   }
 
   const totalChapters = chapters.length;
-  const pendingChapters = chapters.filter((c) => c.status === 'pending').length;
+  const pendingChapterItems = chapters.filter((c) => c.status === 'pending');
+  const pendingChapters = pendingChapterItems.length;
   const completedChapters = totalChapters - pendingChapters;
   const totalUnfinishedPoints = chapters.reduce((acc, c) => acc + c.unfinishedPoints, 0);
   const completionRate = totalChapters > 0 ? Math.round((completedChapters / totalChapters) * 100) : 100;
+  const pendingChapterTitles = pendingChapterItems.slice(0, 5).map((c) => c.title);
 
   return {
     courseId: course.courseId,
@@ -230,6 +233,7 @@ export function parseCourseChapterProgressHtml(
     pendingChapters,
     totalUnfinishedPoints,
     completionRate,
+    pendingChapterTitles,
     chapters,
   };
 }

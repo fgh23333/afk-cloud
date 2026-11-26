@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { JSDOM } from 'jsdom';
 import path from 'path';
+import { extractReadableTextFromBuffer, sniffFileExtension } from '../../core/file-extract';
 import { CourseInfo, MaterialItem } from '../../core/types';
 import { ChaoxingCookies, CourseSessionInfo, fetchCourseSession } from './session';
 
@@ -110,22 +111,24 @@ export async function downloadCourseMaterials(
 
       if (!fileRes.ok) continue;
 
-      const arrayBuffer = await fileRes.arrayBuffer();
-      fs.writeFileSync(localFilePath, Buffer.from(arrayBuffer));
+      const buf = Buffer.from(await fileRes.arrayBuffer());
+      const realExt = sniffFileExtension(buf, {
+        filename: cleanFileName,
+        url: dlUrls[0],
+        contentDisposition: fileRes.headers.get('content-disposition') || '',
+        contentType: fileRes.headers.get('content-type') || '',
+      });
+      if (realExt === '.html' && !['.html', '.htm'].includes(path.extname(cleanFileName).toLowerCase())) {
+        continue;
+      }
+      fs.writeFileSync(localFilePath, buf);
       item.localPath = localFilePath;
       downloadedList.push(item);
 
-      const ext = path.extname(cleanFileName).toLowerCase();
-      if (['.txt', '.md', '.json', '.html', '.htm', '.csv'].includes(ext)) {
-        const textContent = fs.readFileSync(localFilePath, 'utf8');
-        fs.writeFileSync(localFilePath + '.extracted.txt', textContent, 'utf8');
-      } else if (['.doc', '.docx', '.pdf'].includes(ext)) {
-        const buffer = fs.readFileSync(localFilePath);
-        const str = buffer.toString('utf8');
-        const extracted = str.match(/[\u4e00-\u9fa5a-zA-Z0-9，。！？；：“”（）\n\r\t ]{4,}/g) || [];
-        if (extracted.length > 0) {
-          fs.writeFileSync(localFilePath + '.extracted.txt', extracted.join('\n'), 'utf8');
-        }
+      const ext = path.extname(cleanFileName).toLowerCase() || realExt;
+      const extracted = extractReadableTextFromBuffer(buf, ext, 20000);
+      if (!extracted.isHtmlWrapper && extracted.text.length >= 10) {
+        fs.writeFileSync(localFilePath + '.extracted.txt', extracted.text, 'utf8');
       }
     } catch {
       // 单文件下载容错

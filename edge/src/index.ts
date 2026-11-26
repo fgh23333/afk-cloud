@@ -513,7 +513,7 @@ async function handleEdgeFetch(
             '/status — 查看学习通与 PTA 队列及服务状态',
             '/tasks — 查看当前待处理作业',
             '/pta — 实时查看 PTA (pintia.cn) 题目集作答状态',
-            '/progress — 查看各课程章节进度（发 /progress! 触发本机实时刷新）',
+            '/progress [课程名] — 查看各课程或指定课程待刷章节进度（发 /progress! 触发本机实时刷新）',
             '/todos — 查看个人待办清单',
             '/todo <内容> — 新增个人待办',
             '/done <编号或关键词> — 完成待办',
@@ -542,20 +542,73 @@ async function handleEdgeFetch(
         return corsJson({ ok: true });
       }
 
-      if (text === '/progress' || text === '进度') {
+      const tgProgressMatch = text.match(/^(\/progress|进度)(?:\s+([\s\S]+))?$/i);
+      if (tgProgressMatch) {
+        const kw = (tgProgressMatch[2] || '').trim();
+        const kwLower = kw.toLowerCase();
         const data = await getDashboardData(env);
         const tracked = (data.courses || []).filter((c) => typeof c.totalChapters === 'number' && c.totalChapters > 0);
         if (tracked.length > 0) {
-          const lines = tracked.slice(0, 12).map((c, idx) => {
-            const unfinish = Number(c.totalUnfinishedPoints) || 0;
-            const badge = unfinish > 0 ? `⚠️ 待完成 ${unfinish} 个任务点` : '✅ 全部完成';
-            return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}`;
-          });
-          await sendTelegramReply(
-            `📖 课程章节任务点进度（发送 \`/progress!\` 或 \`刷新进度\` 可触发本机实时重扫）：\n${lines.join('\n')}`,
-            env
-          );
-          return corsJson({ ok: true });
+          if (kw) {
+            const matched = tracked.filter(
+              (c) =>
+                (c.courseName || '').toLowerCase().includes(kwLower) ||
+                String(c.courseId || '').toLowerCase() === kwLower ||
+                String(c.classId || '').toLowerCase() === kwLower
+            );
+            if (matched.length > 0) {
+              const blocks = matched.slice(0, 5).map((c) => {
+                const unfinish = Number(c.totalUnfinishedPoints) || 0;
+                const courseUrl = `https://mooc1-1.chaoxing.com/visit/stucoursemiddle?courseid=${c.courseId}&clazzid=${c.classId}${c.cpi ? `&cpi=${c.cpi}` : ''}`;
+                const pendingTitles = Array.isArray(c.pendingChapterTitles)
+                  ? c.pendingChapterTitles.filter(Boolean)
+                  : [];
+                const detailLines = [
+                  `📖 《${c.courseName}》 (ID: ${c.courseId}) — 完成率 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章，待完成 ${unfinish} 个任务点)`,
+                  `🔗 课程入口: ${courseUrl}`,
+                ];
+                if (unfinish > 0 && pendingTitles.length > 0) {
+                  for (const title of pendingTitles) {
+                    detailLines.push(`  • ${title}`);
+                  }
+                } else if (unfinish === 0) {
+                  detailLines.push('  ✅ 该课程所有章节任务点均已完成！');
+                }
+                return detailLines.join('\n');
+              });
+              await sendTelegramReply(
+                `${blocks.join('\n\n')}\n\n💡 发送 \`/progress! ${kw}\` 可触发本机实时扫描该课完整章节直达链接。`,
+                env
+              );
+              return corsJson({ ok: true });
+            }
+            const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+            const shimSecret = env.AFK_SHIM_SECRET;
+            if (!shimUrl || !shimSecret) {
+              await sendTelegramReply(
+                `📖 已同步快照中未找到匹配「${kw}」的在读课程（可发送 \`/progress\` 查看全部课程）。`,
+                env
+              );
+              return corsJson({ ok: true });
+            }
+            // 快照未命中且配置了本机 Shim 时，自动透传至本机按关键词实时扫描
+          } else {
+            const lines = tracked.slice(0, 12).map((c, idx) => {
+              const unfinish = Number(c.totalUnfinishedPoints) || 0;
+              const badge = unfinish > 0 ? `⚠️ 待完成 ${unfinish} 个任务点` : '✅ 全部完成';
+              const pendingTitles = Array.isArray(c.pendingChapterTitles) ? c.pendingChapterTitles.filter(Boolean) : [];
+              const pendingPreview =
+                unfinish > 0 && pendingTitles.length > 0
+                  ? ` [待刷: ${pendingTitles.slice(0, 2).join('、')}${pendingTitles.length > 2 ? ' 等' : ''}]`
+                  : '';
+              return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}${pendingPreview}`;
+            });
+            await sendTelegramReply(
+              `📖 课程章节任务点进度（发送 \`/progress <课程名>\` 查看单课详情与直达链接，或发 \`/progress!\` 触发本机重扫）：\n${lines.join('\n')}`,
+              env
+            );
+            return corsJson({ ok: true });
+          }
         }
         const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
         const shimSecret = env.AFK_SHIM_SECRET;
@@ -1008,7 +1061,7 @@ async function handleEdgeFetch(
 
         const courses = await getCourses(session);
         await saveEnrolledCourses(env, courses);
-        return corsJson({ courses, count: courses.length, time: nowUtc8() });
+        return corsJson({ success: true, courses, count: courses.length, time: nowUtc8() });
       }
 
       // 查询或批量上报在读课程章节任务点进度快照
@@ -1022,6 +1075,14 @@ async function handleEdgeFetch(
         const items = Array.isArray(body) ? body : Array.isArray(body.items) ? body.items : [];
         const updated = await saveCourseChapterProgressItems(env, items);
         return corsJson({ ok: true, updated, time: nowUtc8() });
+      }
+
+      // 手动触发本机 Shim 实时扫描各课程章节任务点进度并同步回 Edge 看板
+      if (url.pathname === '/api/courses/progress/refresh' && (request.method === 'POST' || request.method === 'GET')) {
+        const body: any = request.method === 'POST' ? await request.json().catch(() => ({})) : {};
+        const force = body.force !== false && url.searchParams.get('force') !== '0';
+        const res = await dispatchCourseProgressScanToShim(env, force);
+        return corsJson({ ...res, time: nowUtc8() }, res.ok ? 200 : res.statusCode || 400);
       }
 
       // 手动刷新通知箱消息
@@ -1099,10 +1160,11 @@ async function handleEdgeFetch(
           const resultSummary = t.resultSummary || null;
 
           const allowReopen = t.reopened === true ? 1 : 0;
-          const prevRow = await env.DB.prepare('SELECT payload_json FROM pending_tasks WHERE task_id = ?')
+          const prevRow = await env.DB.prepare('SELECT status, payload_json FROM pending_tasks WHERE task_id = ?')
             .bind(tid)
-            .first<{ payload_json?: string }>()
+            .first<{ status?: string; payload_json?: string }>()
             .catch(() => null);
+          const statusChanged = prevRow?.status !== nextStatus;
           const mergedPayloadJson = mergeSyncedTaskPayload(prevRow?.payload_json, t);
           await env.DB.prepare(
             `INSERT INTO pending_tasks 
@@ -1144,16 +1206,21 @@ async function handleEdgeFetch(
               .run()
               .catch(() => {});
 
-            await logExecution(
-              env,
-              nextStatus,
-              t.platform || 'chaoxing',
-              `作业《${t.courseName || ''} - ${t.title || ''}》已${nextStatus === 'draft_saved' ? '暂存草稿 (pyFlag=1)' : '正式提交'}`,
-              { taskId: tid, rawId, resultSummary }
-            ).catch(() => {});
+            if (statusChanged) {
+              await logExecution(
+                env,
+                nextStatus,
+                t.platform || 'chaoxing',
+                `作业《${t.courseName || ''} - ${t.title || ''}》已${nextStatus === 'draft_saved' ? '暂存草稿 (pyFlag=1)' : '正式提交'}`,
+                { taskId: tid, rawId, resultSummary }
+              ).catch(() => {});
+            }
           }
 
-          if (env.SOLVER_AGENT && (['draft_saved', 'submitted', 'failed'].includes(nextStatus) || t.reopened === true)) {
+          if (
+            env.SOLVER_AGENT &&
+            ((statusChanged && ['draft_saved', 'submitted', 'failed'].includes(nextStatus)) || t.reopened === true)
+          ) {
             try {
               const solverStub = env.SOLVER_AGENT.get(env.SOLVER_AGENT.idFromName('default'));
               await (solverStub as any).syncExternalTaskStatus(tid, nextStatus, resultSummary || undefined);
@@ -1717,5 +1784,56 @@ async function dispatchDiscussionProcessingToShim(
     };
   } catch (err: any) {
     return { dispatched: false, reason: err?.message || 'shim network error' };
+  }
+}
+
+async function dispatchCourseProgressScanToShim(
+  env: ExtendedNotifyEnv,
+  force = true
+): Promise<{ ok: boolean; dispatched: boolean; msg: string; reason: string; statusCode?: number }> {
+  const shimUrl = env.AFK_SHIM_URL || env.SHIM_URL;
+  const shimSecret = env.AFK_SHIM_SECRET;
+  const shimToken = env.AFK_SHIM_TOKEN || env.SHIM_TOKEN;
+  if (!shimUrl) {
+    const reason = '未配置 AFK_SHIM_URL / SHIM_URL';
+    return { ok: false, dispatched: false, msg: reason, reason, statusCode: 400 };
+  }
+
+  try {
+    const endpoint = new URL('/agent-chat', shimUrl.replace(/\/+$/, '') + '/');
+    const body = JSON.stringify({ text: force ? '/progress!' : '/progress' });
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (shimSecret) {
+      const sigHeaders = await signRequest({
+        secret: shimSecret,
+        method: 'POST',
+        pathWithQuery: endpoint.pathname + endpoint.search,
+        body,
+      });
+      Object.assign(headers, sigHeaders);
+    } else if (shimToken) {
+      headers['Authorization'] = `Bearer ${shimToken}`;
+    }
+
+    const res = await fetch(endpoint.toString(), {
+      method: 'POST',
+      headers,
+      body,
+    });
+    const data: any = await res.json().catch(() => ({}));
+    const accepted = res.ok && data?.accepted !== false;
+    const msg =
+      (typeof data?.immediateReply === 'string' && data.immediateReply.trim()) ||
+      (accepted ? '已触发本机章节任务点进度扫描' : `HTTP ${res.status}`);
+    return {
+      ok: accepted,
+      dispatched: accepted,
+      msg,
+      reason: msg,
+      statusCode: accepted ? 200 : res.ok ? 409 : 502,
+    };
+  } catch (err: any) {
+    const reason = err?.message || 'shim network error';
+    return { ok: false, dispatched: false, msg: reason, reason, statusCode: 502 };
   }
 }

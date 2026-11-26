@@ -106,6 +106,8 @@ export interface SignState {
   lastCourseSyncMs?: number;
   lastScanErrorLoggedMs?: number;
   blockedCooldownUntilMs?: number;
+  blockedStreak?: number;
+  lastBlockedRecoveredNotifiedMs?: number;
   homeworkCursor?: number;
   nextMobileCheckAtMs?: number;
   seenClassActivityIds?: string[];
@@ -250,6 +252,8 @@ export async function runChaoxingInspectionCycle(
   let rateLimitBackoffLevel = prevState.rateLimitBackoffLevel ?? (rateLimitUntilMs > 0 ? 1 : 0);
   const lastNightMobileCheckMs = prevState.lastNightMobileCheckMs || 0;
   let blockedCooldownUntilMs = prevState.blockedCooldownUntilMs || 0;
+  let blockedStreak = prevState.blockedStreak || 0;
+  let lastBlockedRecoveredNotifiedMs = prevState.lastBlockedRecoveredNotifiedMs || 0;
   let homeworkCursor = prevState.homeworkCursor || 0;
   let nextMobileCheckAtMs = prevState.nextMobileCheckAtMs || 0;
   const rand = options.randomFn ?? Math.random;
@@ -344,7 +348,10 @@ export async function runChaoxingInspectionCycle(
         if (scanRes.blocked && !scanRes.rateLimited) {
           scanBlocked = true;
           blockedCooldownActive = true;
-          blockedCooldownUntilMs = nowMs + 15 * 60 * 1000;
+          blockedStreak = blockedStreak + 1;
+          const blockedMinutes =
+            blockedStreak <= 1 ? 15 : blockedStreak === 2 ? 60 : blockedStreak === 3 ? 120 : 240;
+          blockedCooldownUntilMs = nowMs + blockedMinutes * 60 * 1000;
           roundRobinCursor = (idx + 1) % targetCourses.length;
           break;
         }
@@ -485,20 +492,25 @@ export async function runChaoxingInspectionCycle(
     if (isBlockedProbe && !hitRateLimit && !scanBlocked && !scanException) {
       blockedCooldownUntilMs = 0;
       blockedCooldownActive = false;
+      blockedStreak = 0;
       await logExecution(
         env,
         'sign_listener_recovered',
         'chaoxing',
         `学习通签到监听已恢复正常 (${targetCourses[startIdx]?.courseName || 'Canary'})`
       );
-      await sendNotification(
-        '学习通签到监听已恢复 ✅',
-        `边缘探测已恢复正常，将继续自动轮转扫描课程签到活动。\n时间：${nowUtc8()}`,
-        env
-      );
-    } else if (!hitRateLimit && !scanBlocked && !scanException && blockedCooldownUntilMs > 0) {
+      if (!lastBlockedRecoveredNotifiedMs || nowMs - lastBlockedRecoveredNotifiedMs >= 6 * 60 * 60 * 1000) {
+        lastBlockedRecoveredNotifiedMs = nowMs;
+        await sendNotification(
+          '学习通签到监听已恢复 ✅',
+          `边缘探测已恢复正常，将继续自动轮转扫描课程签到活动。\n时间：${nowUtc8()}`,
+          env
+        );
+      }
+    } else if (!hitRateLimit && !scanBlocked && !scanException && (blockedCooldownUntilMs > 0 || blockedStreak > 0)) {
       blockedCooldownUntilMs = 0;
       blockedCooldownActive = false;
+      blockedStreak = 0;
     }
 
     if (!hitRateLimit && !scanBlocked && targetCourses.length > 0) {
@@ -711,6 +723,8 @@ export async function runChaoxingInspectionCycle(
       lastCourseSyncMs,
       lastScanErrorLoggedMs,
       blockedCooldownUntilMs,
+      blockedStreak,
+      lastBlockedRecoveredNotifiedMs,
       nextMobileCheckAtMs,
     });
   }

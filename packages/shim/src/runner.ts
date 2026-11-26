@@ -510,6 +510,7 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
             pendingChapters: prog.pendingChapters,
             totalUnfinishedPoints: prog.totalUnfinishedPoints,
             completionRate: prog.completionRate,
+            pendingChapterTitles: prog.pendingChapterTitles,
           },
         ]).catch(() => false);
         if (prog.pendingChapters > 0) {
@@ -559,12 +560,31 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
     { platform: 'chaoxing', materialsDir }
   );
 
-  const validAnswerCount = detail.questions.filter((q) => !isPoisonedOrRefusalAnswer(solveRes.answers[q.id] || '')).length;
-  if (validAnswerCount === 0) {
-    throw new Error('题目信息不足或依赖外部附件内容，模型无法生成有效答案，已拒绝写入无效草稿');
+  const validAnswers: Record<string, string> = {};
+  const blockedDetails: string[] = [];
+  for (const q of detail.questions) {
+    const ans = solveRes.answers[q.id] || '';
+    if (!isPoisonedOrRefusalAnswer(ans)) {
+      validAnswers[q.id] = ans;
+    } else {
+      const reasonMatch = q.title.match(/附件不可读:\s*([^|\])]+)/);
+      blockedDetails.push(reasonMatch ? reasonMatch[1].trim() : `第 ${q.id} 题缺少有效正文或附件内容`);
+    }
   }
 
-  const saveRes = await submitHomework(found, solveRes.answers, detail.formParams, cookies, true, detail.formAction);
+  const validAnswerCount = Object.keys(validAnswers).length;
+  if (validAnswerCount === 0) {
+    const reasonNote = blockedDetails.length > 0 ? `（${Array.from(new Set(blockedDetails)).slice(0, 2).join('；')}）` : '';
+    job.phase = 'awaiting_approval';
+    job.qa = undefined;
+    job.summary = `⚠️ 作业《${found.title}》缺少可解析的正文或附件内容${reasonNote}，已拦截无效草稿暂存与循环重试，请打开学习通查看原题确认`.slice(0, 2000);
+    job.updatedAt = formatUtc8Now();
+    console.warn(`[Shim Runner] 作业 [${job.jobId}] 信息缺失/附件不可读，已转为 awaiting_approval 并拦截无效草稿`);
+    await notifyEdgeCallback(job);
+    return;
+  }
+
+  const saveRes = await submitHomework(found, validAnswers, detail.formParams, cookies, true, detail.formAction);
   if (!saveRes.success) {
     throw new Error(`学习通草稿暂存失败: ${saveRes.msg}`);
   }
@@ -573,14 +593,18 @@ async function processChaoxingTask(job: TaskJob, mode: 'draft' | 'submit'): Prom
     id: String(q.id).slice(0, 128),
     type: String(q.type || 'single').slice(0, 32),
     title: String(q.title || '').slice(0, 4000),
-    answer: String(solveRes.answers[q.id] || '').slice(0, 20000),
-    solvedBy: 'agy',
+    answer: validAnswers[q.id] ? String(validAnswers[q.id]).slice(0, 20000) : '⚠️ 缺少原题正文/附件内容，已跳过暂存',
+    solvedBy: validAnswers[q.id] ? 'agy' : 'skipped',
   }));
+  const skippedCount = detail.questions.length - validAnswerCount;
   job.qa = qaList;
   job.phase = 'draft_saved';
-  job.summary = `已通过超星原生协议暂存 ${qaList.length} 道题草稿（${saveRes.msg}）`.slice(0, 2000);
+  job.summary =
+    skippedCount > 0
+      ? `⚠️ 已暂存 ${validAnswerCount}/${qaList.length} 道有效题草稿，另有 ${skippedCount} 题因缺少正文/附件未覆盖（${saveRes.msg}）`.slice(0, 2000)
+      : `已通过超星原生协议暂存 ${qaList.length} 道题草稿（${saveRes.msg}）`.slice(0, 2000);
   job.updatedAt = formatUtc8Now();
-  console.log(`[Shim Runner] 超星作业 ${job.jobId} 已安全完成草稿暂存，包含 ${qaList.length} 道题`);
+  console.log(`[Shim Runner] 超星作业 ${job.jobId} 已安全完成草稿暂存，有效题数 ${validAnswerCount}/${qaList.length}`);
   await notifyEdgeCallback(job);
 }
 

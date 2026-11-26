@@ -464,6 +464,14 @@ async function runTests() {
               platform: 'chaoxing',
               status: 'failed',
               resultSummary: 'Error: --json-schema'
+            },
+            {
+              taskId: 'chaoxing-notice-work-402-154101446',
+              title: '实验四人工确认',
+              courseName: '数据结构',
+              platform: 'chaoxing',
+              status: 'awaiting_approval',
+              resultSummary: '⚠️ 缺少有效附件正文，请在学习通确认'
             }
           ],
           discussions: [],
@@ -478,6 +486,8 @@ async function runTests() {
 
       const retryBtn = win.document.getElementById('retryFailedBtn') as HTMLButtonElement;
       assert.ok(retryBtn && !retryBtn.classList.contains('hidden'), '有失败任务时必须显示一键重试按钮');
+      const hwListHtml = win.document.getElementById('homeworkList')?.innerHTML || '';
+      assert.ok(hwListHtml.includes('⚠️ 需人工处理'), 'awaiting_approval 人工提示卡片不得触发 TDZ 并应正确渲染');
       const cntFailedEl = win.document.getElementById('cnt-failed') as any;
       assert.strictEqual(String(cntFailedEl?.innerText ?? cntFailedEl?.textContent), '1');
 

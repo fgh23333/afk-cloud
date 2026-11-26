@@ -23,6 +23,20 @@ async function runTests() {
     isPoisonedOrRefusalAnswer('根据本门课程参考资料要点综合阐述：遵循实验设计规范，结合课堂教学重点完成相应分析'),
     true
   );
+  assert.strictEqual(
+    isPoisonedOrRefusalAnswer(
+      '无法直接完成作答：当前任务缺少 `实验4-二叉树.doc` 的实际正文内容，属于附件缓存缺失造成的阻塞，不能在不了解原题内容的情况下猜测作答。'
+    ),
+    true,
+    '必须拦截带具体附件缺失描述的“无法直接完成作答”文本'
+  );
+  assert.strictEqual(
+    isPoisonedOrRefusalAnswer(
+      '当前**无法直接完成该题作答**，原因如下：1. 本地缓存文件不是文档正文或图片（并非 `.doc` 原文件）'
+    ),
+    true,
+    '必须拦截外壳文档拒答提示'
+  );
   assert.strictEqual(isPoisonedOrRefusalAnswer('A'), false);
   assert.strictEqual(
     isPoisonedOrRefusalAnswer('顺序表采用连续内存存储，支持 O(1) 随机访问，而链表通过指针串联节点。'),
@@ -107,7 +121,12 @@ async function runTests() {
       !isPoisonedOrRefusalAnswer(res.answers['q1']) || res.stats.proSolved > 0,
       '跳过毒化缓存后应重新进入 Pro 深度推理轨道'
     );
-    console.log(' ✅ [Test 2/3 PASS] 毒化缓存自动跳过且短题干哈希跨课程隔离通过');
+    const cleanedCache = JSON.parse(fs.readFileSync(path.join(cacheDir, 'question_bank.json'), 'utf8'));
+    assert.ok(
+      !isPoisonedOrRefusalAnswer(cleanedCache[hashA]?.answer || ''),
+      '检测到命中毒化缓存时不得保留旧毒化答案（应清理并由新有效答案替换）'
+    );
+    console.log(' ✅ [Test 2/3 PASS] 毒化缓存自动跳过、清洗及短题干哈希跨课程隔离通过');
   } finally {
     process.chdir(origCwd);
     if (origMode === undefined) delete process.env.NODE_ENV;

@@ -69,8 +69,14 @@ function saveState(state: PtaMonitorState): void {
   }
 }
 
-async function fetchExistingEdgePtaTaskIds(): Promise<Set<string>> {
-  const existing = new Set<string>();
+interface EdgeExistingTaskInfo {
+  status?: string;
+  deadline?: string;
+  resultSummary?: string;
+}
+
+async function fetchExistingEdgePtaTasks(): Promise<Map<string, EdgeExistingTaskInfo>> {
+  const existing = new Map<string, EdgeExistingTaskInfo>();
   const edgeUrl = (process.env.AFK_EDGE_WORKER_URL || '').replace(/\/+$/, '');
   const bearer = process.env.AFK_EDGE_BEARER_TOKEN || '';
   if (!edgeUrl) return existing;
@@ -82,7 +88,11 @@ async function fetchExistingEdgePtaTaskIds(): Promise<Set<string>> {
     const data: any = await res.json();
     for (const t of data?.tasks || []) {
       if (t?.task_id && String(t.platform || '') === 'pta') {
-        existing.add(String(t.task_id));
+        existing.set(String(t.task_id), {
+          status: t.status ? String(t.status) : undefined,
+          deadline: t.deadline ? String(t.deadline) : '',
+          resultSummary: t.result_summary ? String(t.result_summary) : '',
+        });
       }
     }
   } catch {
@@ -146,14 +156,24 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
       };
     }
 
-    const edgeExistingIds = await fetchExistingEdgePtaTaskIds();
+    const edgeExistingTasks = await fetchExistingEdgePtaTasks();
     const pta = new PtaAdapter(cookie);
     const { totalSets, activeSets } = await pta.scanOverviews();
 
     const syncPayloads = activeSets.map((ov) => buildPtaTaskSummaryPayload(ov));
-    if (syncPayloads.length > 0) {
+    const payloadsToSync = syncPayloads.filter((it) => {
+      if (options.force) return true;
+      const prev = edgeExistingTasks.get(it.taskId);
+      if (!prev) return true;
+      return (
+        prev.status !== it.status ||
+        (prev.deadline || '') !== (it.deadline || '') ||
+        (prev.resultSummary || '') !== (it.resultSummary || '')
+      );
+    });
+    if (payloadsToSync.length > 0) {
       await syncTasksToEdgeDashboard(
-        syncPayloads.map((it) => ({
+        payloadsToSync.map((it) => ({
           taskId: it.taskId,
           platform: it.platform,
           courseId: it.courseId,
@@ -179,7 +199,7 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
       if (item.isPending) {
         pendingCount++;
         const alreadyKnownLocally = knownSet.has(item.taskId);
-        const alreadyKnownEdge = edgeExistingIds.has(item.taskId);
+        const alreadyKnownEdge = edgeExistingTasks.has(item.taskId);
         if (!alreadyKnownLocally && !alreadyKnownEdge) {
           const ok = await notifyEdge(
             '发现新的 PTA 题目集 💻',

@@ -414,12 +414,20 @@ export async function scanCourseHomeworksWeb(
     const stuUrl = `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${encodeURIComponent(
       course.courseId
     )}&clazzid=${encodeURIComponent(course.classId)}&cpi=${encodeURIComponent(course.cpi || '')}&vc=1`;
-    const res = await fetch(stuUrl, {
-      headers: {
-        Cookie: cookieStr,
-        'User-Agent': CHAOXING_WEB_UA,
-      },
-    });
+    const stuCtrl = new AbortController();
+    const stuTimer = setTimeout(() => stuCtrl.abort(), 10_000);
+    let res: Response;
+    try {
+      res = await fetch(stuUrl, {
+        headers: {
+          Cookie: cookieStr,
+          'User-Agent': CHAOXING_WEB_UA,
+        },
+        signal: stuCtrl.signal,
+      });
+    } finally {
+      clearTimeout(stuTimer);
+    }
     if (!res.ok) return [];
 
     const setCookies: string[] = (res.headers as any).getSetCookie
@@ -459,12 +467,20 @@ export async function scanCourseHomeworksWeb(
 
     if (!workUrl) return [];
 
-    const workRes = await fetch(workUrl, {
-      headers: {
-        Cookie: cookieStr,
-        'User-Agent': CHAOXING_WEB_UA,
-      },
-    });
+    const workCtrl = new AbortController();
+    const workTimer = setTimeout(() => workCtrl.abort(), 10_000);
+    let workRes: Response;
+    try {
+      workRes = await fetch(workUrl, {
+        headers: {
+          Cookie: cookieStr,
+          'User-Agent': CHAOXING_WEB_UA,
+        },
+        signal: workCtrl.signal,
+      });
+    } finally {
+      clearTimeout(workTimer);
+    }
     if (!workRes.ok) return [];
     const workHtml = await workRes.text();
     return parseCourseWorkListHtml(workHtml, course, nowMs);

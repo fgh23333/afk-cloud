@@ -135,6 +135,7 @@ export interface ChapterProgressBriefCourse {
   totalUnfinishedPoints?: number;
   completionRate?: number;
   pendingChapters?: number;
+  pendingChapterTitles?: string[];
 }
 
 /**
@@ -156,13 +157,18 @@ export function formatChapterProgressSummary(
   const pendingCourses = (courses || []).filter((c) => (Number(c.totalUnfinishedPoints) || 0) > 0);
   if (unfinishedTotal > 0) {
     const topDetail = pendingCourses
-      .slice(0, 3)
+      .slice(0, 6)
       .map((c) => {
         const rate = typeof c.completionRate === 'number' ? ` · ${c.completionRate}%` : '';
-        return `《${c.courseName}》待完成 ${c.totalUnfinishedPoints} 个${rate}`;
+        const pendingTitles = Array.isArray(c.pendingChapterTitles) ? c.pendingChapterTitles.filter(Boolean) : [];
+        const titleHint =
+          pendingTitles.length > 0
+            ? ` [${pendingTitles.slice(0, 3).join('、')}${pendingTitles.length > 3 ? ' 等' : ''}]`
+            : '';
+        return `《${c.courseName}》待完成 ${c.totalUnfinishedPoints} 个${rate}${titleHint}`;
       })
       .join('；');
-    const detailSuffix = topDetail ? `：${topDetail}${pendingCourses.length > 3 ? ' 等' : ''}` : '';
+    const detailSuffix = topDetail ? `：${topDetail}${pendingCourses.length > 6 ? ' 等' : ''}` : '';
     return `⚠️ 待完成任务点 ${unfinishedTotal} 个（已跟踪 ${trackedCourses || pendingCourses.length} 门课）${detailSuffix}`;
   }
 
@@ -196,7 +202,7 @@ export async function sendDigestNotification(
   const taskLines =
     stats.recentTasks.length > 0
       ? stats.recentTasks
-          .slice(0, 8)
+          .slice(0, 15)
           .map((t, i) => {
             const badge =
               t.status === 'submitted'

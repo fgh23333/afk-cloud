@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict';
-import { requiresManualAttachmentUpload } from '../packages/adapters/chaoxing/homework';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import {
+  downloadChaoxingQuestionAttachment,
+  extractClDiskDownloadUrlFromHtml,
+  extractReadableAttachmentText,
+  requiresManualAttachmentUpload,
+} from '../packages/adapters/chaoxing/homework';
+import { extractReadableTextFromBuffer } from '../packages/core/file-extract';
 import { isEmptyShellSubjectiveQuestion } from '../packages/core/solver';
 import { parseChaoxingTaskIdentifiers } from '../packages/shim/src/runner';
 import { fetchNoticeList, parseCourseWorkListHtml } from '../edge/src/chaoxing';
@@ -235,7 +246,33 @@ async function runTests() {
     false,
     '已预下载缓存附件摘要的题目必须放行进入 Pro 求解'
   );
-  console.log(' ✅ [Test 6/7 PASS] 空壳主观题前置守卫与附件摘要放行测试通过');
+  assert.strictEqual(
+    isEmptyShellSubjectiveQuestion(
+      {
+        id: '1',
+        type: 'essay',
+        typeName: '简答题',
+        title: '1 实验4-二叉树.doc\n[附件: 实验4-二叉树.doc (/ueditorupload/read?objectId=123 | 本地已缓存: /tmp/att_dead.bin)]',
+      },
+      ''
+    ),
+    true,
+    '无附件摘要/截图且仅缓存了不可读 .bin 的空壳主观题必须被前置拦截'
+  );
+  assert.strictEqual(
+    isEmptyShellSubjectiveQuestion(
+      {
+        id: '1',
+        type: 'essay',
+        typeName: '简答题',
+        title: '1 实验4-二叉树.doc\n[附件: 实验4-二叉树.doc (/ueditorupload/read?objectId=123 | 本地已缓存: /tmp/att_1_p1.png | 附件页面截图(可用read_file查看): /tmp/att_1_p1.png)]',
+      },
+      ''
+    ),
+    false,
+    '携带本地分页截图 PNG 的附件题应放行由多模态识图作答'
+  );
+  console.log(' ✅ [Test 6/7 PASS] 空壳主观题前置守卫与附件摘要/截图放行测试通过');
 
   // Test 7: shim /api/tasks/sync 覆盖 payload 时必须保留打回通知去重清单，防止同一旧打回通知被反复重新激活并重复推送
   const merged = JSON.parse(
@@ -490,10 +527,185 @@ async function runTests() {
     assert.strictEqual(outcome10.newNotices.length, 1, '应推送教室上课通知并跳过已由网页端建档的重复作业通知');
     assert.strictEqual(outcome10.newNotices[0].idCode, 'CLS_NOTICE_1');
     assert.strictEqual(outcome10.newNotices[0].kind, 'important');
-    console.log(' ✅ [Test 10/10 PASS] Telegram 400 降级重发、教室通知防漏推与同 workId 去重验证通过');
+    console.log(' ✅ [Test 10/11 PASS] Telegram 400 降级重发、教室通知防漏推与同 workId 去重验证通过');
   }
 
-  console.log('\n🎉 全部 10 项打回重做、网页作业扫描与新通知守卫测试 100% 通过！\n');
+  // Test 11: 超星 /ueditorupload/read HTML 浏览壳直链提取 (d0.cldisk.com) 与 .doc UTF-16LE 文本提取
+  {
+    const previewShellHtml = `<!DOCTYPE html><html><head><title>浏览</title></head><body>
+      <div class="header">实验5-哈夫曼树.doc
+        <p class="hea_rig"><a class="btnDown" href="https://d0.cldisk.com/download/3539d2240965c30285ebcebf55aeec48?at_=1795&amp;ak_=39fc&amp;fn=%E5%AE%9E%E9%AA%8C5.doc"><span>下载</span></a></p>
+      </div></body></html>`;
+    const dlUrl = extractClDiskDownloadUrlFromHtml(previewShellHtml);
+    assert.strictEqual(
+      dlUrl,
+      'https://d0.cldisk.com/download/3539d2240965c30285ebcebf55aeec48?at_=1795&ak_=39fc&fn=%E5%AE%9E%E9%AA%8C5.doc',
+      '应从 /ueditorupload/read 预览页准确提取 btnDown 下载直链并反转义 &amp;'
+    );
+    assert.strictEqual(
+      extractReadableAttachmentText(Buffer.from(previewShellHtml, 'utf8'), '.doc'),
+      '',
+      '未解包的 HTML 浏览壳不得被误提取为附件正文'
+    );
+    const utf16DocBuf = Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x00]),
+      Buffer.from('实验四 二叉树的基本操作与遍历算法实现要求', 'utf16le'),
+      Buffer.from([0x00, 0x00]),
+    ]);
+    const extractedUtf16 = extractReadableAttachmentText(utf16DocBuf, '.doc');
+    assert.ok(
+      extractedUtf16.includes('实验四 二叉树的基本操作与遍历算法实现要求'),
+      '应支持从 OLE2 .doc UTF-16LE 二进制流中提取中文实验要求'
+    );
+    console.log(' ✅ [Test 11/12 PASS] 超星附件浏览壳 cldisk 直链提取与 .doc UTF-16LE 文本提取验证通过');
+  }
+
+  // Test 12: downloadChaoxingQuestionAttachment 端到端解包 + /ananas/status 页截图抓取 + DOCX/PDF 解析 + 不可读外壳失败降级
+  {
+    const tmpWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-hw-asset-test-'));
+    const origWorkdir = process.env.AFK_AGY_WORKDIR;
+    process.env.AFK_AGY_WORKDIR = tmpWorkdir;
+
+    const fakePng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+    const oid = '26f2363d9fee18336260bd80e58e8f93';
+    // 构造含正确 UTF-16LE 正文与奇数字节错位 UTF-16LE 元数据噪声（如 'Unknown' -> 唀渀欀渀漀眀渀）的 OLE2 .doc
+    const oleDocBuf = Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+      Buffer.from('学会建立一棵特定二叉树的方法，完成先序与中序遍历实验。\n', 'utf16le'),
+      Buffer.from([0x00]), // 故意造成奇数字节错位产生 唀渀欀渀漀眀渀
+      Buffer.from('UnknownFontsHeader', 'utf16le'),
+      Buffer.from([0x00, 0x00]),
+    ]);
+
+    let serverPort = 0;
+    const server = http.createServer((req, res) => {
+      const reqUrl = String(req.url || '/');
+      if (reqUrl.startsWith('/ueditorupload/read')) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html><head><title>浏览</title></head><body>
+          <div class="header">实验4-二叉树.doc
+            <p class="hea_rig"><a class="btnDown" href="http://127.0.0.1:${serverPort}/cldisk/download/${oid}?fn=%E5%AE%9E%E9%AA%8C4-%E4%BA%8C%E5%8F%89%E6%A0%91.doc">下载</a></p>
+          </div>
+          <iframe objectid="${oid}" data="{'objectid':'${oid}','pagenum':'2'}"></iframe>
+        </body></html>`);
+        return;
+      }
+      if (reqUrl === `/ananas/status/${oid}`) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            download: `http://127.0.0.1:${serverPort}/cldisk/download/${oid}?fn=exp4.doc`,
+            filename: '实验4-二叉树.doc',
+            thumb: `http://127.0.0.1:${serverPort}/thumb/${oid}/`,
+            pagenum: 2,
+            status: 'success',
+          })
+        );
+        return;
+      }
+      if (reqUrl.startsWith(`/cldisk/download/${oid}`)) {
+        res.writeHead(200, { 'Content-Type': 'application/msword' });
+        res.end(oleDocBuf);
+        return;
+      }
+      if (reqUrl === `/thumb/${oid}/1.png` || reqUrl === `/thumb/${oid}/2.png`) {
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        res.end(fakePng);
+        return;
+      }
+      if (reqUrl.startsWith('/broken-shell')) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<!DOCTYPE html><html><head><title>用户登录</title></head><body><form action="https://passport2.chaoxing.com/login"><input name="uname"/></form></body></html>');
+        return;
+      }
+      res.writeHead(404);
+      res.end('Not found');
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    serverPort = (server.address() as any).port;
+
+    try {
+      const origin = `http://127.0.0.1:${serverPort}`;
+      const attUrl = `${origin}/ueditorupload/read?objectId=${oid}&fileOriName=实验4-二叉树.doc`;
+      const cryptoMod = await import('node:crypto');
+      const attHash = cryptoMod.createHash('sha1').update(attUrl).digest('hex').slice(0, 12);
+      const staleDir = path.join(tmpWorkdir, 'homework_assets', '58883594');
+      fs.mkdirSync(staleDir, { recursive: true });
+      const staleBin = path.join(staleDir, `att_${attHash}.bin`);
+      fs.writeFileSync(staleBin, '<!DOCTYPE html><html><title>浏览</title></html>', 'utf8');
+
+      const okRes = await downloadChaoxingQuestionAttachment(attUrl, '实验4-二叉树.doc', 'cookie=1', '58883594', {
+        allowInTest: true,
+        chaoxingOrigin: origin,
+      });
+      assert.ok(okRes && okRes.localPath, '必须成功下载并解包出真实文档');
+      assert.ok(okRes!.localPath!.endsWith('.doc'), `扩展名必须修正为 .doc，实际为: ${okRes!.localPath}`);
+      assert.strictEqual(fs.existsSync(staleBin), false, '旧缓存中的 HTML 外壳 .bin 文件必须被自动清理');
+      assert.ok(okRes!.extractedText?.includes('学会建立一棵特定二叉树的方法'), '必须完整保留 U+4E00（一）并提取正文');
+      assert.ok(!okRes!.extractedText?.includes('唀'), '奇数字节错位伪汉字 NOISE 必须被剔除');
+      assert.strictEqual(okRes!.pageImages?.length, 2, '应自动抓取并缓存前 2 页高分 PNG 截图');
+
+      // 登录重定向外壳必须失败拦截，不得误存可用路径
+      const failRes = await downloadChaoxingQuestionAttachment(`${origin}/broken-shell`, '缺失文档.doc', 'cookie=1', '58883594', {
+        allowInTest: true,
+        chaoxingOrigin: origin,
+      });
+      assert.strictEqual(failRes?.localPath, undefined, '登录页外壳绝不可返回可用 localPath');
+      assert.ok(failRes?.failedReason?.includes('登录页'), '必须返回可读失败原因');
+
+      // 校验纯 Node OpenXML (.docx) 与 FlateDecode PDF 提取
+      const xmlBytes = Buffer.from(
+        '<?xml version="1.0"?><w:document><w:body><w:p><w:r><w:t>实验五 哈夫曼编码构造与译码实现</w:t></w:r></w:p></w:body></w:document>',
+        'utf8'
+      );
+      const compressedXml = zlib.deflateRawSync(xmlBytes);
+      const nameBytes = Buffer.from('word/document.xml', 'utf8');
+      const localHdr = Buffer.alloc(30 + nameBytes.length);
+      localHdr.writeUInt32LE(0x04034b50, 0);
+      localHdr.writeUInt16LE(8, 8);
+      localHdr.writeUInt32LE(compressedXml.length, 18);
+      localHdr.writeUInt32LE(xmlBytes.length, 22);
+      localHdr.writeUInt16LE(nameBytes.length, 26);
+      nameBytes.copy(localHdr, 30);
+      const cdOffset = localHdr.length + compressedXml.length;
+      const cdHdr = Buffer.alloc(46 + nameBytes.length);
+      cdHdr.writeUInt32LE(0x02014b50, 0);
+      cdHdr.writeUInt16LE(8, 10);
+      cdHdr.writeUInt32LE(compressedXml.length, 20);
+      cdHdr.writeUInt32LE(xmlBytes.length, 24);
+      cdHdr.writeUInt16LE(nameBytes.length, 28);
+      cdHdr.writeUInt32LE(0, 42);
+      nameBytes.copy(cdHdr, 46);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(1, 8);
+      eocd.writeUInt16LE(1, 10);
+      eocd.writeUInt32LE(cdHdr.length, 12);
+      eocd.writeUInt32LE(cdOffset, 16);
+      const docxBuf = Buffer.concat([localHdr, compressedXml, cdHdr, eocd]);
+      const docxOut = extractReadableTextFromBuffer(docxBuf, '.docx');
+      assert.ok(docxOut.text.includes('实验五 哈夫曼编码构造与译码实现'), '纯 Node ZIP 解压应完整提取 DOCX 正文');
+
+      const pdfStreamData = zlib.deflateSync(Buffer.from('BT (Binary Tree Traversal Experiment) Tj ET', 'latin1'));
+      const fakePdf = Buffer.concat([
+        Buffer.from('%PDF-1.4\n1 0 obj << /Filter /FlateDecode >> stream\n', 'latin1'),
+        pdfStreamData,
+        Buffer.from('\nendstream endobj\n%%EOF', 'latin1'),
+      ]);
+      const pdfOut = extractReadableTextFromBuffer(fakePdf, '.pdf');
+      assert.ok(pdfOut.text.includes('Binary Tree Traversal Experiment'), '应支持纯 Node FlateDecode PDF 文本流解析');
+
+      console.log(' ✅ [Test 12/12 PASS] 超星附件外壳解包、页截图缓存、DOCX/PDF 解析及失败隔离验证通过');
+    } finally {
+      server.close();
+      if (origWorkdir === undefined) delete process.env.AFK_AGY_WORKDIR;
+      else process.env.AFK_AGY_WORKDIR = origWorkdir;
+      fs.rmSync(tmpWorkdir, { recursive: true, force: true });
+    }
+  }
+
+  console.log('\n🎉 全部 12 项打回重做、网页作业扫描、附件解包提取与新通知守卫测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

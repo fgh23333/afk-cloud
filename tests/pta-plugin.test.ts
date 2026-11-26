@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import Module from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -11,6 +12,7 @@ import {
   parsePtaTaskIdentifiers,
   PtaAdapter,
   savePtaProblemDrafts,
+  scanPtaOverviews,
   stripMarkdownCodeFence,
   submitPtaProblemAnswers,
 } from '../packages/adapters/pta';
@@ -334,7 +336,7 @@ public class Main {
         sampleInput: '19 23\n',
         expectedOutput: '42',
       });
-      assert.strictEqual(okRes.passed, true, 'Java 沙箱应正确编译运行并匹配 42');
+      assert.strictEqual(okRes.passed, true, `Java 沙箱应正确编译运行并匹配 42 (${okRes.stage}: ${okRes.stderr})`);
 
       const badRes = await runCodeInLocalSandbox({
         language: 'java',
@@ -565,10 +567,157 @@ public class Main {
     } finally {
       globalThis.fetch = origFetch;
     }
-    console.log(' ✅ [Test 5/5 PASS] Edge/Shim 双端 PTA 监听、去重、12h 冷却与 WAF 降级委托通过');
+    console.log(' ✅ [Test 5/6 PASS] Edge/Shim 双端 PTA 监听、去重、12h 冷却与 WAF 降级委托通过');
   }
 
-  console.log('\n🎉 PTA 插件、Java 沙箱与双端监听全部 5 项测试 100% 通过！\n');
+  // Test 6: PTA 请求瞬态 502 重试、单题单题集超时降级，以及 Edge /api/tasks/sync 状态未变不重复写 execution_logs
+  {
+    const origFetch = globalThis.fetch;
+    let listAttempts = 0;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const u = String(input);
+        if (u.includes('/api/problem-sets?')) {
+          listAttempts++;
+          if (listAttempts === 1) {
+            return new Response('Bad Gateway', { status: 502 });
+          }
+          return new Response(
+            JSON.stringify({
+              total: 2,
+              problemSets: [
+                { id: '9001', name: '稳定集', type: 'EXERCISE', status: 'ACTIVE', endAt: '2099-01-01T00:00:00Z' },
+                { id: '9002', name: '超时集', type: 'EXERCISE', status: 'ACTIVE', endAt: '2099-01-01T00:00:00Z' },
+              ],
+            }),
+            { status: 200 }
+          );
+        }
+        if (u.includes('/9001/exams')) {
+          return new Response(JSON.stringify({ exam: { id: 'e9001', score: 100, ended: false }, problemSet: {} }), {
+            status: 200,
+          });
+        }
+        if (u.includes('/9001/exam-problem-status')) {
+          return new Response(
+            JSON.stringify({ problemStatus: [{ id: 'p1', score: 10, problemSubmissionStatus: 'PROBLEM_ACCEPTED' }] }),
+            { status: 200 }
+          );
+        }
+        if (u.includes('/9002/exams')) {
+          throw new Error('The operation was aborted due to timeout');
+        }
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      const ovRes = await scanPtaOverviews('PTASession=ok');
+      assert.strictEqual(listAttempts, 2, 'GET 502 瞬态错误应自动重试 1 次成功');
+      assert.strictEqual(ovRes.activeSets.length, 2, '单套题目集明细超时不得阻断整体巡检结果');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 验证 Edge /api/tasks/sync 对同 status 不重复写 execution_logs
+    const origLoad = (Module as any)._load;
+    (Module as any)._load = function (request: string, parent: unknown, isMain: boolean) {
+      if (request === 'cloudflare:workers') {
+        return { DurableObject: class {} };
+      }
+      if (request === 'agents') {
+        class MockAgent {
+          state: any = {};
+          env: any = {};
+          ctx: any = {};
+          setState(next: any) {
+            this.state = next;
+          }
+        }
+        return {
+          Agent: MockAgent,
+          callable: () => () => {},
+          routeAgentRequest: async () => null,
+        };
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    const edgeEntryPath = '../edge/src/index';
+    const { default: edgeEntry } = await import(edgeEntryPath).finally(() => {
+      (Module as any)._load = origLoad;
+    });
+    const tasksStore = new Map<string, any>();
+    const execLogs: Array<{ eventType: string; summary: string }> = [];
+    const syncDb: any = {
+      prepare(sql: string) {
+        let args: any[] = [];
+        return {
+          bind(...p: any[]) {
+            args = p;
+            return this;
+          },
+          first: async () => {
+            if (sql.includes('FROM pending_tasks WHERE task_id')) {
+              return tasksStore.get(String(args[0])) || null;
+            }
+            return null;
+          },
+          all: async () => ({ results: Array.from(tasksStore.values()) }),
+          run: async () => {
+            if (sql.includes('INSERT INTO pending_tasks')) {
+              const id = String(args[0]);
+              tasksStore.set(id, {
+                task_id: id,
+                status: String(args[6]),
+                result_summary: String(args[9] || ''),
+                payload_json: String(args[10] || '{}'),
+              });
+            } else if (sql.includes('INSERT INTO execution_logs')) {
+              execLogs.push({ eventType: String(args[0]), summary: String(args[2]) });
+            }
+            return { success: true };
+          },
+        };
+      },
+    };
+    const syncEnv: any = { DB: syncDb, AFK_EDGE_BEARER_TOKEN: 'super-secret-edge-token-123456' };
+    const syncPayload = {
+      tasks: [
+        {
+          taskId: 'pta-ps-99001',
+          workId: '99001',
+          platform: 'pta',
+          courseId: 'org',
+          classId: 'EXERCISE',
+          courseName: '学校',
+          title: '模拟测试',
+          status: 'submitted',
+          resultSummary: '已完成全部 10 题',
+        },
+      ],
+    };
+
+    await edgeEntry.fetch(
+      new Request('https://edge.test/api/tasks/sync', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer super-secret-edge-token-123456', 'Content-Type': 'application/json' },
+        body: JSON.stringify(syncPayload),
+      }),
+      syncEnv,
+      {} as any
+    );
+    await edgeEntry.fetch(
+      new Request('https://edge.test/api/tasks/sync', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer super-secret-edge-token-123456', 'Content-Type': 'application/json' },
+        body: JSON.stringify(syncPayload),
+      }),
+      syncEnv,
+      {} as any
+    );
+    assert.strictEqual(execLogs.length, 1, '状态未变更的重复 /api/tasks/sync 不得重复刷入 execution_logs');
+    console.log(' ✅ [Test 6/6 PASS] PTA 瞬态重试、单集超时降级与 Edge /api/tasks/sync 日志去重通过');
+  }
+
+  console.log('\n🎉 PTA 插件、Java 沙箱与双端监听全部 6 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

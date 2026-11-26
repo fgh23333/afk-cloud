@@ -31,6 +31,22 @@ let lastEvolveAtMs = 0;
 let progressScanBusy = false;
 let lastProgressScanAtMs = 0;
 
+export function parseProgressCommand(text: string): {
+  isProgress: boolean;
+  forceRefresh: boolean;
+  keyword: string;
+} {
+  const trimmed = String(text || '').trim();
+  const match = trimmed.match(/^(\/progress!|\/progress|刷新进度|进度)(?:\s+([\s\S]+))?$/i);
+  if (!match) {
+    return { isProgress: false, forceRefresh: false, keyword: '' };
+  }
+  const cmd = match[1].toLowerCase();
+  const forceRefresh = cmd === '/progress!' || cmd === '刷新进度';
+  const keyword = (match[2] || '').trim();
+  return { isProgress: true, forceRefresh, keyword };
+}
+
 export function formatProgressScanReport(
   summaries: Array<{
     courseId: string;
@@ -41,11 +57,63 @@ export function formatProgressScanReport(
     pendingChapters: number;
     totalUnfinishedPoints: number;
     completionRate: number;
-  }>
+    pendingChapterTitles?: string[];
+    chapters?: Array<{
+      chapterId: string;
+      title: string;
+      unfinishedPoints: number;
+      status: string;
+      url: string;
+    }>;
+  }>,
+  keyword?: string
 ): string {
   if (!Array.isArray(summaries) || summaries.length === 0) {
-    return '📖 未扫描到在读课程的章节任务点数据。';
+    return keyword
+      ? `📖 未找到匹配「${keyword}」的在读课程（可发送 \`/progress\` 查看全部课程进度）。`
+      : '📖 未扫描到在读课程的章节任务点数据。';
   }
+  const kw = (keyword || '').trim().toLowerCase();
+  if (kw) {
+    const matched = summaries.filter(
+      (s) =>
+        (s.courseName || '').toLowerCase().includes(kw) ||
+        String(s.courseId || '').toLowerCase() === kw ||
+        String(s.classId || '').toLowerCase() === kw
+    );
+    if (matched.length === 0) {
+      return `📖 未找到匹配「${keyword}」的在读课程（可发送 \`/progress\` 查看全部课程进度）。`;
+    }
+    const blocks = matched.slice(0, 5).map((c) => {
+      const unfinish = Number(c.totalUnfinishedPoints) || 0;
+      const courseUrl = `https://mooc1-1.chaoxing.com/visit/stucoursemiddle?courseid=${c.courseId}&clazzid=${c.classId}`;
+      const lines = [
+        `📖 《${c.courseName}》 (ID: ${c.courseId}) — 完成率 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章，待完成 ${unfinish} 个任务点)`,
+        `🔗 课程入口: ${courseUrl}`,
+      ];
+      const pendingChapterObjs = Array.isArray(c.chapters)
+        ? c.chapters.filter((ch) => ch.status === 'pending' || (Number(ch.unfinishedPoints) || 0) > 0)
+        : [];
+      const pendingTitles = Array.isArray(c.pendingChapterTitles) ? c.pendingChapterTitles.filter(Boolean) : [];
+      if (pendingChapterObjs.length > 0) {
+        for (const ch of pendingChapterObjs.slice(0, 15)) {
+          lines.push(`  • ${ch.title}（待完成 ${ch.unfinishedPoints} 个任务点）\n    👉 ${ch.url}`);
+        }
+        if (pendingChapterObjs.length > 15) {
+          lines.push(`  … 其余 ${pendingChapterObjs.length - 15} 个待完成章节请点击课程入口查看`);
+        }
+      } else if (unfinish > 0 && pendingTitles.length > 0) {
+        for (const title of pendingTitles) {
+          lines.push(`  • ${title}`);
+        }
+      } else if (unfinish === 0) {
+        lines.push('  ✅ 该课程所有章节任务点均已完成！');
+      }
+      return lines.join('\n');
+    });
+    return blocks.join('\n\n');
+  }
+
   const totalUnfinished = summaries.reduce((acc, s) => acc + (Number(s.totalUnfinishedPoints) || 0), 0);
   const unfinishedCourses = summaries.filter((s) => (Number(s.totalUnfinishedPoints) || 0) > 0);
   const header =
@@ -58,7 +126,12 @@ export function formatProgressScanReport(
   const lines = sorted.slice(0, 12).map((c, idx) => {
     const unfinish = Number(c.totalUnfinishedPoints) || 0;
     const badge = unfinish > 0 ? `⚠️ 待完成 ${unfinish} 个任务点` : '✅ 全部完成';
-    return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}`;
+    const pendingTitles = Array.isArray(c.pendingChapterTitles) ? c.pendingChapterTitles.filter(Boolean) : [];
+    const pendingPreview =
+      unfinish > 0 && pendingTitles.length > 0
+        ? ` [待刷: ${pendingTitles.slice(0, 2).join('、')}${pendingTitles.length > 2 ? ' 等' : ''}]`
+        : '';
+    return `${idx + 1}. 《${c.courseName}》 ${c.completionRate ?? 100}% (${c.completedChapters || 0}/${c.totalChapters || 0} 章) — ${badge}${pendingPreview}`;
   });
   return [header, ...lines].join('\n');
 }
@@ -87,7 +160,7 @@ async function replyViaEdge(title: string, content: string): Promise<void> {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${bearer}`,
       },
-      body: JSON.stringify({ title, content: content.slice(0, 1500) }),
+      body: JSON.stringify({ title, content: content.slice(0, 3500) }),
     });
   } catch (err: any) {
     console.warn(`[Agent Chat] replyViaEdge failed: ${err?.message || err}`);
@@ -282,11 +355,11 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
     return { accepted: true };
   }
 
-  if (trimmed === '/news' || trimmed === '资讯') {
+  if (trimmed === '/news' || trimmed === '资讯' || trimmed === '/news!' || trimmed === '刷新资讯') {
     const content = fs.existsSync(NEWS_PATH)
-      ? fs.readFileSync(NEWS_PATH, 'utf8').slice(0, 1300)
+      ? fs.readFileSync(NEWS_PATH, 'utf8').slice(0, 3500)
       : '暂无缓存资讯，可稍后等待定时抓取。';
-    void replyViaEdge('📰 最新资讯摘要', content);
+    void replyViaEdge('📰 最新技术与生态资讯简报', content);
     return { accepted: true };
   }
 
@@ -296,12 +369,8 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
     return { accepted: true };
   }
 
-  if (
-    trimmed === '/progress' ||
-    trimmed === '/progress!' ||
-    trimmed === '进度' ||
-    trimmed === '刷新进度'
-  ) {
+  const progCmd = parseProgressCommand(trimmed);
+  if (progCmd.isProgress) {
     if (progressScanBusy) {
       return {
         accepted: false,
@@ -309,7 +378,7 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
       };
     }
     const now = Date.now();
-    const forceRefresh = trimmed === '/progress!' || trimmed === '刷新进度';
+    const forceRefresh = progCmd.forceRefresh || Boolean(progCmd.keyword);
     if (!forceRefresh && now - lastProgressScanAtMs < PROGRESS_SCAN_COOLDOWN_MS) {
       const remainSec = Math.ceil((PROGRESS_SCAN_COOLDOWN_MS - (now - lastProgressScanAtMs)) / 1000);
       return {
@@ -327,15 +396,19 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
     }
 
     progressScanBusy = true;
-    lastProgressScanAtMs = now;
-    appendActivity('[Telegram /progress] 触发本机学习通章节任务点进度扫描与看板同步');
+    if (!progCmd.keyword) {
+      lastProgressScanAtMs = now;
+    }
+    appendActivity(
+      `[Telegram /progress] 触发本机学习通章节任务点进度扫描${progCmd.keyword ? ` (过滤: ${progCmd.keyword})` : ''}与看板同步`
+    );
 
     void (async () => {
       try {
         const { ChaoxingAdapter } = await import('../../adapters/chaoxing/index');
         const adapter = new ChaoxingAdapter(phone, password);
-        const summaries = await adapter.scanAllCourseChapterProgress(true);
-        const report = formatProgressScanReport(summaries);
+        const summaries = await adapter.scanAllCourseChapterProgress(true, progCmd.keyword || undefined);
+        const report = formatProgressScanReport(summaries, progCmd.keyword || undefined);
         appendActivity(`[Telegram /progress] 已同步 ${summaries.length} 门课程章节进度快照`);
         await replyViaEdge('📖 章节进度已实时刷新并同步看板', report);
       } catch (err: any) {
@@ -349,7 +422,9 @@ export async function handleAgentChatRequest(text: string): Promise<{ accepted: 
 
     return {
       accepted: true,
-      immediateReply: '🔄 已在本机后台启动学习通各课程章节任务点进度扫描，完成后自动同步看板并推送明细…',
+      immediateReply: progCmd.keyword
+        ? `🔄 已在本机后台启动匹配「${progCmd.keyword}」的课程章节任务点扫描，完成后推送待刷章节清单与直达链接…`
+        : '🔄 已在本机后台启动学习通各课程章节任务点进度扫描，完成后自动同步看板并推送明细…',
     };
   }
 

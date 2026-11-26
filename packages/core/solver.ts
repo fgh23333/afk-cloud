@@ -10,6 +10,7 @@ import {
   CachedAnswerEntry,
   computeQuestionHash,
   lookupQuestionBankCache,
+  removeLocalQuestionBankCacheEntries,
   saveToQuestionBankCache,
 } from './d1-bridge';
 import { runCodeInLocalSandbox } from './sandbox';
@@ -245,23 +246,29 @@ ${itemsText}
 }
 
 /**
- * 检测拒绝作答/信息缺口/占位模板，避免将低质量或失败文本写入题库缓存或误当作有效答案提交
+ * 检测拒绝作答/信息缺口/附件读取缺失/占位模板，避免将低质量或失败文本写入题库缓存或误当作有效答案提交
  */
 export function isPoisonedOrRefusalAnswer(answer: string): boolean {
   const s = String(answer || '').trim();
   if (!s) return true;
-  return /无法直接作答|当前题目信息不完整|主要信息缺口|信息缺口如下|无法完成任务|未声明任何浏览器|没有浏览器|遵循实验设计规范，结合课堂教学重点完成相应分析|未获取到具体题目/.test(
+  return /无法直接作答|无法直接完成(?:该题|当前|本次)?作答|无法完成(?:该题|当前|本次)?作答|无法完成任务|缺少.{0,24}(?:实际正文|原题内容|题目正文|实验题目|指导书|具体作答条件|具体题目|核心信息|附件内容)|(?:附件缓存|附件正文|正文内容)缺失|并非[^\n]{0,12}(?:原文件|文档正文)|不是文档正文|不能在不了解原题内容的情况下|无法生成.{0,16}(?:有效答案|完整正文|可提交)|当前题目信息不完整|主要信息缺口|信息缺口如下|存在的信息缺口|属于.{0,12}阻塞|材料上传类提交入口|未提取到.{0,12}(?:正文|附件)|未获取到具体题目|无法读取.{0,12}附件|请打开学习通查看|未声明任何浏览器|没有浏览器|遵循实验设计规范，结合课堂教学重点完成相应分析/.test(
     s
   );
 }
 
+const READABLE_CACHED_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|txt|md|csv|json|c|cpp|py|java)(?:\s|\)|\]|$)/i;
+
 /**
- * 判断主观题是否为缺乏实质题目正文、未缓存本地附件/图片且无讲义上下文的「空壳题干」（避免盲调 Gemini Pro 浪费配额）
+ * 判断主观题是否为缺乏实质题目正文、未成功提取可用附件/图片且无讲义上下文的「空壳题干」（避免盲调 Gemini Pro 浪费配额）
  */
 export function isEmptyShellSubjectiveQuestion(question: StandardQuestion, context = ''): boolean {
   if (question.options && question.options.length > 0) return false;
   const raw = String(question.title || '');
-  if (raw.includes('本地已缓存:') || raw.includes('附件摘要:')) return false;
+  if (raw.includes('附件摘要:') || raw.includes('附件页面截图')) return false;
+  const hasUsableLocalAsset = Array.from(raw.matchAll(/本地已缓存:\s*([^|\])]+?)(?:\s*[|\])]|$)/g)).some((m) =>
+    READABLE_CACHED_EXT_RE.test((m[1] || '').trim())
+  );
+  if (hasUsableLocalAsset) return false;
   if (String(context || '').trim().length >= 30) return false;
   const stripped = raw
     .replace(/\[(?:附件|图片):[^\]]*\]/g, '')
@@ -304,7 +311,7 @@ ${context ? context.substring(0, 3000) : '（请基于大学专业学科权威�
 【题目类型】：${question.typeName}
 【题目内容】：${question.title}
 ${question.sampleInput ? `【样例输入】：\n${question.sampleInput}\n` : ''}${question.sampleOutput ? `【样例输出】：\n${question.sampleOutput}\n` : ''}${feedbackHistory ? `\n【上一轮沙箱测试报错反馈（请反思并修复代码）】：\n${feedbackHistory}\n` : ''}
-【沙箱与识图约束】：当前处于无人值守 --sandbox 模式，严禁调用 BypassSandbox: true 或通过网络命令抓取外部链接。若【题目内容】中包含“(本地已缓存: /...)”路径，请直接调用 read_file 工具读取该本地图片进行多模态识图后再作答。
+【沙箱与识图约束】：当前处于无人值守 --sandbox 模式，严禁调用 BypassSandbox: true 或通过网络命令抓取外部链接。若【题目内容】中包含“(本地已缓存: /...)”或“附件页面截图(可用read_file查看): /...”路径，请直接调用 read_file 工具读取对应本地图片或页面截图进行多模态识图后再作答；若仍确实缺少原题正文，请明确回复“无法直接完成作答：缺少...”，切勿编造内容。
 ${
   isProgramming
     ? '如果是纯代码评测题，请提供完整可运行的源码；如果是简答论述中包含算法设计，请给出完整代码实现、核心注释与复杂度分析。'
@@ -400,14 +407,18 @@ export async function solveHomeworkDualTrack(
   const uncachedObjectives: Array<{ question: StandardQuestion; hash: string; context: string }> = [];
   const uncachedComplex: Array<{ question: StandardQuestion; hash: string; context: string }> = [];
 
+  const poisonedCacheHashes: string[] = [];
   for (const meta of questionMeta) {
     const hit = cacheHitsMap[meta.hash];
-    if (hit && hit.answer && !isPoisonedOrRefusalAnswer(hit.answer)) {
-      answers[meta.question.id] = hit.answer;
-      meta.question.userAnswer = hit.answer;
-      meta.question.solvedByTier = 'cache';
-      stats.cacheHits++;
-      continue;
+    if (hit && hit.answer) {
+      if (!isPoisonedOrRefusalAnswer(hit.answer)) {
+        answers[meta.question.id] = hit.answer;
+        meta.question.userAnswer = hit.answer;
+        meta.question.solvedByTier = 'cache';
+        stats.cacheHits++;
+        continue;
+      }
+      poisonedCacheHashes.push(meta.hash);
     }
 
     const isComplex =
@@ -421,6 +432,10 @@ export async function solveHomeworkDualTrack(
     } else {
       uncachedObjectives.push(meta);
     }
+  }
+
+  if (poisonedCacheHashes.length > 0) {
+    removeLocalQuestionBankCacheEntries(poisonedCacheHashes);
   }
 
   console.log(
