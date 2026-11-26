@@ -155,6 +155,25 @@ export async function saveToQuestionBankCache(entries: CachedAnswerEntry[]): Pro
   }
 }
 
+/**
+ * 从本地题库缓存 (.cache/question_bank.json) 清理已知毒化或拒答占位条目
+ */
+export function removeLocalQuestionBankCacheEntries(hashes: string[]): number {
+  if (!hashes || hashes.length === 0) return 0;
+  const localMap = readLocalCacheMap();
+  let removed = 0;
+  for (const h of hashes) {
+    if (h && localMap[h]) {
+      delete localMap[h];
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    writeLocalCacheMap(localMap);
+  }
+  return removed;
+}
+
 export interface EdgeTaskSyncItem {
   taskId: string;
   platform: string;
@@ -220,6 +239,7 @@ export interface EdgeCourseChapterProgressItem {
   pendingChapters: number;
   totalUnfinishedPoints: number;
   completionRate: number;
+  pendingChapterTitles?: string[];
   updatedAt?: string;
 }
 

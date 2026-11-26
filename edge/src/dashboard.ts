@@ -94,6 +94,7 @@ export interface DashboardData {
     pendingChapters?: number;
     totalUnfinishedPoints?: number;
     completionRate?: number;
+    pendingChapterTitles?: string[];
     progressUpdatedAt?: string;
   }>;
   discussions?: Array<{
@@ -406,6 +407,9 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       chapterTrackedCoursesCount++;
       chapterUnfinishedPointsCount += Math.max(0, Number(prog.totalUnfinishedPoints) || 0);
       const existingCourse = courseMap.get(cid);
+      const pendingChapterTitles = Array.isArray(prog.pendingChapterTitles)
+        ? prog.pendingChapterTitles.filter(Boolean)
+        : [];
       if (existingCourse) {
         courseMap.set(cid, {
           ...existingCourse,
@@ -414,6 +418,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           pendingChapters: Number(prog.pendingChapters) || 0,
           totalUnfinishedPoints: Number(prog.totalUnfinishedPoints) || 0,
           completionRate: typeof prog.completionRate === 'number' ? prog.completionRate : 100,
+          pendingChapterTitles,
           progressUpdatedAt: prog.updatedAt || '',
         });
       } else {
@@ -426,6 +431,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
           pendingChapters: Number(prog.pendingChapters) || 0,
           totalUnfinishedPoints: Number(prog.totalUnfinishedPoints) || 0,
           completionRate: typeof prog.completionRate === 'number' ? prog.completionRate : 100,
+          pendingChapterTitles,
           progressUpdatedAt: prog.updatedAt || '',
         });
       }
@@ -977,11 +983,16 @@ export function renderDashboardHtml(): string {
 
       <!-- Tab 4: 课程列表 -->
       <section id="tab-courses" class="space-y-3 hidden">
-        <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
           <span class="text-slate-300">共检索到 <span id="totalCourseCount" class="font-bold text-white">0</span> 门在读课程（已同步持久化至 D1 数据库）</span>
-          <button onclick="refreshCourses()" id="syncCoursesBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1">
-            <span>🔄 刷新超星课程</span>
-          </button>
+          <div class="flex items-center gap-2">
+            <button onclick="refreshCourseProgressUI()" id="syncCourseProgressBtn" class="px-2.5 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white font-medium border border-sky-500/40 transition active:scale-95 flex items-center gap-1">
+              <span>📖 扫描章节进度</span>
+            </button>
+            <button onclick="refreshCourses()" id="syncCoursesBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 flex items-center gap-1">
+              <span>🔄 刷新超星课程</span>
+            </button>
+          </div>
         </div>
         <div id="courseList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <div class="col-span-full py-12 text-center text-slate-500 text-sm">正在加载课程...</div>
@@ -1271,11 +1282,23 @@ export function renderDashboardHtml(): string {
         const isIgnored = hw.status === 'ignored';
         const isPending = !isDraft && !isSubmitting && !isSubmitted && !isDispatched && !isFailed && !isIgnored;
 
+        const safeCourseName = escapeHtml(hw.courseName || '课程');
+        const safeTitle = escapeHtml(hw.title);
+        const safeEndDate = escapeHtml(hw.endDate || '无截止限制');
+        const safeResultSummary = escapeHtml(hw.resultSummary || '');
+        const safeTaskIdAttr = escapeHtml(hw.taskId || '');
+
         let badge = '';
         let statusDesc = '';
         if (isDraft) {
-          badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">🛡️ 做完暂存 · 待审批</span>';
-          statusDesc = '双轨模型已完成解答，草稿已暂存平台，等待人工审批正式提交';
+          const isManualNotice = hw.status === 'awaiting_approval' && safeResultSummary.includes('⚠️');
+          if (isManualNotice) {
+            badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">⚠️ 需人工处理</span>';
+            statusDesc = safeResultSummary || '缺少可直接作答的表单正文或附件无法自动解析，请在学习通确认';
+          } else {
+            badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-sky-500/20 text-sky-300 border-sky-500/30">🛡️ 做完暂存 · 待审批</span>';
+            statusDesc = '双轨模型已完成解答，草稿已暂存平台，等待人工审批正式提交';
+          }
         } else if (isSubmitting) {
           badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-violet-500/20 text-violet-300 border-violet-500/30">📤 正式提交中</span>';
           statusDesc = '已通过人工审批，正在等待 shim 执行正式提交并回执确认';
@@ -1301,12 +1324,6 @@ export function renderDashboardHtml(): string {
         const expiredBadge = (!isSubmitted && !isIgnored && isHomeworkExpired(hw.endDate))
           ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-500/30">⏰ 已过截止</span>'
           : '';
-
-        const safeCourseName = escapeHtml(hw.courseName || '课程');
-        const safeTitle = escapeHtml(hw.title);
-        const safeEndDate = escapeHtml(hw.endDate || '无截止限制');
-        const safeResultSummary = escapeHtml(hw.resultSummary || '');
-        const safeTaskIdAttr = escapeHtml(hw.taskId || '');
 
         const courseLink = hw.courseUrl
           ? '<a href="' + escapeHtml(hw.courseUrl) + '" target="_blank" rel="noopener noreferrer" class="text-[11px] text-sky-400/90 hover:text-sky-300 hover:underline truncate max-w-[150px] inline-flex items-center gap-0.5" title="点击直达课程空间">' + safeCourseName + ' ↗</a>'
@@ -1460,6 +1477,10 @@ export function renderDashboardHtml(): string {
         const rate = hasProgress ? Math.min(100, Math.max(0, Number(c.completionRate || 0))) : null;
         const pendingCh = Number(c.pendingChapters || 0);
         const unfinishPts = Number(c.totalUnfinishedPoints || 0);
+        const pendingTitles = Array.isArray(c.pendingChapterTitles) ? c.pendingChapterTitles.filter(Boolean) : [];
+        const pendingTitlesHtml = (unfinishPts > 0 && pendingTitles.length > 0)
+          ? \`<div class="text-[11px] text-amber-300/90 truncate" title="待完成章节: \${escapeHtml(pendingTitles.join(' / '))}">📌 待刷: \${escapeHtml(pendingTitles.slice(0, 2).join(' · '))}\${pendingTitles.length > 2 ? ' 等' : ''}</div>\`
+          : '';
         const progressHtml = hasProgress ? \`
           <div class="pt-1.5 space-y-1">
             <div class="flex items-center justify-between text-[11px]">
@@ -1469,6 +1490,7 @@ export function renderDashboardHtml(): string {
             <div class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
               <div class="h-full rounded-full \${rate === 100 ? 'bg-emerald-500' : 'bg-sky-500'}" style="width: \${rate}%"></div>
             </div>
+            \${pendingTitlesHtml}
           </div>
         \` : '';
         return \`
@@ -1729,10 +1751,17 @@ export function renderDashboardHtml(): string {
       icon.classList.add('animate-spin');
       try {
         const res = await fetch('/api/dashboard');
+        if (res.status === 401) {
+          showToast('登录态已失效，正在跳转解锁页面...', false);
+          setTimeout(() => location.reload(), 800);
+          return;
+        }
         if (res.ok) {
           state = await res.json();
           renderUI();
           showToast('看板数据已同步最新状态');
+        } else {
+          showToast('看板刷新失败 (HTTP ' + res.status + ')', false);
         }
       } catch (e) {
         console.error(e);
@@ -1988,11 +2017,11 @@ export function renderDashboardHtml(): string {
       try {
         const res = await fetch('/api/courses/refresh', { method: 'POST' });
         const json = await res.json();
-        if (json.success) {
+        if (json.success || typeof json.count === 'number') {
           showToast(\`成功同步 \${json.count} 门在读课程！\`);
           await refreshData();
         } else {
-          showToast('课程同步失败：' + (json.msg || '网络异常'), false);
+          showToast('课程同步失败：' + (json.msg || json.error || '网络异常'), false);
         }
       } catch (e) {
         showToast('课程同步请求异常', false);
@@ -2000,6 +2029,35 @@ export function renderDashboardHtml(): string {
         if (btn) {
           btn.disabled = false;
           btn.innerText = '🔄 刷新超星课程';
+        }
+      }
+    }
+
+    async function refreshCourseProgressUI() {
+      const btn = document.getElementById('syncCourseProgressBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '扫描进度中...';
+      }
+      try {
+        const res = await fetch('/api/courses/progress/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: true })
+        });
+        const json = await res.json();
+        if (json.ok || json.dispatched) {
+          showToast(json.msg || '已触发本机扫描章节任务点进度，完成后自动同步看板！📖');
+          setTimeout(() => refreshData(), 4000);
+        } else {
+          showToast('章节进度扫描未启动：' + (json.msg || json.reason || '网络异常'), false);
+        }
+      } catch (e) {
+        showToast('章节进度扫描请求异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '📖 扫描章节进度';
         }
       }
     }

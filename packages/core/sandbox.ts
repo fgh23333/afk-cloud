@@ -25,7 +25,7 @@ export async function runCodeInLocalSandbox(options: {
   expectedOutput?: string;
   timeoutMs?: number;
 }): Promise<SandboxRunResult> {
-  const timeoutMs = options.timeoutMs || (options.language === 'java' ? 12000 : 8000);
+  const timeoutMs = options.timeoutMs || (options.language === 'java' ? 25000 : 8000);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-sandbox-'));
   const startTime = Date.now();
 
@@ -53,7 +53,7 @@ export async function runCodeInLocalSandbox(options: {
       fs.writeFileSync(srcFile, options.code, 'utf8');
 
       try {
-        await execFileAsync('javac', ['-encoding', 'UTF-8', srcFile], { timeout: 25000 });
+        await execFileAsync('javac', ['-encoding', 'UTF-8', srcFile], { timeout: 60000 });
       } catch (compileErr: any) {
         return {
           passed: false,

@@ -895,6 +895,7 @@ export interface CourseChapterProgressSnapshot {
   pendingChapters: number;
   totalUnfinishedPoints: number;
   completionRate: number;
+  pendingChapterTitles?: string[];
   updatedAt?: string;
 }
 
@@ -943,6 +944,15 @@ export async function saveCourseChapterProgressItems(
           ? Math.round((completedChapters / totalChapters) * 100)
           : 100;
 
+    const rawPendingTitles = Array.isArray(item.pendingChapterTitles)
+      ? item.pendingChapterTitles
+          .map((t) => String(t || '').trim())
+          .filter(Boolean)
+          .slice(0, 5)
+      : current[cid]?.pendingChapterTitles || [];
+    const pendingChapterTitles =
+      pendingChapters > 0 && totalUnfinishedPoints > 0 ? rawPendingTitles : [];
+
     current[cid] = {
       courseId: cid,
       classId: String(item.classId || current[cid]?.classId || ''),
@@ -952,6 +962,7 @@ export async function saveCourseChapterProgressItems(
       pendingChapters,
       totalUnfinishedPoints,
       completionRate,
+      pendingChapterTitles,
       updatedAt: item.updatedAt || ts,
     };
     updated++;

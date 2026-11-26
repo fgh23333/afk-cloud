@@ -215,30 +215,48 @@ export async function ptaFetchJson<T = any>(
   const method = init.method || 'GET';
   const hasBody = init.body !== undefined;
   const headers = buildPtaHeaders(cookieHeader, init.psId, hasBody);
+  const maxAttempts = method === 'GET' ? 2 : 1;
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: hasBody ? JSON.stringify(init.body) : undefined,
-    signal: AbortSignal.timeout(init.timeoutMs || 15000),
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: hasBody ? JSON.stringify(init.body) : undefined,
+        signal: AbortSignal.timeout(init.timeoutMs || 15000),
+      });
+    } catch (err: any) {
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      throw err;
+    }
 
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    if (isPtaAuthFailureResponse(res.status, text)) {
-      throw new PtaAuthError(`PTA 登录态无效或已过期 (HTTP ${res.status}): ${text.slice(0, 180)}`);
+    const text = await res.text().catch(() => '');
+    if (!res.ok) {
+      if (isPtaAuthFailureResponse(res.status, text)) {
+        throw new PtaAuthError(`PTA 登录态无效或已过期 (HTTP ${res.status}): ${text.slice(0, 180)}`);
+      }
+      if (res.status === 403 || /cf-mitigated|Just a moment|TencentCaptcha/i.test(text)) {
+        throw new PtaBlockedError(`PTA 请求触发风控拦截 (HTTP ${res.status})`);
+      }
+      if ((res.status === 502 || res.status === 503 || res.status === 504 || res.status === 429) && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      throw new Error(`PTA API HTTP ${res.status} (${url}): ${text.slice(0, 220)}`);
     }
-    if (res.status === 403 || /cf-mitigated|Just a moment|TencentCaptcha/i.test(text)) {
-      throw new PtaBlockedError(`PTA 请求触发风控拦截 (HTTP ${res.status})`);
+
+    if (!text) return {} as T;
+    if (/^\s*<!doctype\s+html/i.test(text)) {
+      throw new PtaBlockedError('PTA 返回了 HTML 页面而非 JSON（可能触发风控或需要重新登录）');
     }
-    throw new Error(`PTA API HTTP ${res.status} (${url}): ${text.slice(0, 220)}`);
+    return JSON.parse(text) as T;
   }
 
-  if (!text) return {} as T;
-  if (/^\s*<!doctype\s+html/i.test(text)) {
-    throw new PtaBlockedError('PTA 返回了 HTML 页面而非 JSON（可能触发风控或需要重新登录）');
-  }
-  return JSON.parse(text) as T;
+  return {} as T;
 }
 
 export async function listPtaProblemSets(
@@ -328,9 +346,19 @@ export async function scanPtaOverviews(
   const activeSets: PtaProblemSetOverview[] = [];
 
   for (const ps of candidates.slice(0, maxDetails)) {
-    const examBundle = await getPtaProblemSetExam(ps.id, cookieHeader);
-    const exam = examBundle.exam;
-    const cfg = examBundle.problemSet?.problemSetConfig || {};
+    let exam: PtaExamRecord | null = null;
+    let problemSetCfg: Record<string, any> | null = null;
+    try {
+      const examBundle = await getPtaProblemSetExam(ps.id, cookieHeader);
+      exam = examBundle.exam;
+      problemSetCfg = examBundle.problemSet;
+    } catch (err: any) {
+      if (err instanceof PtaAuthError || err instanceof PtaBlockedError) {
+        throw err;
+      }
+      console.warn(`[PTA] 获取题目集 [${ps.id}] 详情超时/失败，跳过明细降级保留摘要: ${err?.message || err}`);
+    }
+    const cfg = problemSetCfg?.problemSetConfig || {};
     const compilers: string[] = Array.isArray(cfg.compilers) ? cfg.compilers : [];
     const judgeTiming = String(cfg.judgeTiming || 'DEFAULT_JUDGE_TIME');
     const shuffledAnswers = Boolean(cfg.randomGenerationProblemSetConfig?.shuffledAnswers);
@@ -342,13 +370,20 @@ export async function scanPtaOverviews(
     let noAnswerCount = 0;
 
     if (exam?.id) {
-      const statuses = await getPtaProblemStatus(ps.id, exam.id, cookieHeader);
-      totalProblems = statuses.length;
-      for (const s of statuses) {
-        totalScore += Number(s.score || 0);
-        if (s.problemSubmissionStatus === 'PROBLEM_ACCEPTED') acceptedCount++;
-        else if (s.problemSubmissionStatus === 'PROBLEM_SUBMITTED') submittedCount++;
-        else if (s.problemSubmissionStatus === 'PROBLEM_NO_ANSWER') noAnswerCount++;
+      try {
+        const statuses = await getPtaProblemStatus(ps.id, exam.id, cookieHeader);
+        totalProblems = statuses.length;
+        for (const s of statuses) {
+          totalScore += Number(s.score || 0);
+          if (s.problemSubmissionStatus === 'PROBLEM_ACCEPTED') acceptedCount++;
+          else if (s.problemSubmissionStatus === 'PROBLEM_SUBMITTED') submittedCount++;
+          else if (s.problemSubmissionStatus === 'PROBLEM_NO_ANSWER') noAnswerCount++;
+        }
+      } catch (err: any) {
+        if (err instanceof PtaAuthError || err instanceof PtaBlockedError) {
+          throw err;
+        }
+        console.warn(`[PTA] 获取题目集 [${ps.id}] 答题状态失败: ${err?.message || err}`);
       }
     }
 

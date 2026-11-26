@@ -58,27 +58,34 @@ function hasPtaSessionToken(cookieHeader: string): boolean {
 }
 
 async function ptaEdgeFetchJson<T = any>(url: string, cookie: string, psId?: string): Promise<{ ok: boolean; status: number; bodyText: string; data?: T }> {
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Cookie: cookie,
-      Accept: 'application/json;charset=UTF-8',
-      Referer: psId ? `${PTA_ORIGIN}/problem-sets/${psId}/exam/problems` : `${PTA_ORIGIN}/problem-sets`,
-      Origin: PTA_ORIGIN,
-      'User-Agent': PTA_UA,
-    },
-  });
-  const bodyText = await res.text().catch(() => '');
-  if (!res.ok) {
-    return { ok: false, status: res.status, bodyText };
-  }
-  if (/^\s*<!doctype\s+html/i.test(bodyText)) {
-    return { ok: false, status: 403, bodyText: 'HTML challenge returned' };
-  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
   try {
-    return { ok: true, status: res.status, bodyText, data: JSON.parse(bodyText) as T };
-  } catch {
-    return { ok: false, status: res.status, bodyText };
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Cookie: cookie,
+        Accept: 'application/json;charset=UTF-8',
+        Referer: psId ? `${PTA_ORIGIN}/problem-sets/${psId}/exam/problems` : `${PTA_ORIGIN}/problem-sets`,
+        Origin: PTA_ORIGIN,
+        'User-Agent': PTA_UA,
+      },
+      signal: controller.signal,
+    });
+    const bodyText = await res.text().catch(() => '');
+    if (!res.ok) {
+      return { ok: false, status: res.status, bodyText };
+    }
+    if (/^\s*<!doctype\s+html/i.test(bodyText)) {
+      return { ok: false, status: 403, bodyText: 'HTML challenge returned' };
+    }
+    try {
+      return { ok: true, status: res.status, bodyText, data: JSON.parse(bodyText) as T };
+    } catch {
+      return { ok: false, status: res.status, bodyText };
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -87,6 +94,8 @@ async function delegatePtaScanToShim(env: ExtendedNotifyEnv): Promise<{ ok: bool
   const shimSecret = env.AFK_SHIM_SECRET;
   if (!shimUrl || !shimSecret) return null;
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 18_000);
   try {
     const endpoint = new URL('/pta/inspect', shimUrl.replace(/\/+$/, '') + '/');
     const body = JSON.stringify({ source: 'edge-fallback' });
@@ -100,11 +109,14 @@ async function delegatePtaScanToShim(env: ExtendedNotifyEnv): Promise<{ ok: bool
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...sigHeaders },
       body,
+      signal: controller.signal,
     });
     const data: any = await res.json().catch(() => ({}));
     return { ok: res.ok && Boolean(data?.ok), summary: data?.msg || `HTTP ${res.status}` };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

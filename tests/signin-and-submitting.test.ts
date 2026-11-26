@@ -774,7 +774,37 @@ async function runTests() {
       assert.strictEqual(mobileCalls, 1, '冷却到期恢复试探应仅请求 1 门课作为金丝雀探针');
       assert.strictEqual(c3.blockedCooldownActive, false);
       assert.strictEqual(state.blockedCooldownUntilMs, 0);
+      assert.strictEqual(state.blockedStreak, 0);
       assert.ok(logs.some((l) => l.eventType === 'sign_listener_recovered'), '恢复时必须写入 sign_listener_recovered 日志');
+
+      // 验证连续封禁退避阶梯 (15m -> 60m) 与 6 小时内不重复推送恢复通知
+      isBlocked = true;
+      const tFlap1 = Date.parse('2026-11-21T15:00:00+08:00');
+      await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: tFlap1,
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(state.blockedStreak, 1);
+      assert.strictEqual(state.blockedCooldownUntilMs, tFlap1 + 15 * 60 * 1000);
+
+      await runChaoxingInspectionCycle(mockEnv, {
+        nowMs: tFlap1 + 15 * 60 * 1000,
+        checkHomework: false,
+        scanDiscussions: false,
+        skipSleep: true,
+        state,
+        onStateUpdate: (s) => {
+          state = s;
+        },
+      });
+      assert.strictEqual(state.blockedStreak, 2, '连续封禁第 2 次应升级 blockedStreak');
+      assert.strictEqual(state.blockedCooldownUntilMs, tFlap1 + 15 * 60 * 1000 + 60 * 60 * 1000, '连续封禁应指数退避至 60m');
     } finally {
       globalThis.fetch = origFetch;
     }

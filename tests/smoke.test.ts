@@ -515,6 +515,7 @@ async function runAllTests() {
     assert.strictEqual(chapterProg.pendingChapters, 1);
     assert.strictEqual(chapterProg.totalUnfinishedPoints, 2);
     assert.strictEqual(chapterProg.completionRate, 50);
+    assert.deepStrictEqual(chapterProg.pendingChapterTitles, ['1.2 线性表的顺序表示']);
     assert.strictEqual(chapterProg.chapters[1].title, '1.2 线性表的顺序表示');
     assert.strictEqual(chapterProg.chapters[1].status, 'pending');
 
@@ -588,23 +589,27 @@ async function runAllTests() {
         pendingChapters: chapterProg.pendingChapters,
         totalUnfinishedPoints: chapterProg.totalUnfinishedPoints,
         completionRate: chapterProg.completionRate,
+        pendingChapterTitles: chapterProg.pendingChapterTitles,
       },
     ]);
     assert.strictEqual(upCount, 1, '应成功持久化 1 门课程的章节任务点进度快照');
     const progMap = await getCourseChapterProgressMap(mockProgEnv);
     assert.strictEqual(progMap['267230708']?.completionRate, 50);
+    assert.deepStrictEqual(progMap['267230708']?.pendingChapterTitles, ['1.2 线性表的顺序表示']);
     const progDash = await getDashboardData(mockProgEnv);
     assert.strictEqual(progDash.stats.chapterTrackedCoursesCount, 1);
     assert.strictEqual(progDash.stats.chapterUnfinishedPointsCount, 2);
     assert.strictEqual(progDash.courses?.[0]?.completionRate, 50);
     assert.strictEqual(progDash.courses?.[0]?.totalUnfinishedPoints, 2);
+    assert.deepStrictEqual(progDash.courses?.[0]?.pendingChapterTitles, ['1.2 线性表的顺序表示']);
 
     const { formatChapterProgressSummary } = await import('../edge/src/notify');
     const progSummaryLine = formatChapterProgressSummary(progDash.stats, progDash.courses);
     assert.ok(
       progSummaryLine.includes('待完成任务点 2 个') &&
-        progSummaryLine.includes('《数据结构与算法》待完成 2 个 · 50%'),
-      '章节进度摘要应准确展示待完成任务点数与课程完成率明细'
+        progSummaryLine.includes('《数据结构与算法》待完成 2 个 · 50%') &&
+        progSummaryLine.includes('[1.2 线性表的顺序表示]'),
+      '章节进度摘要应准确展示待完成任务点数、课程完成率与 Top 待刷章节标题'
     );
     const progDigestText = await sendDigestNotification(
       {},
@@ -620,10 +625,27 @@ async function runAllTests() {
       '每日定时简报在存在未完成章节任务点时应自动附带章节进度提醒'
     );
 
-    const { formatProgressScanReport, handleAgentChatRequest } = await import(
-      '../packages/shim/src/agent-chat'
-    );
-    const formattedScanReport = formatProgressScanReport([
+    const {
+      formatProgressScanReport,
+      handleAgentChatRequest,
+      parseProgressCommand,
+    } = await import('../packages/shim/src/agent-chat');
+    assert.deepStrictEqual(parseProgressCommand('/progress 数据结构'), {
+      isProgress: true,
+      forceRefresh: false,
+      keyword: '数据结构',
+    });
+    assert.deepStrictEqual(parseProgressCommand('/progress! 计算机网络'), {
+      isProgress: true,
+      forceRefresh: true,
+      keyword: '计算机网络',
+    });
+    assert.deepStrictEqual(parseProgressCommand('刷新进度 线性代数'), {
+      isProgress: true,
+      forceRefresh: true,
+      keyword: '线性代数',
+    });
+    const sampleSummaries = [
       {
         courseId: '267230708',
         classId: '155058274',
@@ -633,6 +655,16 @@ async function runAllTests() {
         pendingChapters: 1,
         totalUnfinishedPoints: 2,
         completionRate: 50,
+        pendingChapterTitles: ['1.2 线性表的顺序表示'],
+        chapters: [
+          {
+            chapterId: '900102',
+            title: '1.2 线性表的顺序表示',
+            unfinishedPoints: 2,
+            status: 'pending',
+            url: 'https://mooc1-1.chaoxing.com/mycourse/studentstudy?chapterId=900102&courseId=267230708&clazzid=155058274&cpi=',
+          },
+        ],
       },
       {
         courseId: '268000001',
@@ -643,12 +675,28 @@ async function runAllTests() {
         pendingChapters: 0,
         totalUnfinishedPoints: 0,
         completionRate: 100,
+        pendingChapterTitles: [],
+        chapters: [],
       },
-    ]);
+    ];
+    const formattedScanReport = formatProgressScanReport(sampleSummaries);
     assert.ok(
       formattedScanReport.includes('共跟踪 2 门课，1 门存在待完成任务点（合计 2 个）') &&
-        formattedScanReport.includes('1. 《数据结构与算法》 50% (1/2 章) — ⚠️ 待完成 2 个任务点'),
-      '本机章节进度扫描报告应按待完成任务点降序排列并输出统计摘要'
+        formattedScanReport.includes('1. 《数据结构与算法》 50% (1/2 章) — ⚠️ 待完成 2 个任务点 [待刷: 1.2 线性表的顺序表示]'),
+      '本机章节进度扫描报告应按待完成任务点降序排列并输出统计摘要与 Top 待刷章节标题'
+    );
+    const filteredCourseReport = formatProgressScanReport(sampleSummaries, '数据结构');
+    assert.ok(
+      filteredCourseReport.includes('《数据结构与算法》 (ID: 267230708) — 完成率 50%') &&
+        filteredCourseReport.includes('🔗 课程入口: https://mooc1-1.chaoxing.com/visit/stucoursemiddle?courseid=267230708&clazzid=155058274') &&
+        filteredCourseReport.includes('• 1.2 线性表的顺序表示（待完成 2 个任务点）') &&
+        filteredCourseReport.includes('👉 https://mooc1-1.chaoxing.com/mycourse/studentstudy?chapterId=900102'),
+      '按课程关键词过滤的章节进度报告应输出完整待完成章节清单与直达学习链接'
+    );
+    const notFoundCourseReport = formatProgressScanReport(sampleSummaries, '量子力学');
+    assert.ok(
+      notFoundCourseReport.includes('未找到匹配「量子力学」的在读课程'),
+      '未匹配到课程关键词时应返回友好提示'
     );
     const prevPhone = process.env.CHAOXING_PHONE;
     const prevPwd = process.env.CHAOXING_PASSWORD;
@@ -664,6 +712,112 @@ async function runAllTests() {
     } finally {
       if (prevPhone !== undefined) process.env.CHAOXING_PHONE = prevPhone;
       if (prevPwd !== undefined) process.env.CHAOXING_PASSWORD = prevPwd;
+    }
+
+    // 验证 Edge POST /api/courses/progress/refresh 签名下发至 Shim /agent-chat 与看板按钮渲染
+    const Module = await import('module');
+    const origModuleLoad = (Module.default as any)._load;
+    (Module.default as any)._load = function (request: string, parent: unknown, isMain: boolean) {
+      if (request === 'cloudflare:workers') {
+        return { DurableObject: class {} };
+      }
+      if (request === 'agents') {
+        class MockAgent {
+          state: any = {};
+          env: any = {};
+          ctx: any = {};
+          setState(next: any) {
+            this.state = next;
+          }
+        }
+        return {
+          Agent: MockAgent,
+          callable: () => () => {},
+          routeAgentRequest: async () => null,
+        };
+      }
+      return origModuleLoad.call(this, request, parent, isMain);
+    };
+    const edgeIndexModPath = '../edge/src/index';
+    let edgeWorker: any;
+    try {
+      edgeWorker = (await import(edgeIndexModPath)).default;
+    } finally {
+      (Module.default as any)._load = origModuleLoad;
+    }
+    const { renderDashboardHtml } = await import('../edge/src/dashboard');
+    const dashHtml = renderDashboardHtml();
+    assert.ok(
+      dashHtml.includes('refreshCourseProgressUI()') &&
+        dashHtml.includes('📖 扫描章节进度') &&
+        dashHtml.includes('c.pendingChapterTitles'),
+      '看板在读课程概况页应包含手动触发本机章节进度扫描按钮与待完成章节标题摘要渲染'
+    );
+
+    const noShimRefreshRes = await edgeWorker.fetch(
+      new Request('https://afk.test/api/courses/progress/refresh', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-bearer-token-123456',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ force: true }),
+      }),
+      { AFK_EDGE_BEARER_TOKEN: 'test-bearer-token-123456' } as any,
+      { waitUntil() {} } as any
+    );
+    assert.strictEqual(noShimRefreshRes.status, 400, '未配置 AFK_SHIM_URL 时应返回 400');
+    const noShimRefreshJson: any = await noShimRefreshRes.json();
+    assert.strictEqual(noShimRefreshJson.ok, false);
+    assert.ok(String(noShimRefreshJson.reason || '').includes('未配置 AFK_SHIM_URL'));
+
+    const origFetch = globalThis.fetch;
+    let capturedShimChatUrl = '';
+    let capturedShimChatBody = '';
+    let capturedShimChatSig = '';
+    try {
+      globalThis.fetch = (async (input: any, init?: any) => {
+        const urlStr = typeof input === 'string' ? input : input?.url || String(input);
+        if (urlStr.includes('127.0.0.1:18788/agent-chat')) {
+          capturedShimChatUrl = urlStr;
+          capturedShimChatBody = String(init?.body || '');
+          capturedShimChatSig = String(init?.headers?.['X-AFK-Signature'] || '');
+          return new Response(
+            JSON.stringify({
+              accepted: true,
+              immediateReply: '🔄 已在本机后台启动学习通各课程章节任务点进度扫描…',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      const okRefreshRes = await edgeWorker.fetch(
+        new Request('https://afk.test/api/courses/progress/refresh', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer test-bearer-token-123456',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ force: true }),
+        }),
+        {
+          AFK_EDGE_BEARER_TOKEN: 'test-bearer-token-123456',
+          AFK_SHIM_URL: 'http://127.0.0.1:18788',
+          AFK_SHIM_SECRET: '0123456789abcdef0123456789abcdef',
+        } as any,
+        { waitUntil() {} } as any
+      );
+      assert.strictEqual(okRefreshRes.status, 200, '配置 AFK_SHIM_URL 后刷新章节进度应返回 200');
+      const okRefreshJson: any = await okRefreshRes.json();
+      assert.strictEqual(okRefreshJson.ok, true);
+      assert.strictEqual(okRefreshJson.dispatched, true);
+      assert.strictEqual(capturedShimChatUrl, 'http://127.0.0.1:18788/agent-chat');
+      assert.strictEqual(JSON.parse(capturedShimChatBody).text, '/progress!');
+      assert.ok(capturedShimChatSig.length >= 32, '下发至 Shim /agent-chat 的请求必须携带 HMAC 签名');
+    } finally {
+      globalThis.fetch = origFetch;
     }
 
     // 4. 验证 Cloud Run 容器配置与脚本文件

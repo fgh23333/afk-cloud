@@ -190,6 +190,7 @@ export async function getChaoxingCourses(cookies: ChaoxingCookies): Promise<Cour
 
 /**
  * 访问 stucoursemiddle 获取单门课程的完整加密会话参数 (enc, cpi, openc 与附加 Cookie)
+ * 优先走 mooc1-1.chaoxing.com 并内置瞬时 DNS/网络抖动重试与 studentcourse 直连回退
  */
 export async function fetchCourseSession(
   course: CourseInfo,
@@ -197,28 +198,68 @@ export async function fetchCourseSession(
 ): Promise<CourseSessionInfo> {
   let courseCookie = cookies.cookieStr;
   const middleUrl = `https://mooc1-1.chaoxing.com/mycourse/studentcourse?courseid=${course.courseId}&clazzid=${course.classId}&cpi=${course.cpi || ''}&ut=s`;
-  const stuMiddle = `https://mooc1-2.chaoxing.com/visit/stucoursemiddle?courseid=${course.courseId}&clazzid=${course.classId}&vc=1&cpi=${course.cpi || ''}`;
+  const stuMiddleCandidates = [
+    `https://mooc1-1.chaoxing.com/mooc-ans/visit/stucoursemiddle?courseid=${course.courseId}&clazzid=${course.classId}&vc=1&cpi=${course.cpi || ''}`,
+    `https://mooc1-2.chaoxing.com/visit/stucoursemiddle?courseid=${course.courseId}&clazzid=${course.classId}&vc=1&cpi=${course.cpi || ''}`,
+  ];
 
-  const middleRes = await fetch(stuMiddle, {
-    headers: {
-      Cookie: courseCookie,
-      'User-Agent': BROWSER_UA,
-    },
-    redirect: 'manual',
-  });
+  let nextUrl = middleUrl;
+  for (const stuMiddle of stuMiddleCandidates) {
+    try {
+      const middleRes = await fetch(stuMiddle, {
+        headers: {
+          Cookie: courseCookie,
+          'User-Agent': BROWSER_UA,
+        },
+        redirect: 'manual',
+      });
 
-  for (const c of getSetCookieList(middleRes)) {
-    if (c) courseCookie += '; ' + c.split(';')[0];
+      for (const c of getSetCookieList(middleRes)) {
+        if (c) courseCookie += '; ' + c.split(';')[0];
+      }
+
+      const loc = middleRes.headers.get('location');
+      if (loc) {
+        nextUrl = loc.startsWith('//')
+          ? `https:${loc}`
+          : loc.startsWith('/')
+            ? `https://mooc1-1.chaoxing.com${loc}`
+            : loc;
+      }
+      break;
+    } catch {
+      // 当前节点 DNS/网络异常时平滑降级尝试下一候选或直接回退 middleUrl
+    }
   }
 
-  const nextUrl = middleRes.headers.get('location') || middleUrl;
-  const courseRes = await fetch(nextUrl, {
-    headers: {
-      Cookie: courseCookie,
-      'User-Agent': BROWSER_UA,
-    },
-    redirect: 'manual',
-  });
+  let courseRes: Response | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      courseRes = await fetch(nextUrl, {
+        headers: {
+          Cookie: courseCookie,
+          'User-Agent': BROWSER_UA,
+        },
+        redirect: 'manual',
+      });
+      break;
+    } catch (err) {
+      if (attempt === 2 && nextUrl !== middleUrl) {
+        courseRes = await fetch(middleUrl, {
+          headers: {
+            Cookie: courseCookie,
+            'User-Agent': BROWSER_UA,
+          },
+          redirect: 'manual',
+        });
+      } else if (attempt === 2) {
+        throw err;
+      }
+    }
+  }
+  if (!courseRes) {
+    throw new Error(`无法获取课程会话 (${course.courseId})`);
+  }
 
   for (const c of getSetCookieList(courseRes)) {
     if (c) courseCookie += '; ' + c.split(';')[0];
