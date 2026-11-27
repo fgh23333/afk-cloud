@@ -406,7 +406,7 @@ export class ZhihuishuAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly manifest: PluginManifest = {
     id: 'zhihuishu',
     name: '智慧树 / 知到合规真实播放插件 (Skill)',
-    version: '1.1.0',
+    version: '0.0.1',
     description:
       '适配新版 studyvideoh5.zhihuishu.com/stuStudy，通过真实 Chromium CDP 控制合法倍速播放、进度追踪及验证码/登录/弹题人工接管提醒',
     capabilities: ['courses', 'homework', 'browser-cdp'],

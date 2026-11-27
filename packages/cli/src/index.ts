@@ -49,6 +49,28 @@ function getFlagValue(args: string[], flag: string): string | undefined {
   return undefined;
 }
 
+export function extractCourseFilterArg(args: string[]): string | undefined {
+  const explicit = getFlagValue(args, '--course') || getFlagValue(args, '-c');
+  if (explicit && explicit.trim()) {
+    return explicit.trim();
+  }
+  const valueFlags = new Set(['--course', '-c', '--platform', '--tier', '--id', '--ps']);
+  const positionals: string[] = [];
+  for (let i = 1; i < args.length; i += 1) {
+    const token = args[i];
+    if (valueFlags.has(token)) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      continue;
+    }
+    positionals.push(token);
+  }
+  const combined = positionals.join(' ').trim();
+  return combined || undefined;
+}
+
 async function runStatus(): Promise<void> {
   const chromeExe = detectChromiumExecutable();
   const ptaState = readLocalStorageState('pta');
@@ -94,16 +116,17 @@ async function runStatus(): Promise<void> {
 }
 
 function printCliHelp(): void {
-  console.log(cyan(`\nafk-cloud v1.1.0 — 个人云端自治 Agent CLI`));
+  console.log(cyan(`\nafk-cloud v0.0.1 — 个人云端自治 Agent CLI`));
   console.log(`
 用法: pnpm afk <command> [options]
 
 核心指令:
   status                         环境自检、登录态与 Cloudflare Edge 健康探测
   plugins | skills               查看已注册的平台插件与能力清单
-  scan [--platform chaoxing|pta|all] [--progress]
+  scan [--platform chaoxing|pta|all] [--progress] [--course <关键词>]
                                  扫描在读课程、待办作业或 PTA 活跃题目集
-  progress | chapters            扫描超星全部课程章节任务点进度并同步到看板
+  progress | chapters [课程关键词]
+                                 扫描超星全部（或指定）课程章节任务点进度与直达链接并同步看板
   solve [--platform chaoxing|pta|all] [--auto-submit] [--tier local|cloud-run|gce]
                                  双轨求解待办作业（默认安全草稿暂存）
   pta [scan|solve|watch]         PTA 拼题 A 专项指令（支持 --id <psId> --auto-submit --interval <min>）
@@ -156,7 +179,8 @@ async function main(): Promise<void> {
       if (targetPlatform !== 'pta') {
         await chaoxing.scanPendingHomework();
         if (args.includes('--progress') || args.includes('--chapters')) {
-          await chaoxing.scanAllCourseChapterProgress(true);
+          const courseFilter = getFlagValue(args, '--course') || getFlagValue(args, '-c');
+          await chaoxing.scanAllCourseChapterProgress(true, courseFilter);
         }
       }
       break;
@@ -164,7 +188,8 @@ async function main(): Promise<void> {
 
     case 'progress':
     case 'chapters': {
-      await chaoxing.scanAllCourseChapterProgress(true);
+      const courseFilter = extractCourseFilterArg(args);
+      await chaoxing.scanAllCourseChapterProgress(true, courseFilter);
       break;
     }
 

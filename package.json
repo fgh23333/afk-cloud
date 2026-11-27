@@ -1,6 +1,6 @@
 {
   "name": "afk-cloud",
-  "version": "1.1.0",
+  "version": "0.0.1",
   "license": "MIT",
   "description": "Personal Autonomous Cloud Agent with Chaoxing & PTA Plugins (Edge Cloudflare Workers+D1 + Antigravity CLI + Free-First Cloud Run & Ephemeral GCE Burst)",
   "scripts": {

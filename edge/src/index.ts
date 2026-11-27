@@ -467,7 +467,7 @@ async function handleEdgeFetch(
       const isHealthy = d1Status === 'healthy' || (!env.DB && d1Status === 'unconfigured');
       const healthData = {
         status: isHealthy ? 'healthy' : 'degraded',
-        version: '1.1.0',
+        version: '0.0.1',
         timestamp: nowUtc8(),
         latency_ms: Date.now() - startTime,
         auth_enforced: isAuthEnforced(env),
