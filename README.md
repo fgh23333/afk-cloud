@@ -272,12 +272,36 @@ pnpm shim
 
 ---
 
-## 🗺️ Roadmap / TODO
+## 🗺️ 版本规划 (Roadmap)
 
-- [ ] **智慧树 (`zhihuishu`) 插件生产化**：完善网易易盾验证码检测与 Telegram 人工接管回传闭环，优化无头浏览器内存占用或支持远程轻量浏览器节点。
-- [ ] **超星 `mobilelearn` 代理池与 WebIM 常驻**：支持国内住宅代理按课程/签到路由配置，探索 WebIM 实时长连接捕获以实现秒级签到触发。
-- [ ] **Telegram Inline Keyboard 交互按钮**：为待审批讨论拟稿、安全草稿作业与异常告警增加 Telegram 行内确认按钮（一键发布草稿 / 一键重试 / 一键忽略）。
-- [ ] **容器化多账号发行版**：提供标准 Docker / DevContainer 一键部署镜像，便于社区开发者零门槛私有化托管。
+当前处于 **`v0.0.1` 早期开发与自用阶段（暂无正式版）**，总体演进围绕 **「以 Google AI Pro (`agy`) + 免费云算力为核心的 7×24 Personal Agent 底座」**，教学/评测平台保持轻量可插拔定位：
+
+### `v0.0.1`（当前 · Early Preview / 早期自用版）
+- **Personal Agent 核心底座**：Cloudflare Workers + D1 + Durable Objects 与 GCP Always-Free (`e2-micro`) Shim 双面协同；Zero-Trust Tunnel + HMAC-SHA256 + D1 Nonce 防重放；Telegram `/agent-chat` 自然语言直连本机 `agy` 与 `/todo` 待办管理；5 通道 4 层防重告警；6 标签暗夜毛玻璃看板与 `pnpm preview` 脱敏预览。
+- **本地沙箱与算力分层**：五语言本地隔离沙箱（Java 17 / C++ / C / Python / Node）、`agy` + OpenAI 兼容接口双轨路由、Tier 2/3 Cloud Run Jobs 与 Spot GCE 自毁脚本。
+- **首批附带插件**：`chaoxing`（可用）、`pta`（可用）、`zhihuishu`（TODO 骨架）。
+
+### `v0.0.2`（交互体验与日常稳定性）
+- **Telegram Inline Keyboard 行内交互按钮**：聊天窗口一键批准讨论拟稿、确认作业草稿、重试/忽略异常任务、勾选完成个人待办。
+- **Personal Agent 日常自动化**：支持轻量自定义定时巡检（如 RSS、GitHub Release、指定网页变更跟踪 + `agy` 摘要推送）及基于 D1 的个人碎片笔记/记忆检索。
+- **附带插件打磨**：学习通 `mobilelearn` 可选代理路由配置、PTA `PTASession` 到期提前提醒与更轻量的 Cookie 更新引导。
+
+### `v0.0.3`（多模态与外部工具扩展）
+- **深化 Google AI Pro / Gemini 能力利用**：支持 Telegram 图片、PDF、语音消息多模态解析与入库总结，逐步接入 MCP 外部工具生态（日历、邮件、个人文档工作流）。
+- **插件体系解耦与热插拔**：抽离独立 Plugin SDK 与清单开关，支持用户按需启用/禁用任意附带插件，或编写自己的个人插件。
+- **可观测性增强**：看板补充任务耗时统计、模型调用配额追踪与执行日志筛选检索。
+
+### `v0.1.0`（首个公开 Beta · 低门槛自托管）
+- **容器化与交互式初始化向导**：提供标准 `Dockerfile` / `docker-compose.yml` 与向导式 CLI，一键生成 `.env`、`wrangler.jsonc` 与 Tunnel 配置，大幅降低新用户部署成本。
+- **浏览器类任务闭环**：支持按需拉起轻量远程浏览器节点，`zhihuishu` 遇到易盾滑块验证时通过 Telegram 通知人工接管回传（绝不绕过验证码）。
+- **可选宿主机 WebIM 长连接实验**：降低高频率轮询压力。
+
+### `v0.2.0`（多步骤工作流与多端入口）
+- **声明式个人工作流编排**：支持配置「抓取 → `agy` 处理 / 本地沙箱验证 → 多通道动作」自定义流水线。
+- **多端 Bot 入口与多账号隔离**：新增飞书 / Discord 双向指挥入口，支持多 Profile / 多账号命名空间与权限隔离。
+
+### `v1.0.0`（首个正式稳定版 · GA）
+- **稳定插件 API 契约（SemVer 兼容保障）**、完整的社区自托管手册与插件开发示例，以及长周期运行内存与自动回滚稳定性基线验证。
 
 ---
 
