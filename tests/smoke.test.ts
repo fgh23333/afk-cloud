@@ -645,6 +645,22 @@ async function runAllTests() {
       forceRefresh: true,
       keyword: '线性代数',
     });
+    const { extractCourseFilterArg } = await import('../packages/cli/src/index');
+    assert.strictEqual(
+      extractCourseFilterArg(['progress', '数据结构']),
+      '数据结构',
+      'pnpm afk progress <课程关键词> 应提取位置参数作为课程过滤词'
+    );
+    assert.strictEqual(
+      extractCourseFilterArg(['progress', '--course', '计算机网络']),
+      '计算机网络',
+      'pnpm afk progress --course <课程关键词> 应提取显式 flag 作为课程过滤词'
+    );
+    assert.strictEqual(
+      extractCourseFilterArg(['progress']),
+      undefined,
+      '无过滤词时 extractCourseFilterArg 应返回 undefined'
+    );
     const sampleSummaries = [
       {
         courseId: '267230708',
