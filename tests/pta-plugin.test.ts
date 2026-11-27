@@ -5,21 +5,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
+  buildPintiaAutoFillScript,
   buildPtaSubmissionDetail,
+  detectGuiAvailable,
+  extractPintiaCookiesFromCdp,
+  extractPtaSessionMeta,
   hasPtaAuthCookie,
+  normalizePtaCookieInput,
   normalizePtaProblem,
   parseBlankAnswers,
   parsePtaTaskIdentifiers,
+  parseSetCookieHeaders,
   PtaAdapter,
+  resolvePtaCookieHeader,
   savePtaProblemDrafts,
   scanPtaOverviews,
   stripMarkdownCodeFence,
   submitPtaProblemAnswers,
 } from '../packages/adapters/pta';
+import { writeLocalStorageState, readLocalStorageState } from '../packages/core/browser-profile';
 import { WebBrowserAdapter } from '../packages/adapters/web-agent';
 import { PluginRegistry } from '../packages/core/plugin';
 import { runCodeInLocalSandbox } from '../packages/core/sandbox';
-import { runPtaInspectionCycle } from '../edge/src/pta';
+import {
+  buildPtaSessionStatus,
+  getPtaSessionStatus,
+  runPtaInspectionCycle,
+  saveAndVerifyPtaSession,
+} from '../edge/src/pta';
 import { processPtaTask } from '../packages/shim/src/runner';
 import { runPtaMonitorCycle } from '../packages/shim/src/pta-monitor';
 
@@ -714,10 +727,380 @@ public class Main {
       {} as any
     );
     assert.strictEqual(execLogs.length, 1, '状态未变更的重复 /api/tasks/sync 不得重复刷入 execution_logs');
-    console.log(' ✅ [Test 6/6 PASS] PTA 瞬态重试、单集超时降级与 Edge /api/tasks/sync 日志去重通过');
+    console.log(' ✅ [Test 6/9 PASS] PTA 瞬态重试、单集超时降级与 Edge /api/tasks/sync 日志去重通过');
   }
 
-  console.log('\n🎉 PTA 插件、Java 沙箱与双端监听全部 6 项测试 100% 通过！\n');
+  // Test 7: Rolling Set-Cookie 自动捕获续期、云端优先自愈、与 <12h 即将过期预警
+  {
+    assert.strictEqual(normalizePtaCookieInput('Cookie: "PTASession=abc; JSESSIONID=xyz"'), '"PTASession=abc; JSESSIONID=xyz"');
+    assert.strictEqual(normalizePtaCookieInput('Cookie: PTASession=abc; JSESSIONID=xyz\n'), 'PTASession=abc; JSESSIONID=xyz');
+
+    const nowMs = Date.UTC(2026, 10, 27, 8, 0, 0);
+    const parsedCookies = parseSetCookieHeaders(
+      [
+        'PTASession=rolled_v2; Max-Age=604800; Path=/; Domain=.pintia.cn; HttpOnly; Secure; SameSite=Lax',
+        'OLD_DEL=dead; Max-Age=0; Domain=.pintia.cn',
+        'SESSION_B=val_b; Expires=Wed, 02 Dec 2026 08:00:00 GMT; Domain=.pintia.cn; Path=/',
+      ],
+      nowMs
+    );
+    assert.strictEqual(parsedCookies.length, 2, '应解析 Max-Age 与带逗号的 RFC1123 Expires，且过滤删除类 Cookie');
+    assert.strictEqual(parsedCookies[0].name, 'PTASession');
+    assert.strictEqual(parsedCookies[0].value, 'rolled_v2');
+    assert.ok((parsedCookies[0].expires || 0) >= Math.floor(nowMs / 1000) + 604799);
+    assert.strictEqual(parsedCookies[1].name, 'SESSION_B');
+
+    const tmpProfiles = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-pta-roll-'));
+    const tmpMon = fs.mkdtempSync(path.join(os.tmpdir(), 'afk-pta-mon7-'));
+    const origProfDir = process.env.AFK_BROWSER_PROFILES_DIR;
+    const origEdgeUrl = process.env.AFK_EDGE_WORKER_URL;
+    const origEdgeToken = process.env.AFK_EDGE_BEARER_TOKEN;
+    const origMonState = process.env.AFK_PTA_MONITOR_STATE_FILE;
+    const origPtaEnv = process.env.PTA_SESSION_COOKIE;
+    const origFetch = globalThis.fetch;
+
+    try {
+      process.env.AFK_BROWSER_PROFILES_DIR = tmpProfiles;
+      process.env.AFK_EDGE_WORKER_URL = 'https://edge.test.local';
+      process.env.AFK_EDGE_BEARER_TOKEN = 'test-edge-bearer-token-123456';
+      process.env.AFK_PTA_MONITOR_STATE_FILE = path.join(tmpMon, 'state.json');
+      delete process.env.PTA_SESSION_COOKIE;
+
+      writeLocalStorageState('pta', {
+        cookies: [{ name: 'PTASession', value: 'old_session_v1', domain: '.pintia.cn', path: '/', httpOnly: true }],
+        origins: [],
+      });
+
+      const syncedBodies: any[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(input);
+        if (u.includes('pintia.cn/api/problem-sets?')) {
+          return new Response(JSON.stringify({ total: 0, problemSets: [] }), {
+            status: 200,
+            headers: {
+              'set-cookie':
+                'PTASession=rolled_session_v2; Max-Age=604800; Path=/; Domain=.pintia.cn; HttpOnly; Secure',
+            },
+          });
+        }
+        if (u.endsWith('/api/pta/session') && init?.method === 'POST') {
+          syncedBodies.push(JSON.parse(String(init.body || '{}')));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (u.includes('/api/session?platform=web-profile')) {
+          return new Response(JSON.stringify({ session: null }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      await scanPtaOverviews('PTASession=old_session_v1');
+      const localAfterRoll = readLocalStorageState('pta');
+      assert.strictEqual(
+        localAfterRoll?.cookies.find((c) => c.name === 'PTASession')?.value,
+        'rolled_session_v2',
+        'ptaFetchJson 收到 Set-Cookie 后应自动更新本地持久化 PTASession'
+      );
+      assert.ok(localAfterRoll?.lastRolledAt, '滚动续期后应记录 lastRolledAt');
+      assert.strictEqual(syncedBodies.length, 1, '滚动续期后应同步更新云端 /api/pta/session');
+      assert.strictEqual(syncedBodies[0].source, 'rolling-refresh');
+
+      // 测试 preferCloud 当云端更新时优先取云端，且 401 时 Monitor 自动从云端拉取新会话自愈 + <12h 预警
+      writeLocalStorageState('pta', {
+        cookies: [
+          {
+            name: 'PTASession',
+            value: 'stale_local_token',
+            domain: '.pintia.cn',
+            path: '/',
+            expires: Math.floor(Date.now() / 1000) + 6 * 3600,
+          },
+        ],
+        origins: [],
+      });
+      // 手工写回旧的时间戳以模拟云端更新更晚
+      const profFile = path.join(tmpProfiles, 'pta', 'storage-state.json');
+      const rawJson = JSON.parse(fs.readFileSync(profFile, 'utf8'));
+      rawJson.updatedAt = '2026-01-01T00:00:00Z';
+      fs.writeFileSync(profFile, JSON.stringify(rawJson, null, 2), 'utf8');
+
+      const soonExpiresSec = Math.floor(Date.now() / 1000) + 5 * 3600;
+      const monNotifs: Array<{ title: string; content: string }> = [];
+      let authMode: 'stale_fail_then_cloud_ok' = 'stale_fail_then_cloud_ok';
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(input);
+        if (u.includes('/api/session?platform=web-profile')) {
+          return new Response(
+            JSON.stringify({
+              session: {
+                platform: 'pta',
+                updatedAt: '2026-11-27T08:00:00Z',
+                cookies: [
+                  {
+                    name: 'PTASession',
+                    value: 'cloud_fresh_token',
+                    domain: '.pintia.cn',
+                    path: '/',
+                    expires: soonExpiresSec,
+                  },
+                ],
+                origins: [],
+              },
+            }),
+            { status: 200 }
+          );
+        }
+        if (u.includes('pintia.cn/api/problem-sets?')) {
+          const cookieHdr = String((init?.headers as any)?.Cookie || '');
+          if (authMode === 'stale_fail_then_cloud_ok' && !cookieHdr.includes('cloud_fresh_token')) {
+            return new Response(JSON.stringify({ error: { code: 'USER_NOT_LOGGED_IN' } }), { status: 401 });
+          }
+          return new Response(JSON.stringify({ total: 0, problemSets: [] }), { status: 200 });
+        }
+        if (u.endsWith('/api/tasks')) return new Response(JSON.stringify({ tasks: [] }), { status: 200 });
+        if (u.endsWith('/api/notify')) {
+          const b = JSON.parse(String(init?.body || '{}'));
+          monNotifs.push({ title: b.title, content: b.content });
+          return new Response(JSON.stringify({ success: true }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      const preferred = await resolvePtaCookieHeader(undefined, { preferCloud: true });
+      assert.ok(preferred.includes('cloud_fresh_token'), 'preferCloud 应优先采用更新的云端 PTASession');
+
+      // 再模拟：即使本地被写回过期值，runPtaMonitorCycle 遇到 401 也能自愈拉云端新值
+      fs.writeFileSync(
+        profFile,
+        JSON.stringify({
+          platform: 'pta',
+          updatedAt: '2099-01-01T00:00:00Z',
+          cookies: [{ name: 'PTASession', value: 'local_bad_token', domain: '.pintia.cn', path: '/' }],
+          origins: [],
+        }),
+        'utf8'
+      );
+      const healRes = await runPtaMonitorCycle({ force: true });
+      assert.strictEqual(healRes.ok, true, '本机旧态 401 时应从云端自愈恢复扫描');
+      assert.strictEqual(monNotifs.length, 1, '剩余 <12h 应发送 1 次即将过期温和提醒');
+      assert.ok(monNotifs[0].title.includes('即将过期'));
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origProfDir === undefined) delete process.env.AFK_BROWSER_PROFILES_DIR;
+      else process.env.AFK_BROWSER_PROFILES_DIR = origProfDir;
+      if (origEdgeUrl === undefined) delete process.env.AFK_EDGE_WORKER_URL;
+      else process.env.AFK_EDGE_WORKER_URL = origEdgeUrl;
+      if (origEdgeToken === undefined) delete process.env.AFK_EDGE_BEARER_TOKEN;
+      else process.env.AFK_EDGE_BEARER_TOKEN = origEdgeToken;
+      if (origMonState === undefined) delete process.env.AFK_PTA_MONITOR_STATE_FILE;
+      else process.env.AFK_PTA_MONITOR_STATE_FILE = origMonState;
+      if (origPtaEnv === undefined) delete process.env.PTA_SESSION_COOKIE;
+      else process.env.PTA_SESSION_COOKIE = origPtaEnv;
+      fs.rmSync(tmpProfiles, { recursive: true, force: true });
+      fs.rmSync(tmpMon, { recursive: true, force: true });
+    }
+    console.log(' ✅ [Test 7/9 PASS] Set-Cookie 滚动续期、云端自愈与 <12h 提前预警通过');
+  }
+
+  // Test 8: Edge /api/pta/session 与 /api/pta/session/status 全链路鉴权、Fail-Closed 拦截与脱敏校验
+  {
+    const sessionsStore = new Map<string, { cookie_json: string; expires_at: number }>();
+    const edgeExecLogs: Array<{ eventType: string; summary: string }> = [];
+    const edgeNotifs: Array<{ title: string; content: string }> = [];
+
+    const mockEdgeDb: any = {
+      prepare(sql: string) {
+        let args: any[] = [];
+        return {
+          bind(...p: any[]) {
+            args = p;
+            return this;
+          },
+          first: async () => {
+            if (sql.includes('FROM sessions')) {
+              return sessionsStore.get(`${args[0]}::${args[1]}`) || null;
+            }
+            return null;
+          },
+          all: async () => ({ results: [] }),
+          run: async () => {
+            if (sql.includes('INSERT INTO sessions')) {
+              sessionsStore.set(`${args[0]}::${args[1]}`, {
+                cookie_json: String(args[2]),
+                expires_at: Number(args[3]),
+              });
+            } else if (sql.includes('INSERT INTO execution_logs')) {
+              edgeExecLogs.push({ eventType: String(args[0]), summary: String(args[2]) });
+            }
+            return { meta: { changes: 1 } };
+          },
+        };
+      },
+    };
+
+    const edgeEnv: any = {
+      DB: mockEdgeDb,
+      AFK_EDGE_BEARER_TOKEN: 'super-secret-edge-token-123456',
+      WEBHOOK_URL: 'https://notify.test.local/hook',
+    };
+
+    const origFetch = globalThis.fetch;
+    let ptaVerifyMode: 'live' | 'expired' | 'waf' = 'live';
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(input);
+        if (u === 'https://notify.test.local/hook') {
+          const body = JSON.parse(String(init?.body || '{}'));
+          const text = String(body?.text?.content || '');
+          const m = text.match(/^【([^】]+)】\n([\s\S]*)$/);
+          edgeNotifs.push({ title: m?.[1] || text, content: m?.[2] || '' });
+          return new Response('ok', { status: 200 });
+        }
+        if (u.includes('passport.pintia.cn/api/u/current')) {
+          if (ptaVerifyMode === 'expired') {
+            return new Response(JSON.stringify({ error: { code: 'USER_NOT_LOGGED_IN' } }), { status: 401 });
+          }
+          if (ptaVerifyMode === 'waf') {
+            return new Response('Just a moment', { status: 403 });
+          }
+          return new Response(JSON.stringify({ user: { id: 'u1' } }), {
+            status: 200,
+            headers: {
+              'set-cookie': 'PTASession=super_secret_cookie_val_999; Max-Age=21600; Domain=.pintia.cn; Path=/; HttpOnly',
+            },
+          });
+        }
+        if (u.includes('pintia.cn/api/problem-sets?')) {
+          if (ptaVerifyMode === 'waf') return new Response('Forbidden', { status: 403 });
+          return new Response(JSON.stringify({ total: 0, problemSets: [] }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      // 1. 缺少 PTASession 时 Fail-Closed 拒绝写入
+      const missingRes = await saveAndVerifyPtaSession(edgeEnv, { cookie: 'Cookie: _ga=111; _bl_uid=222' });
+      assert.strictEqual(missingRes.ok, false);
+      assert.strictEqual(missingRes.statusCode, 400);
+      assert.strictEqual(sessionsStore.has('web-profile:pta::default'), false);
+
+      // 2. 活体 200 验证成功，剥离 Cookie: 前缀、写入 D1，且日志/状态绝不泄露 PTASession 明文
+      const liveRes = await saveAndVerifyPtaSession(edgeEnv, {
+        cookie: 'Cookie: PTASession=super_secret_cookie_val_999; JSESSIONID=js1',
+        source: 'web-dashboard',
+      });
+      assert.strictEqual(liveRes.ok, true);
+      assert.strictEqual(liveRes.verified, 'live');
+      assert.strictEqual(edgeExecLogs.some((l) => l.summary.includes('super_secret_cookie_val_999')), false);
+
+      // 3. 随后提交无效 Session (401) 必须被拒绝且不得覆盖已有 D1 会话
+      ptaVerifyMode = 'expired';
+      const badRes = await saveAndVerifyPtaSession(edgeEnv, { cookie: 'PTASession=dead_token_000' });
+      assert.strictEqual(badRes.ok, false);
+      assert.strictEqual(badRes.statusCode, 400);
+      assert.ok(sessionsStore.get('web-profile:pta::default')?.cookie_json.includes('super_secret_cookie_val_999'));
+
+      // 4. 遭遇 Edge 403 WAF 时降级为 deferred-to-shim 允许落盘，并脱敏返回状态
+      ptaVerifyMode = 'waf';
+      const wafRes = await saveAndVerifyPtaSession(edgeEnv, {
+        cookies: [
+          {
+            name: 'PTASession',
+            value: 'waf_deferred_token_777',
+            domain: '.pintia.cn',
+            path: '/',
+            expires: Math.floor(Date.now() / 1000) + 5 * 3600,
+          },
+        ],
+        source: 'browser-extension',
+        triggerScan: false,
+      });
+      assert.strictEqual(wafRes.ok, true);
+      assert.strictEqual(wafRes.verified, 'deferred-to-shim');
+
+      const st = await getPtaSessionStatus(edgeEnv);
+      assert.strictEqual(st.hasPtaSession, true);
+      assert.strictEqual(st.isExpiringSoon, true, '剩余 5h 应被标记为即将过期');
+      assert.strictEqual(JSON.stringify(st).includes('waf_deferred_token_777'), false, '状态接口绝不得泄露 cookie 值');
+
+      // 5. Edge 巡检命中剩余 <12h 应发送 1 次温和预警
+      ptaVerifyMode = 'live';
+      edgeNotifs.length = 0;
+      await runPtaInspectionCycle(edgeEnv, { nowMs: Date.now() });
+      assert.ok(edgeNotifs.some((n) => n.title.includes('即将过期')), 'Edge 巡检发现会话剩余 <12h 时应推送预警');
+
+      // HTTP router 鉴权与 Fail-Closed 验证（保持变量动态路径以免 root tsconfig 静态拉入 Workers 类型）
+      const edgeRouterPath = '../edge/src/index';
+      const { default: edgeEntry } = await import(edgeRouterPath);
+      const unauthRes = await edgeEntry.fetch(
+        new Request('https://edge.test/api/pta/session/status', { method: 'GET' }),
+        edgeEnv,
+        {} as any
+      );
+      assert.strictEqual(unauthRes.status, 401, '未鉴权访问 /api/pta/session/status 必须 Fail-Closed 返回 401');
+
+      const authStatusRes = await edgeEntry.fetch(
+        new Request('https://edge.test/api/pta/session/status', {
+          method: 'GET',
+          headers: { Authorization: 'Bearer super-secret-edge-token-123456' },
+        }),
+        edgeEnv,
+        {} as any
+      );
+      assert.strictEqual(authStatusRes.status, 200);
+      const authStatusJson: any = await authStatusRes.json();
+      assert.strictEqual(authStatusJson.ok, true);
+      assert.strictEqual(authStatusJson.status.hasPtaSession, true);
+      assert.strictEqual(JSON.stringify(authStatusJson).includes('waf_deferred_token_777'), false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    console.log(' ✅ [Test 8/9 PASS] Edge /api/pta/session Fail-Closed 校验、活体探测、脱敏状态与 <12h 预警通过');
+  }
+
+  // Test 9: 浏览器伴侣扩展契约、语法自检与合规红线（零 CAPTCHA 自动化）检验
+  {
+    const extDir = path.resolve(process.cwd(), 'extensions', 'pta-session-sync');
+    const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
+    assert.strictEqual(manifest.manifest_version, 3);
+    assert.strictEqual(manifest.version, '0.0.1');
+    assert.deepStrictEqual(manifest.host_permissions, ['https://pintia.cn/*', 'https://passport.pintia.cn/*']);
+    assert.ok(manifest.permissions.includes('cookies') && manifest.permissions.includes('storage'));
+
+    for (const jsFile of ['background.js', 'content.js', 'popup.js']) {
+      execFileSync(process.execPath, ['--check', path.join(extDir, jsFile)], { stdio: 'pipe' });
+      const src = fs.readFileSync(path.join(extDir, jsFile), 'utf8');
+      assert.strictEqual(/tcaptcha|tc-drag|turing\.captcha/i.test(src), false, `${jsFile} 严禁包含任何滑块验证码交互逻辑`);
+    }
+
+    assert.strictEqual(detectGuiAvailable({}, 'linux'), false);
+    assert.strictEqual(detectGuiAvailable({ DISPLAY: ':0' }, 'linux'), true);
+    assert.strictEqual(detectGuiAvailable({}, 'win32'), true);
+
+    const mapped = extractPintiaCookiesFromCdp([
+      { name: 'PTASession', value: 'cdp_val', domain: '.pintia.cn', path: '/', expires: 1900000000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: '_ga', value: 'ignored', domain: '.google.com', path: '/' },
+    ]);
+    assert.strictEqual(mapped.length, 1);
+    assert.strictEqual(mapped[0].httpOnly, true);
+
+    const script = buildPintiaAutoFillScript({ email: 'u@example.com', autoRememberMe: true });
+    assert.ok(script.includes('remember'));
+    assert.strictEqual(/tcaptcha|tc-drag|turing\.captcha/i.test(script), false);
+
+    // 验证 buildPtaSessionStatus 正确标注 rememberMe 长效会话
+    const longStatus = buildPtaSessionStatus(
+      {
+        platform: 'pta',
+        source: 'browser-extension',
+        cookies: [{ name: 'PTASession', value: 'long_v', domain: '.pintia.cn', path: '/', expires: Math.floor(Date.now() / 1000) + 14 * 86400 }],
+      },
+      null
+    );
+    assert.strictEqual(longStatus.rememberMeLikely, true);
+    assert.strictEqual(longStatus.isExpiringSoon, false);
+    console.log(' ✅ [Test 9/9 PASS] 浏览器伴侣扩展契约、CDP Cookie 过滤与零验证码破解红线检验通过');
+  }
+
+  console.log('\n🎉 PTA 插件、多路径免密登录、Java 沙箱与双端监听全部 9 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {

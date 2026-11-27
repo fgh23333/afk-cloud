@@ -27,6 +27,7 @@ import {
 } from './protocol';
 
 export * from './protocol';
+export * from './login';
 
 export interface PtaSolveProblemSetOutcome {
   problemSetId: string;

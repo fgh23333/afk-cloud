@@ -1,5 +1,6 @@
 import { CourseChapterProgressSnapshot, EdgeEnv, getCourseChapterProgressMap, listDiscussions, nowUtc8 } from './store';
 import { extractInfoFromContent, parseTimeToMs } from './chaoxing';
+import { getPtaSessionStatus, PtaSessionStatusSummary } from './pta';
 
 export interface DashboardData {
   time: string;
@@ -124,6 +125,7 @@ export interface DashboardData {
     summary: string;
     created_at: string;
   }>;
+  ptaSession?: PtaSessionStatusSummary;
 }
 
 /**
@@ -723,6 +725,7 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       courses: Array.from(courseMap.values()),
       discussions,
       logs,
+      ptaSession: await getPtaSessionStatus(env).catch(() => undefined),
     };
   } catch {
     return empty;
@@ -802,6 +805,15 @@ export function renderDashboardHtml(): string {
 
   <!-- 主内容区 -->
   <main class="flex-1 max-w-7xl w-full mx-auto p-4 lg:p-6 space-y-6">
+
+    <!-- PTA 会话即将过期 / 已失效快捷提示条 -->
+    <div id="ptaSessionBanner" class="hidden rounded-2xl p-3.5 border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div id="ptaSessionBannerText" class="leading-relaxed"></div>
+      <div class="flex items-center gap-2 shrink-0">
+        <a href="https://pintia.cn/auth/login" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium border border-slate-700 transition">前往 PTA 登录 ↗</a>
+        <button onclick="switchTab('settings')" class="px-3 py-1.5 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-medium transition">立即续期 / 更新会话</button>
+      </div>
+    </div>
 
     <!-- 顶栏概览指标卡片 -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
@@ -999,8 +1011,48 @@ export function renderDashboardHtml(): string {
         </div>
       </section>
 
-      <!-- Tab 5: 通知渠道配置与架构规范 -->
+      <!-- Tab 5: PTA 会话保活、通知渠道与架构规范 -->
       <section id="tab-settings" class="space-y-4 hidden max-w-3xl">
+        <div class="glass-card rounded-2xl p-5 space-y-4 text-xs">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+                <span>💻 PTA 拼题 A 会话与长效保活</span>
+                <span id="ptaStatusBadge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">检测中...</span>
+              </h3>
+              <p class="text-slate-400 mt-1" id="ptaStatusMeta">正在读取 Cloudflare D1 中的 PTA 会话状态...</p>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <a href="https://pintia.cn/auth/login" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">打开 PTA 登录页 ↗</a>
+              <button onclick="triggerPtaScanUI()" id="ptaScanBtn" class="px-2.5 py-1.5 rounded-lg bg-sky-900/70 hover:bg-sky-800 text-sky-200 border border-sky-700/70 transition">🔄 立即巡检 PTA</button>
+            </div>
+          </div>
+
+          <div class="grid sm:grid-cols-3 gap-2.5">
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div class="font-medium text-emerald-300">1. 浏览器伴侣扩展（最无感）</div>
+              <p class="text-slate-400 mt-1 leading-relaxed">加载 <span class="font-mono text-slate-200">extensions/pta-session-sync/</span>。登录自动勾选「记住我」，滑过验证码即静默同步并捕获后续续期 Cookie。</p>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div class="font-medium text-sky-300">2. 本地终端一键登录</div>
+              <p class="text-slate-400 mt-1 leading-relaxed">桌面环境执行 <span class="font-mono text-slate-200">pnpm afk pta login</span>：自动预填账密+勾选「记住我」，滑完验证码自动同步 D1 并关闭窗口。</p>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div class="font-medium text-amber-300">3. 看板零 CLI 应急录入</div>
+              <p class="text-slate-400 mt-1 leading-relaxed">手机或任意终端可在此直接粘贴请求头 Cookie（支持自动剔除 <span class="font-mono text-slate-200">Cookie:</span> 前缀），提交前自动活体校验。</p>
+            </div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
+            <label for="ptaCookieInput" class="block font-medium text-slate-200">粘贴完整 PTA Cookie（必须包含 <span class="font-mono text-amber-300">HttpOnly PTASession</span>，支持直接粘贴整行 Cookie 请求头）</label>
+            <textarea id="ptaCookieInput" rows="2" placeholder="PTASession=...; JSESSIONID=..." class="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-xs font-mono text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500"></textarea>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <span class="text-[11px] text-slate-500">提示：PTASession 为 HttpOnly，浏览器 Console 的 document.cookie 无法读取，请使用扩展同步或从 DevTools Network/Application 获取。</span>
+              <button onclick="savePtaCookieUI()" id="savePtaCookieBtn" class="px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium transition shrink-0">校验并同步 PTA 会话</button>
+            </div>
+          </div>
+        </div>
+
         <div class="glass-card rounded-2xl p-5 space-y-4 text-xs">
           <div>
             <h3 class="text-sm font-semibold text-white">推送通道与 Cloudflare Agents 架构契约</h3>
@@ -1250,6 +1302,7 @@ export function renderDashboardHtml(): string {
       renderExams();
       renderSignins();
       renderCourses();
+      renderPtaSessionCard();
     }
 
     function renderHomework() {
@@ -2058,6 +2111,112 @@ export function renderDashboardHtml(): string {
         if (btn) {
           btn.disabled = false;
           btn.innerText = '📖 扫描章节进度';
+        }
+      }
+    }
+
+    function renderPtaSessionCard() {
+      const p = state && state.ptaSession ? state.ptaSession : null;
+      const badge = document.getElementById('ptaStatusBadge');
+      const metaEl = document.getElementById('ptaStatusMeta');
+      const banner = document.getElementById('ptaSessionBanner');
+      const bannerText = document.getElementById('ptaSessionBannerText');
+      if (!badge || !metaEl) return;
+
+      if (!p || !p.hasPtaSession) {
+        badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700';
+        badge.innerText = '⚪ 尚未配置';
+        metaEl.innerText = '尚未接入 PTA 会话，可通过下方任意一种方式同步 PTASession 后开启 7×24 自动巡检与保活。';
+        if (banner) banner.classList.add('hidden');
+        return;
+      }
+
+      if (p.isExpired) {
+        badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40';
+        badge.innerText = '🔴 登录态已失效';
+      } else if (p.isExpiringSoon) {
+        badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40';
+        badge.innerText = '⏳ 即将到期 (剩 ' + (p.remainingHours != null ? p.remainingHours + 'h' : '<12h') + ')';
+      } else {
+        badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+        badge.innerText = '✅ 在线守护中' + (p.rememberMeLikely ? ' · 记住我长效' : '');
+      }
+
+      const parts = [];
+      if (p.source) parts.push('来源: ' + p.source);
+      if (p.remainingHours != null) parts.push('预计剩余: ' + p.remainingHours + ' 小时' + (p.sessionExpiresAt ? ' (' + p.sessionExpiresAt + ')' : ''));
+      if (p.lastRolledAt) parts.push('最近滚动续期: ' + p.lastRolledAt);
+      if (p.lastCheckedAt) parts.push('最近巡检: ' + p.lastCheckedAt);
+      if (p.lastError) parts.push('状态提示: ' + p.lastError);
+      metaEl.innerText = parts.join(' · ') || '已同步 PTASession';
+
+      if (banner && bannerText) {
+        if (p.isExpired) {
+          banner.className = 'rounded-2xl p-3.5 border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-rose-950/50 border-rose-500/40 text-rose-200';
+          bannerText.innerText = '⚠️ PTA (pintia.cn) 登录态已过期，7×24 新题监听已暂停。请打开已装扩展的浏览器登录 PTA，或点击右侧前往设置页更新会话。';
+        } else if (p.isExpiringSoon) {
+          banner.className = 'rounded-2xl p-3.5 border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-amber-950/50 border-amber-500/40 text-amber-200';
+          bannerText.innerText = '⏳ PTA 登录态预计还剩 ' + (p.remainingHours != null ? p.remainingHours + ' 小时' : '不足 12 小时') + '过期，建议提前登录一次 PTA 完成无缝续期。';
+        } else {
+          banner.classList.add('hidden');
+        }
+      }
+    }
+
+    async function savePtaCookieUI() {
+      const input = document.getElementById('ptaCookieInput');
+      const btn = document.getElementById('savePtaCookieBtn');
+      const rawCookie = input ? input.value.trim() : '';
+      if (!rawCookie) {
+        showToast('请先粘贴包含 PTASession 的完整 Cookie', false);
+        return;
+      }
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '校验并同步中...';
+      }
+      try {
+        const res = await fetch('/api/pta/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookie: rawCookie, source: 'web-dashboard', verify: true, triggerScan: true })
+        });
+        const json = await res.json();
+        if (res.ok && json.ok) {
+          if (input) input.value = '';
+          const scanMsg = json.scanResult && json.scanResult.msg ? ' · ' + json.scanResult.msg : '';
+          showToast('PTA 会话已同步 (' + (json.verified === 'live' ? '活体校验通过' : '已交由 Shim 验证') + ')' + scanMsg, true);
+          await refreshData();
+        } else {
+          showToast(json.error || 'PTA 会话更新失败', false);
+        }
+      } catch (e) {
+        showToast('PTA 会话保存请求异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '校验并同步 PTA 会话';
+        }
+      }
+    }
+
+    async function triggerPtaScanUI() {
+      const btn = document.getElementById('ptaScanBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '巡检中...';
+      }
+      try {
+        const res = await fetch('/api/pta/scan', { method: 'POST' });
+        const json = await res.json();
+        showToast(json.msg || 'PTA 巡检完成', Boolean(res.ok && json.success));
+        await refreshData();
+      } catch (e) {
+        showToast('PTA 巡检请求异常', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🔄 立即巡检 PTA';
         }
       }
     }

@@ -129,7 +129,7 @@ function printCliHelp(): void {
                                  扫描超星全部（或指定）课程章节任务点进度与直达链接并同步看板
   solve [--platform chaoxing|pta|all] [--auto-submit] [--tier local|cloud-run|gce]
                                  双轨求解待办作业（默认安全草稿暂存）
-  pta [scan|solve|watch]         PTA 拼题 A 专项指令（支持 --id <psId> --auto-submit --interval <min>）
+  pta [login|scan|solve|watch]   PTA 拼题 A 登录（自动勾选记住我）与巡检求解（支持 --id <psId> --auto-submit）
   discuss [--auto-submit]        超星讨论区抓帖、课件 RAG 拟稿与审批/发布
   materials | download           批量下载超星课程资料构建 RAG 上下文
   signin                         执行超星活动签到巡检
@@ -230,6 +230,23 @@ async function main(): Promise<void> {
 
     case 'pta': {
       const subCmd = (args[1] || 'scan').toLowerCase();
+      if (subCmd === 'login' || subCmd === 'auth') {
+        const { runInteractivePtaLogin } = await import('../../adapters/pta/login');
+        const email = getFlagValue(args, '--email') || process.env.PTA_EMAIL;
+        const password = getFlagValue(args, '--password') || process.env.PTA_PASSWORD;
+        const timeoutStr = getFlagValue(args, '--timeout');
+        const portStr = getFlagValue(args, '--port');
+        const loginRes = await runInteractivePtaLogin({
+          email,
+          password,
+          timeoutSec: timeoutStr ? parseInt(timeoutStr, 10) : undefined,
+          port: portStr ? parseInt(portStr, 10) : undefined,
+          autoScan: !args.includes('--no-scan'),
+        });
+        console.log(green(`🎉 ${loginRes.msg} (${loginRes.cloudSyncMsg})`));
+        break;
+      }
+
       const psId = getFlagValue(args, '--id') || getFlagValue(args, '--ps');
       const flashModel = getFlagValue(args, '--flash-model');
       const proModel = getFlagValue(args, '--pro-model');

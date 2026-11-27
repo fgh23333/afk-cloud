@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>afk-cloud PTA 会话伴侣</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 340px;
+      padding: 14px;
+      background: #020617;
+      color: #e2e8f0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .card {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .title { font-size: 14px; font-weight: 700; color: #f8fafc; }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #cbd5e1;
+    }
+    .badge.ok { background: rgba(22,163,74,0.2); border-color: rgba(34,197,94,0.45); color: #86efac; }
+    .badge.warn { background: rgba(245,158,11,0.2); border-color: rgba(245,158,11,0.45); color: #fcd34d; }
+    .badge.err { background: rgba(239,68,68,0.2); border-color: rgba(239,68,68,0.45); color: #fca5a5; }
+    label { display: block; color: #94a3b8; margin-bottom: 4px; font-size: 11px; }
+    input[type="text"], input[type="url"], input[type="password"] {
+      width: 100%;
+      padding: 7px 9px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #020617;
+      color: #f1f5f9;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 6px 0;
+      color: #cbd5e1;
+      cursor: pointer;
+    }
+    .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+    button, a.btn {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.primary { background: #16a34a; border-color: #22c55e; color: #fff; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .muted { color: #94a3b8; font-size: 11px; }
+    .msg { margin-top: 6px; font-size: 11px; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">🌿 afk-cloud PTA 伴侣</div>
+    <span id="statusBadge" class="badge">加载中...</span>
+  </div>
+
+  <div class="card">
+    <div id="sessionSummary" class="muted">正在检测当前浏览器中的 pintia.cn 会话...</div>
+    <div id="syncSummary" class="msg muted"></div>
+    <div class="btn-row">
+      <button id="syncBtn" class="primary" type="button">立即同步 PTA 会话</button>
+      <a class="btn" href="https://pintia.cn/auth/login" target="_blank" rel="noopener noreferrer">打开 PTA 登录 ↗</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="edgeUrl">Edge Worker 地址</label>
+    <input id="edgeUrl" type="url" placeholder="https://afk-cloud-edge.your-subdomain.workers.dev" />
+
+    <label for="bearerToken">Edge Bearer Token</label>
+    <input id="bearerToken" type="password" placeholder="AFK_EDGE_BEARER_TOKEN" />
+
+    <label class="check-row">
+      <input id="autoRememberMe" type="checkbox" checked />
+      <span>PTA 登录页自动勾选「记住我」</span>
+    </label>
+
+    <label class="check-row">
+      <input id="autoFillEnabled" type="checkbox" />
+      <span>本地自动预填 PTA 账号密码（仅存在本机扩展）</span>
+    </label>
+
+    <div id="prefillBox" style="display:none; margin-top:6px;">
+      <label for="ptaEmail">PTA 登录邮箱 / 手机号</label>
+      <input id="ptaEmail" type="text" placeholder="可选，仅用于本地预填" />
+
+      <label for="ptaPassword">PTA 登录密码（留空则保持已存密码）</label>
+      <input id="ptaPassword" type="password" placeholder="可选，绝不上传至 Edge" />
+    </div>
+
+    <div class="btn-row">
+      <button id="saveBtn" class="primary" type="button">保存配置并授权同步</button>
+    </div>
+    <div class="muted" style="margin-top:6px;">
+      严格遵循合规边界：从不自动拖拽或破解腾讯滑块验证码，仅在您手动完成登录后同步 HttpOnly PTASession。
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
