@@ -13,12 +13,44 @@ export interface PtaWatchState {
   lastCheckedAt?: string;
   lastCheckMs?: number;
   expiredNotifiedAtMs?: number;
+  expiringSoonNotifiedAtMs?: number;
+  lastKeepAliveMs?: number;
+  lastRolledAt?: string;
   blockedUntilMs?: number;
   blockedNotifiedAtMs?: number;
   totalSets?: number;
   activeCount?: number;
   pendingCount?: number;
   lastError?: string;
+}
+
+export interface EdgeCookieRecord {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: string;
+}
+
+export interface PtaSessionStatusSummary {
+  configured: boolean;
+  hasPtaSession: boolean;
+  rememberMeLikely: boolean;
+  source?: string;
+  updatedAt?: string;
+  sessionExpiresAt?: string;
+  sessionExpiresAtMs?: number | null;
+  remainingHours?: number | null;
+  isExpired: boolean;
+  isExpiringSoon: boolean;
+  lastCheckedAt?: string;
+  lastRolledAt?: string;
+  lastError?: string;
+  activeCount?: number;
+  pendingCount?: number;
 }
 
 export interface PtaEdgeInspectionSummary {
@@ -36,13 +68,128 @@ export interface PtaEdgeInspectionSummary {
 }
 
 const PTA_ORIGIN = 'https://pintia.cn';
+const PTA_PASSPORT_ORIGIN = 'https://passport.pintia.cn';
 const PTA_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 const ALERT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const EXPIRING_SOON_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const KEEPALIVE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+export function normalizePtaCookieString(raw: string): string {
+  let cleaned = String(raw || '').trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned.replace(/^cookie:\s*/i, '').replace(/[\r\n]+/g, ' ').trim();
+}
+
+function splitCombinedSetCookieHeader(rawHeader: string): string[] {
+  if (!rawHeader) return [];
+  const parts: string[] = [];
+  let start = 0;
+  let inExpires = false;
+  for (let i = 0; i < rawHeader.length; i++) {
+    if (!inExpires && rawHeader.slice(i, i + 8).toLowerCase() === 'expires=') {
+      inExpires = true;
+      continue;
+    }
+    if (inExpires && rawHeader[i] === ';') {
+      inExpires = false;
+      continue;
+    }
+    if (!inExpires && rawHeader[i] === ',') {
+      const candidate = rawHeader.slice(start, i).trim();
+      const rest = rawHeader.slice(i + 1).trim();
+      if (candidate && /^[^=;\s]+=/.test(rest)) {
+        parts.push(candidate);
+        start = i + 1;
+      }
+    }
+  }
+  const tail = rawHeader.slice(start).trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
+export function parseEdgeSetCookies(res: Response, nowMs = Date.now()): EdgeCookieRecord[] {
+  const hdrs: any = res.headers;
+  let rawList: string[] = [];
+  if (hdrs && typeof hdrs.getSetCookie === 'function') {
+    const arr = hdrs.getSetCookie();
+    if (Array.isArray(arr) && arr.length > 0) rawList = arr.filter(Boolean);
+  }
+  if (rawList.length === 0) {
+    const single = res.headers.get('set-cookie');
+    if (single) rawList = splitCombinedSetCookieHeader(single);
+  }
+
+  const out: EdgeCookieRecord[] = [];
+  for (const raw of rawList) {
+    const segments = String(raw || '')
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (segments.length === 0) continue;
+    const eq = segments[0].indexOf('=');
+    if (eq <= 0) continue;
+    const name = segments[0].slice(0, eq).trim();
+    const value = segments[0].slice(eq + 1).trim();
+    if (!name || !value) continue;
+
+    let domain = '.pintia.cn';
+    let path = '/';
+    let expires: number | undefined;
+    let httpOnly = false;
+    let secure = false;
+    let sameSite: string | undefined;
+    let deleted = false;
+    let hasMaxAge = false;
+
+    for (let i = 1; i < segments.length; i++) {
+      const seg = segments[i];
+      const attrEq = seg.indexOf('=');
+      const attrName = (attrEq >= 0 ? seg.slice(0, attrEq) : seg).trim().toLowerCase();
+      const attrVal = attrEq >= 0 ? seg.slice(attrEq + 1).trim() : '';
+
+      if (attrName === 'domain' && attrVal) domain = attrVal;
+      else if (attrName === 'path' && attrVal) path = attrVal;
+      else if (attrName === 'httponly') httpOnly = true;
+      else if (attrName === 'secure') secure = true;
+      else if (attrName === 'samesite' && attrVal) sameSite = attrVal;
+      else if (attrName === 'max-age') {
+        const sec = parseInt(attrVal, 10);
+        if (Number.isFinite(sec)) {
+          hasMaxAge = true;
+          if (sec <= 0) deleted = true;
+          else expires = Math.floor(nowMs / 1000) + sec;
+        }
+      } else if (attrName === 'expires' && !hasMaxAge) {
+        const expMs = Date.parse(attrVal);
+        if (Number.isFinite(expMs)) {
+          if (expMs <= nowMs) deleted = true;
+          else expires = Math.floor(expMs / 1000);
+        }
+      }
+    }
+
+    if (deleted || !domain.toLowerCase().includes('pintia')) continue;
+    out.push({
+      name,
+      value,
+      domain,
+      path,
+      ...(expires ? { expires } : {}),
+      ...(httpOnly ? { httpOnly } : {}),
+      ...(secure ? { secure } : {}),
+      ...(sameSite ? { sameSite } : {}),
+    });
+  }
+  return out;
+}
 
 export function extractPtaCookieHeaderFromSession(raw: unknown): string {
   if (!raw) return '';
-  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'string') return normalizePtaCookieString(raw);
   if (typeof raw === 'object' && Array.isArray((raw as any).cookies)) {
     const cookies = (raw as any).cookies as Array<{ name?: string; value?: string; domain?: string }>;
     return cookies
@@ -57,7 +204,171 @@ function hasPtaSessionToken(cookieHeader: string): boolean {
   return /(?:^|;\s*)PTASession=[^;\s]+/.test(cookieHeader);
 }
 
-async function ptaEdgeFetchJson<T = any>(url: string, cookie: string, psId?: string): Promise<{ ok: boolean; status: number; bodyText: string; data?: T }> {
+function cookieStringToRecords(cookieStr: string): EdgeCookieRecord[] {
+  const cleaned = normalizePtaCookieString(cookieStr);
+  const out: EdgeCookieRecord[] = [];
+  for (const pair of cleaned.split(';')) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const name = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (!name || !value) continue;
+    out.push({
+      name,
+      value,
+      domain: '.pintia.cn',
+      path: '/',
+      ...(name === 'PTASession' ? { httpOnly: true, secure: true } : { secure: true }),
+    });
+  }
+  return out;
+}
+
+export function mergePtaCookiesIntoSession(
+  existing: any,
+  incomingCookies: EdgeCookieRecord[],
+  meta: { source?: string; rememberMe?: boolean; nowMs?: number; isRolling?: boolean } = {}
+): { session: Record<string, any>; changed: boolean; ptaExpiresAtMs: number | null } {
+  const nowMs = meta.nowMs ?? Date.now();
+  const baseCookies: EdgeCookieRecord[] = Array.isArray(existing?.cookies)
+    ? existing.cookies.map((c: any) => ({ ...c }))
+    : typeof existing === 'string'
+      ? cookieStringToRecords(existing)
+      : [];
+
+  const prevPtaVal = baseCookies.find((c) => c.name === 'PTASession')?.value || '';
+  let changed = !existing || !Array.isArray(existing?.cookies);
+
+  for (const rawCookie of incomingCookies) {
+    if (!rawCookie || !rawCookie.name || !rawCookie.value) continue;
+    const domain = rawCookie.domain || '.pintia.cn';
+    if (!domain.toLowerCase().includes('pintia')) continue;
+    const incoming: EdgeCookieRecord = {
+      name: String(rawCookie.name),
+      value: String(rawCookie.value),
+      domain,
+      path: String(rawCookie.path || '/'),
+      ...(typeof rawCookie.expires === 'number' && Number.isFinite(rawCookie.expires) && rawCookie.expires > 0
+        ? { expires: Math.floor(rawCookie.expires) }
+        : {}),
+      ...(rawCookie.httpOnly !== undefined ? { httpOnly: Boolean(rawCookie.httpOnly) } : {}),
+      ...(rawCookie.secure !== undefined ? { secure: Boolean(rawCookie.secure) } : {}),
+      ...(rawCookie.sameSite ? { sameSite: String(rawCookie.sameSite) } : {}),
+    };
+
+    const idx = baseCookies.findIndex((c) => c.name === incoming.name && (c.domain || '.pintia.cn') === incoming.domain);
+    if (idx < 0) {
+      baseCookies.push(incoming);
+      changed = true;
+    } else {
+      const prev = baseCookies[idx];
+      const valChanged = prev.value !== incoming.value;
+      const expExtended = Boolean(incoming.expires && (!prev.expires || incoming.expires > prev.expires + 60));
+      if (valChanged || expExtended) {
+        baseCookies[idx] = { ...prev, ...incoming };
+        changed = true;
+      }
+    }
+  }
+
+  const nextPtaCookie = baseCookies.find((c) => c.name === 'PTASession' && Boolean(c.value));
+  const ptaValChanged = Boolean(nextPtaCookie && nextPtaCookie.value !== prevPtaVal);
+  let ptaExpiresAtMs: number | null = null;
+  if (nextPtaCookie?.expires && nextPtaCookie.expires > 0) {
+    ptaExpiresAtMs = nextPtaCookie.expires * 1000;
+  } else if (!ptaValChanged && typeof existing?.sessionExpiresAtMs === 'number' && existing.sessionExpiresAtMs > 0) {
+    ptaExpiresAtMs = existing.sessionExpiresAtMs;
+  }
+
+  const rememberMeLikely =
+    meta.rememberMe !== undefined
+      ? Boolean(meta.rememberMe)
+      : Boolean(existing?.rememberMe) || Boolean(ptaExpiresAtMs !== null && ptaExpiresAtMs - nowMs > 48 * 3600_000);
+
+  const tsStr = formatUtc8FromMs(nowMs) || nowUtc8();
+  const session: Record<string, any> = {
+    platform: 'pta',
+    updatedAt: tsStr,
+    cookies: baseCookies,
+    origins: Array.isArray(existing?.origins) ? existing.origins : [],
+    source: meta.source || existing?.source || 'manual-import',
+    rememberMe: rememberMeLikely,
+    ...(ptaExpiresAtMs !== null ? { sessionExpiresAtMs: ptaExpiresAtMs } : {}),
+    ...(meta.isRolling ? { lastRolledAt: tsStr } : existing?.lastRolledAt ? { lastRolledAt: existing.lastRolledAt } : {}),
+  };
+
+  return { session, changed, ptaExpiresAtMs };
+}
+
+export function buildPtaSessionStatus(
+  sessionObj: any,
+  watchState: PtaWatchState | null,
+  nowMs = Date.now()
+): PtaSessionStatusSummary {
+  const cookieHeader = extractPtaCookieHeaderFromSession(sessionObj);
+  const hasPtaSession = Boolean(cookieHeader && hasPtaSessionToken(cookieHeader));
+  const cookies: EdgeCookieRecord[] = Array.isArray(sessionObj?.cookies) ? sessionObj.cookies : [];
+  const ptaCookie = cookies.find((c) => c && c.name === 'PTASession' && Boolean(c.value));
+
+  let sessionExpiresAtMs: number | null = null;
+  if (ptaCookie?.expires && Number.isFinite(ptaCookie.expires) && ptaCookie.expires > 0) {
+    sessionExpiresAtMs = ptaCookie.expires * 1000;
+  } else if (
+    typeof sessionObj?.sessionExpiresAtMs === 'number' &&
+    Number.isFinite(sessionObj.sessionExpiresAtMs) &&
+    sessionObj.sessionExpiresAtMs > 0
+  ) {
+    sessionExpiresAtMs = sessionObj.sessionExpiresAtMs;
+  }
+
+  const remainingMs = sessionExpiresAtMs !== null ? sessionExpiresAtMs - nowMs : null;
+  const remainingHours = remainingMs !== null ? Math.round((remainingMs / 3600_000) * 10) / 10 : null;
+  const expiredByTime = Boolean(sessionExpiresAtMs !== null && sessionExpiresAtMs <= nowMs);
+  const expiredByRuntime = Boolean(watchState?.lastError && /session expired/i.test(watchState.lastError));
+  const isExpired = hasPtaSession ? expiredByTime || expiredByRuntime : false;
+  const isExpiringSoon = Boolean(
+    hasPtaSession && !isExpired && remainingMs !== null && remainingMs > 0 && remainingMs <= 12 * 3600_000
+  );
+  const rememberMeLikely =
+    Boolean(sessionObj?.rememberMe) || Boolean(remainingMs !== null && remainingMs > 48 * 3600_000);
+
+  return {
+    configured: hasPtaSession,
+    hasPtaSession,
+    rememberMeLikely,
+    source: sessionObj?.source ? String(sessionObj.source) : undefined,
+    updatedAt: sessionObj?.updatedAt ? String(sessionObj.updatedAt) : undefined,
+    sessionExpiresAt: sessionExpiresAtMs ? formatUtc8FromMs(sessionExpiresAtMs) : undefined,
+    sessionExpiresAtMs,
+    remainingHours,
+    isExpired,
+    isExpiringSoon,
+    lastCheckedAt: watchState?.lastCheckedAt,
+    lastRolledAt: watchState?.lastRolledAt || sessionObj?.lastRolledAt,
+    lastError: watchState?.lastError,
+    activeCount: watchState?.activeCount,
+    pendingCount: watchState?.pendingCount,
+  };
+}
+
+export async function getPtaSessionStatus(
+  env: ExtendedNotifyEnv,
+  nowMs = Date.now()
+): Promise<PtaSessionStatusSummary> {
+  const [sessionObj, watchState] = await Promise.all([
+    getCachedSession<any>(env, 'web-profile:pta', 'default').catch(() => null),
+    getCachedSession<PtaWatchState>(env, 'pta_watch_state', 'default').catch(() => null),
+  ]);
+  return buildPtaSessionStatus(sessionObj, watchState, nowMs);
+}
+
+async function ptaEdgeFetchJson<T = any>(
+  url: string,
+  cookie: string,
+  psId?: string
+): Promise<{ ok: boolean; status: number; bodyText: string; data?: T; setCookies: EdgeCookieRecord[] }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -72,21 +383,146 @@ async function ptaEdgeFetchJson<T = any>(url: string, cookie: string, psId?: str
       },
       signal: controller.signal,
     });
+    const setCookies = res.ok ? parseEdgeSetCookies(res) : [];
     const bodyText = await res.text().catch(() => '');
     if (!res.ok) {
-      return { ok: false, status: res.status, bodyText };
+      return { ok: false, status: res.status, bodyText, setCookies };
     }
     if (/^\s*<!doctype\s+html/i.test(bodyText)) {
-      return { ok: false, status: 403, bodyText: 'HTML challenge returned' };
+      return { ok: false, status: 403, bodyText: 'HTML challenge returned', setCookies: [] };
     }
     try {
-      return { ok: true, status: res.status, bodyText, data: JSON.parse(bodyText) as T };
+      return { ok: true, status: res.status, bodyText, data: JSON.parse(bodyText) as T, setCookies };
     } catch {
-      return { ok: false, status: res.status, bodyText };
+      return { ok: false, status: res.status, bodyText, setCookies };
     }
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function saveAndVerifyPtaSession(
+  env: ExtendedNotifyEnv,
+  payload: {
+    cookie?: string;
+    cookies?: EdgeCookieRecord[];
+    source?: string;
+    rememberMe?: boolean;
+    verify?: boolean;
+    triggerScan?: boolean;
+    nowMs?: number;
+  }
+): Promise<{
+  ok: boolean;
+  statusCode: number;
+  saved?: boolean;
+  verified?: 'live' | 'deferred-to-shim' | 'skipped';
+  error?: string;
+  sessionStatus?: PtaSessionStatusSummary;
+  scanResult?: PtaEdgeInspectionSummary;
+}> {
+  const nowMs = payload.nowMs ?? Date.now();
+  let incomingCookies: EdgeCookieRecord[] = [];
+  if (Array.isArray(payload.cookies) && payload.cookies.length > 0) {
+    incomingCookies = payload.cookies
+      .filter((c) => c && c.name && c.value && (!c.domain || String(c.domain).toLowerCase().includes('pintia')))
+      .map((c) => ({
+        name: String(c.name),
+        value: String(c.value),
+        domain: String(c.domain || '.pintia.cn'),
+        path: String(c.path || '/'),
+        ...(typeof c.expires === 'number' && Number.isFinite(c.expires) && c.expires > 0 ? { expires: Math.floor(c.expires) } : {}),
+        ...(c.httpOnly !== undefined ? { httpOnly: Boolean(c.httpOnly) } : {}),
+        ...(c.secure !== undefined ? { secure: Boolean(c.secure) } : {}),
+        ...(c.sameSite ? { sameSite: String(c.sameSite) } : {}),
+      }));
+  } else if (typeof payload.cookie === 'string' && payload.cookie.trim()) {
+    incomingCookies = cookieStringToRecords(payload.cookie);
+  }
+
+  const candidateHeader = extractPtaCookieHeaderFromSession({ cookies: incomingCookies });
+  if (!candidateHeader || !hasPtaSessionToken(candidateHeader)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error:
+        '缺少 HttpOnly 会话凭证 PTASession，已拒绝覆盖现有会话（请使用伴侣扩展、pnpm afk pta login 或从 DevTools 请求头复制完整 Cookie）。',
+    };
+  }
+
+  let verified: 'live' | 'deferred-to-shim' | 'skipped' = 'skipped';
+  if (payload.verify !== false) {
+    for (const probeUrl of [
+      `${PTA_PASSPORT_ORIGIN}/api/u/current`,
+      `${PTA_ORIGIN}/api/problem-sets?filter=%7B%7D&page=0&limit=1`,
+    ]) {
+      const probe = await ptaEdgeFetchJson(probeUrl, candidateHeader).catch(() => null);
+      if (!probe) continue;
+      if (probe.ok) {
+        verified = 'live';
+        if (probe.setCookies.length > 0) {
+          incomingCookies = [...incomingCookies, ...probe.setCookies];
+        }
+        break;
+      }
+      const isAuthFail =
+        probe.status === 401 ||
+        ((probe.status === 403 || probe.status === 404) &&
+          /USER_NOT_LOGGED_IN|USER_NOT_FOUND|INVALID_SESSION/i.test(probe.bodyText));
+      if (isAuthFail) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `PTASession 验证无效或已过期 (HTTP ${probe.status})，未覆盖现有会话，请重新登录后同步。`,
+        };
+      }
+      verified = 'deferred-to-shim';
+    }
+  }
+
+  const existingSession = await getCachedSession<any>(env, 'web-profile:pta', 'default').catch(() => null);
+  const { session: mergedSession, ptaExpiresAtMs } = mergePtaCookiesIntoSession(existingSession, incomingCookies, {
+    source: payload.source || 'web-dashboard',
+    rememberMe: payload.rememberMe,
+    nowMs,
+  });
+
+  const remainingSec = ptaExpiresAtMs ? Math.floor((ptaExpiresAtMs - nowMs) / 1000) : 0;
+  const ttlSeconds = Math.max(30 * 24 * 3600, remainingSec > 0 ? remainingSec + 3600 : 0);
+  await saveCachedSession(env, 'web-profile:pta', 'default', mergedSession, ttlSeconds);
+
+  const prevWatch = (await getCachedSession<PtaWatchState>(env, 'pta_watch_state', 'default').catch(() => null)) || {};
+  const nextWatch: PtaWatchState = {
+    ...prevWatch,
+    expiredNotifiedAtMs: 0,
+    expiringSoonNotifiedAtMs: 0,
+    blockedUntilMs: 0,
+    lastError: undefined,
+  };
+  await saveCachedSession(env, 'pta_watch_state', 'default', nextWatch, 30 * 24 * 3600).catch(() => {});
+
+  const expText = ptaExpiresAtMs ? `, 预计有效期至 ${formatUtc8FromMs(ptaExpiresAtMs) || '未知'}` : '';
+  await logExecution(
+    env,
+    'pta_session_updated',
+    'pta',
+    `已更新 PTA 会话 (来源: ${mergedSession.source}, Cookies: ${incomingCookies.length}, 校验: ${verified}${expText})`
+  ).catch(() => {});
+
+  let scanResult: PtaEdgeInspectionSummary | undefined;
+  if (payload.triggerScan !== false) {
+    scanResult = await runPtaInspectionCycle(env, { force: true, nowMs }).catch(() => undefined);
+  }
+
+  const latestStatus = await getPtaSessionStatus(env, nowMs);
+  return {
+    ok: true,
+    statusCode: 200,
+    saved: true,
+    verified,
+    sessionStatus: latestStatus,
+    ...(scanResult ? { scanResult } : {}),
+  };
 }
 
 async function delegatePtaScanToShim(env: ExtendedNotifyEnv): Promise<{ ok: boolean; summary?: string } | null> {
@@ -175,7 +611,7 @@ export async function runPtaInspectionCycle(
     };
   }
 
-  let listRes: { ok: boolean; status: number; bodyText: string; data?: any };
+  let listRes: { ok: boolean; status: number; bodyText: string; data?: any; setCookies: EdgeCookieRecord[] };
   try {
     listRes = await ptaEdgeFetchJson<{ total?: number; problemSets?: any[] }>(
       `${PTA_ORIGIN}/api/problem-sets?filter=%7B%7D&page=0&limit=50`,
@@ -218,10 +654,10 @@ export async function runPtaInspectionCycle(
       await saveCachedSession(env, 'pta_watch_state', 'default', nextState, 30 * 24 * 3600).catch(() => {});
 
       if (shouldNotify) {
-        await logExecution(env, 'session_expired', 'pta', `PTA 登录态失效 (HTTP ${listRes.status})，请重新导入 Cookie`).catch(() => {});
+        await logExecution(env, 'session_expired', 'pta', `PTA 登录态失效 (HTTP ${listRes.status})，等待通过扩展/CLI/看板更新`).catch(() => {});
         await sendNotification(
           '⚠️ PTA (拼题 A) 登录态已过期',
-          '监听巡检检测到 PTA Cookie 已失效，请重新登录后执行 `pnpm afk profile import-cookie --platform pta --cookie "..."` 更新会话（为遵守安全规范不会自动破解登录验证码）。',
+          '监听巡检检测到 PTA 会话已失效。可选任一方式秒级恢复（仅需本人过一次验证码）：1) 在已装伴侣扩展的浏览器打开 pintia.cn 登录（自动同步） 2) 运行 `pnpm afk pta login` 3) 打开 Web 看板「设置 -> PTA 会话管理」一键同步。',
           env
         );
       }
@@ -262,6 +698,7 @@ export async function runPtaInspectionCycle(
     };
   }
 
+  const rolledCookies: EdgeCookieRecord[] = [...(listRes.setCookies || [])];
   const totalSets = Number(listRes.data?.total || 0);
   const allSets = Array.isArray(listRes.data?.problemSets) ? listRes.data.problemSets : [];
   const activeCandidates = allSets.filter((ps: any) => {
@@ -283,6 +720,7 @@ export async function runPtaInspectionCycle(
       ps.id
     ).catch(() => null);
     if (!exRes || !exRes.ok) continue;
+    if (exRes.setCookies?.length) rolledCookies.push(...exRes.setCookies);
 
     const exam = exRes.data?.exam || null;
     let totalProblems = 0;
@@ -296,6 +734,7 @@ export async function runPtaInspectionCycle(
         cookieHeader,
         ps.id
       ).catch(() => null);
+      if (stRes?.setCookies?.length) rolledCookies.push(...stRes.setCookies);
       if (stRes?.ok && Array.isArray(stRes.data?.problemStatus)) {
         const list = stRes.data.problemStatus;
         totalProblems = list.length;
@@ -357,10 +796,47 @@ export async function runPtaInspectionCycle(
     }
   }
 
+  let lastKeepAliveMs = prevState.lastKeepAliveMs || 0;
+  if (!lastKeepAliveMs || nowMs - lastKeepAliveMs >= KEEPALIVE_INTERVAL_MS) {
+    const kaRes = await ptaEdgeFetchJson(`${PTA_PASSPORT_ORIGIN}/api/u/current`, cookieHeader).catch(() => null);
+    if (kaRes?.setCookies?.length) rolledCookies.push(...kaRes.setCookies);
+    lastKeepAliveMs = nowMs;
+  }
+
+  let effectiveSessionObj = sessionObj;
+  let lastRolledAt = prevState.lastRolledAt;
+  if (rolledCookies.length > 0) {
+    const merged = mergePtaCookiesIntoSession(sessionObj, rolledCookies, { nowMs, isRolling: true });
+    if (merged.changed) {
+      effectiveSessionObj = merged.session;
+      lastRolledAt = merged.session.lastRolledAt;
+      const remSec = merged.ptaExpiresAtMs ? Math.floor((merged.ptaExpiresAtMs - nowMs) / 1000) : 0;
+      const ttlSeconds = Math.max(30 * 24 * 3600, remSec > 0 ? remSec + 3600 : 0);
+      await saveCachedSession(env, 'web-profile:pta', 'default', merged.session, ttlSeconds).catch(() => {});
+    }
+  }
+
+  let expiringSoonNotifiedAtMs = prevState.expiringSoonNotifiedAtMs || 0;
+  const sessionStatus = buildPtaSessionStatus(effectiveSessionObj, { ...prevState, lastError: undefined }, nowMs);
+  if (
+    sessionStatus.isExpiringSoon &&
+    (!expiringSoonNotifiedAtMs || nowMs - expiringSoonNotifiedAtMs >= EXPIRING_SOON_COOLDOWN_MS)
+  ) {
+    expiringSoonNotifiedAtMs = nowMs;
+    await sendNotification(
+      '⏳ PTA (拼题 A) 登录态即将过期',
+      `当前 PTASession 预计剩余 ${sessionStatus.remainingHours ?? '<12'} 小时过期。为保持 7×24 巡检不断档，请在已装伴侣扩展的浏览器访问 pintia.cn（自动同步），或在本地运行 \`pnpm afk pta login\`（只需滑一下验证码）。`,
+      env
+    );
+  }
+
   const nextState: PtaWatchState = {
     lastCheckedAt: nowUtc8(),
     lastCheckMs: nowMs,
     expiredNotifiedAtMs: 0,
+    expiringSoonNotifiedAtMs,
+    lastKeepAliveMs,
+    ...(lastRolledAt ? { lastRolledAt } : {}),
     blockedUntilMs: 0,
     totalSets,
     activeCount: activeCandidates.length,

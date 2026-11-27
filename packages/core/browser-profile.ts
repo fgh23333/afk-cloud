@@ -27,6 +27,10 @@ export interface PortableStorageState {
   updatedAt: string;
   cookies: BrowserCookie[];
   origins: BrowserOriginState[];
+  source?: string;
+  rememberMe?: boolean;
+  sessionExpiresAtMs?: number | null;
+  lastRolledAt?: string;
 }
 
 export interface ProfilePaths {
@@ -88,6 +92,10 @@ export function writeLocalStorageState(
     updatedAt: formatUtc8Now(),
     cookies: state.cookies || [],
     origins: state.origins || [],
+    ...(state.source ? { source: state.source } : {}),
+    ...(state.rememberMe !== undefined ? { rememberMe: state.rememberMe } : {}),
+    ...(state.sessionExpiresAtMs !== undefined ? { sessionExpiresAtMs: state.sessionExpiresAtMs } : {}),
+    ...(state.lastRolledAt ? { lastRolledAt: state.lastRolledAt } : {}),
   };
   fs.writeFileSync(storageStatePath, JSON.stringify(fullState, null, 2), 'utf8');
   return fullState;
@@ -188,13 +196,19 @@ export function detectChromiumExecutable(): string | null {
           'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
           'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
         ]
-      : [
-          '/usr/bin/google-chrome',
-          '/usr/bin/google-chrome-stable',
-          '/usr/bin/chromium',
-          '/usr/bin/chromium-browser',
-          '/snap/bin/chromium',
-        ];
+      : process.platform === 'darwin'
+        ? [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+          ]
+        : [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium',
+          ];
 
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;

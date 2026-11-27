@@ -3,10 +3,14 @@ import os from 'os';
 import path from 'path';
 import {
   buildPtaTaskSummaryPayload,
+  extractPtaSessionMeta,
+  extractPtaSessionValue,
+  keepAlivePtaPassport,
   PtaAdapter,
   PtaAuthError,
   resolvePtaCookieHeader,
 } from '../../adapters/pta';
+import { readLocalStorageState } from '../../core/browser-profile';
 import { syncTasksToEdgeDashboard } from '../../core/d1-bridge';
 import { formatUtc8Now } from '../../core/types';
 
@@ -14,6 +18,8 @@ export interface PtaMonitorState {
   lastCheckAt?: string;
   lastCheckMs?: number;
   lastExpiredNotifyMs?: number;
+  lastExpiringSoonNotifyMs?: number;
+  lastKeepAliveMs?: number;
   knownPendingIds: string[];
 }
 
@@ -46,6 +52,8 @@ function loadState(): PtaMonitorState {
           lastCheckAt: parsed.lastCheckAt,
           lastCheckMs: Number(parsed.lastCheckMs || 0),
           lastExpiredNotifyMs: Number(parsed.lastExpiredNotifyMs || 0),
+          lastExpiringSoonNotifyMs: Number(parsed.lastExpiringSoonNotifyMs || 0),
+          lastKeepAliveMs: Number(parsed.lastKeepAliveMs || 0),
           knownPendingIds: Array.isArray(parsed.knownPendingIds) ? parsed.knownPendingIds.map(String) : [],
         };
       }
@@ -140,10 +148,11 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
   ptaScanInFlight = true;
   const nowMs = Date.now();
   const state = loadState();
+  let activeCookie = '';
 
   try {
-    const cookie = await resolvePtaCookieHeader(options.cookie);
-    if (!cookie) {
+    activeCookie = await resolvePtaCookieHeader(options.cookie, { preferCloud: !options.cookie });
+    if (!activeCookie) {
       return {
         ok: true,
         configured: false,
@@ -157,8 +166,31 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
     }
 
     const edgeExistingTasks = await fetchExistingEdgePtaTasks();
-    const pta = new PtaAdapter(cookie);
-    const { totalSets, activeSets } = await pta.scanOverviews();
+    let scanResult: Awaited<ReturnType<PtaAdapter['scanOverviews']>>;
+    try {
+      const pta = new PtaAdapter(activeCookie);
+      scanResult = await pta.scanOverviews();
+    } catch (firstErr: any) {
+      if (firstErr instanceof PtaAuthError && !options.cookie) {
+        const freshCloudCookie = await resolvePtaCookieHeader(undefined, { preferCloud: true, ignoreEnv: true }).catch(
+          () => ''
+        );
+        if (
+          freshCloudCookie &&
+          extractPtaSessionValue(freshCloudCookie) &&
+          extractPtaSessionValue(freshCloudCookie) !== extractPtaSessionValue(activeCookie)
+        ) {
+          activeCookie = freshCloudCookie;
+          const retryAdapter = new PtaAdapter(activeCookie);
+          scanResult = await retryAdapter.scanOverviews();
+        } else {
+          throw firstErr;
+        }
+      } else {
+        throw firstErr;
+      }
+    }
+    const { totalSets, activeSets } = scanResult;
 
     const syncPayloads = activeSets.map((ov) => buildPtaTaskSummaryPayload(ov));
     const payloadsToSync = syncPayloads.filter((it) => {
@@ -214,6 +246,28 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
     state.lastCheckAt = formatUtc8Now();
     state.lastCheckMs = nowMs;
     state.knownPendingIds = Array.from(knownSet).slice(-100);
+
+    // 每 4 小时通过 passport.pintia.cn/api/u/current 执行一次保活并捕获滚动 Set-Cookie 续期
+    if (!state.lastKeepAliveMs || nowMs - state.lastKeepAliveMs >= 4 * 3600 * 1000) {
+      await keepAlivePtaPassport(activeCookie).catch(() => {});
+      state.lastKeepAliveMs = nowMs;
+    }
+
+    // 检查 PTASession 真实过期时间（仅当使用本地持久化 Profile 会话时），若剩余 <12 小时则提前温和预警（24h 冷却防刷屏）
+    if (!options.cookie && !process.env.PTA_SESSION_COOKIE) {
+      const ptaMeta = extractPtaSessionMeta(readLocalStorageState('pta'), nowMs);
+      if (
+        ptaMeta.isExpiringSoon &&
+        (!state.lastExpiringSoonNotifyMs || nowMs - state.lastExpiringSoonNotifyMs >= 24 * 3600 * 1000)
+      ) {
+        state.lastExpiringSoonNotifyMs = nowMs;
+        await notifyEdge(
+          '⏳ PTA (拼题 A) 登录态即将过期',
+          `检测到当前 PTASession 预计还剩 ${ptaMeta.remainingHours ?? '<12'} 小时到期。为避免错过新题巡检，请在已装伴侣扩展的浏览器访问 pintia.cn（自动同步），或在本地运行 \`pnpm afk pta login\`（只需滑一下验证码，其余全自动）。`
+        ).catch(() => {});
+      }
+    }
+
     saveState(state);
 
     const msg = `PTA 监听完成: 活跃题目集 ${activeSets.length} 个, 待完成 ${pendingCount} 个, 新告警 ${newAlertsSent} 个`;
@@ -235,7 +289,7 @@ export async function runPtaMonitorCycle(options: { force?: boolean; cookie?: st
         saveState(state);
         await notifyEdge(
           '⚠️ PTA (拼题 A) 登录态已过期',
-          `Shim 监听检测到 PTA 会话失效 (${err.message})，请更新 Cookie 后执行 \`pnpm afk profile import-cookie --platform pta --cookie "..."\`。`
+          `Shim 监听检测到 PTA 会话失效 (${err.message})。可选任一方式秒级恢复：1) 已装伴侣扩展的浏览器登录 pintia.cn（自动同步） 2) 运行 \`pnpm afk pta login\`（自动勾选记住我，仅需人工过一次验证码） 3) 在 Web 看板设置页快速更新。`
         );
       }
       return {

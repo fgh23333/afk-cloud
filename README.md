@@ -197,12 +197,19 @@ pnpm afk:setup-gcp
 - `deploy-cloud-run-job.sh` / `deploy-cloud-run-service.sh`：部署 Tier 2 Cloud Run 批处理与常驻服务
 - `spawn-ephemeral-gce.sh`：拉起带 TTL 自毁的临时 Spot GCE 突发节点
 
-### 4. 导入 PTA Cookie 与启动宿主机 Shim
+### 4. 多路径接入 PTA 会话与启动宿主机 Shim
 
-由于 `PTASession` 带有 `HttpOnly` 标记（详见下方注意事项），请从浏览器开发者工具请求头/Application 中复制完整 Cookie 导入持久化 Profile 并推送云端：
+由于 `PTASession` 带有 `HttpOnly` 标记且 `pintia.cn` 登录网关强制触发腾讯滑块验证码（遵守合规红线，系统**绝不**自动破解或绕过验证码），本项目提供 **3 种零额外服务器开销的并行登录与自动续期路径**，您只需在登录时亲自完成一次滑块验证码，其余勾选「记住我」、捕获 `HttpOnly PTASession`、同步 D1、滚动 Cookie 续期与到期前 12 小时预警全部自动完成：
+
+1. **浏览器伴侣扩展（最无感 · 推荐）**：在常用电脑或支持 MV3 扩展的 Android 浏览器中加载 [`extensions/pta-session-sync/`](extensions/pta-session-sync/)。登录 `pintia.cn` 时自动勾选「记住我」，滑过验证码即在 1.5 秒内静默推送完整 Cookie 至 Cloudflare D1，并定期捕获续期。
+2. **本地终端一键启动可见浏览器**：桌面环境配置 `.env` 后直接执行 `pnpm afk pta login`（可选配置 `PTA_EMAIL`/`PTA_PASSWORD` 自动预填账密），自动勾选「记住我」，您滑过验证码后窗口自动同步 D1、触发首轮扫描并退出。
+3. **Web 看板零 CLI 应急录入（手机/任意终端）**：直接访问 Cloudflare Edge Web 看板 **「🔔 通知通道与架构 -> 💻 PTA 会话与长效保活」**，查看实时过期倒计时或粘贴完整 Cookie（支持自动剔除 `Cookie:` 前缀并活体校验）。
 
 ```bash
-# 导入 PTA 完整 Cookie 并自动推云同步到 D1
+# 方式 A：有桌面浏览器时一键登录（自动勾选记住我，仅需过一次验证码）
+pnpm afk pta login
+
+# 方式 B：或手工导入完整 Cookie 字符串并自动推云同步到 D1
 pnpm afk profile import-cookie --platform pta --cookie "PTASession=...; JSESSIONID=..."
 
 # 检查环境、登录态与 Cloudflare Edge 健康状态 (/health)
@@ -225,7 +232,7 @@ pnpm shim
 | `scan` (`pnpm afk:scan`) | `--platform chaoxing\|pta\|all` `--progress` | 扫描超星在读课程与待办作业，或扫描 PTA 活跃题目集 |
 | `progress` / `chapters` (`pnpm afk:progress`) | — | 扫描超星全部课程章节任务点完成进度并同步至 D1 看板 |
 | `solve` (`pnpm afk:solve`) | `--platform chaoxing\|pta\|all` `--auto-submit` `--tier local\|cloud-run\|gce` | 双轨求解待办作业（默认安全草稿暂存） |
-| `pta` (`pnpm afk:pta`) | `scan \| solve \| watch` `--id <psId>` `--auto-submit` `--interval <min>` | PTA 拼题 A 专项扫描、本地沙箱求解暂存与后台监听 |
+| `pta` (`pnpm afk:pta`) | `login \| scan \| solve \| watch` `--id <psId>` `--auto-submit` `--interval <min>` | PTA 拼题 A 真实浏览器辅助登录（自动勾选记住我）、专项扫描与沙箱监听 |
 | `discuss` (`pnpm afk:discuss`) | `--auto-submit` | 抓取超星讨论区话题、结合课件 RAG 拟稿及审批/发布 |
 | `materials` / `download` (`pnpm afk:materials`) | — | 批量下载超星课程资料构建本地 RAG 上下文 |
 | `signin` (`pnpm afk:signin`) | — | 手动触发一次超星全课程活动签到巡检 |
@@ -265,7 +272,7 @@ pnpm shim
 ## ⚠️ 注意事项与安全护栏 (Caveats)
 
 - **超星机房 IP 风控**：`mobilelearn.chaoxing.com` 对海外云机房 IP（包括 Cloudflare Edge 节点与海外 GCP VM）存在较严格风控，若触发封禁会进入 **12 小时告警冷却** 并在 Dashboard 展示受限提示，此时建议配合宿主机本土代理或等待自动冷却。
-- **PTA Cookie 的 `PTASession` 为 `HttpOnly`**：在浏览器 Console 中执行 `document.cookie` **无法** 读出 `PTASession`。请务必在登录 `pintia.cn` 后通过开发者工具 `Application -> Cookies` 或 `Network` 请求头复制包含 `PTASession=...` 的完整 Cookie 字符串，交由 `pnpm afk profile import-cookie --platform pta --cookie "..."` 导入；代码内已增加 `HttpOnly` 缺失拦截保护，防止不完整 Cookie 覆盖云端有效会话。
+- **PTA Cookie 的 `PTASession` 为 `HttpOnly` 且登录网关受滑块验证码保护**：在浏览器 Console 中执行 `document.cookie` **无法** 读出 `PTASession`；遵守安全红线，系统不会自动破解验证码。请优先安装 [`extensions/pta-session-sync/`](extensions/pta-session-sync/) 伴侣扩展、运行 `pnpm afk pta login`，或通过 Web 看板设置页导入完整请求头 Cookie；系统已内置 `PTASession` 缺失拦截、滚动 `Set-Cookie` 续期捕获、Passport 保活及 `<12h` 到期预警。
 - **PTA 安全提交原则**：系统默认且强制禁止在无人确认下自动调用结束考试 `/end` 接口，并始终合并服务端已提交答案以防止 `OVERRIDDEN` 覆盖误伤。
 - **智慧树 (`zhihuishu`) 当前属于实验性 TODO**：因网易易盾滑块验证机制与无头 Chromium 浏览器在 `e2-micro`（1GB RAM + 2GB Swap）上的内存消耗，暂不建议在无人工干预的 24/7 云端生产环境中开启无人托管。
 - **时区与跨进程锁**：`SIGN_LISTEN_WINDOWS` 固定基于 **UTC+8**（北京时间）判定，运行并行任务或单元测试时需依赖 `AFK_LOCK_FILE` 文件锁保证单实例互斥。

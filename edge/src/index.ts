@@ -16,7 +16,7 @@ import {
   scanDiscussionsBatch,
 } from './discussions';
 import { runChaoxingInspectionCycle, syncChaoxingSignHistory } from './inspection';
-import { runPtaInspectionCycle } from './pta';
+import { getPtaSessionStatus, runPtaInspectionCycle, saveAndVerifyPtaSession } from './pta';
 import {
   ExtendedNotifyEnv,
   formatChapterProgressSummary,
@@ -1132,6 +1132,19 @@ async function handleEdgeFetch(
       if ((url.pathname === '/api/pta/scan' || url.pathname === '/api/pta/check') && (request.method === 'GET' || request.method === 'POST')) {
         const ptaRes = await runPtaInspectionCycle(env, { force: true });
         return corsJson(ptaRes, ptaRes.success ? 200 : 500);
+      }
+
+      // PTA 会话状态查询（绝不返回 Cookie 明文，仅返回有效性与过期倒计时摘要）
+      if ((url.pathname === '/api/pta/session/status' || url.pathname === '/api/pta/session') && request.method === 'GET') {
+        const status = await getPtaSessionStatus(env);
+        return corsJson({ ok: true, status, time: nowUtc8() });
+      }
+
+      // PTA 会话写入与活体校验（接收扩展完整 Cookie 数组或 Dashboard/CLI 上传的 Cookie，强制 PTASession 校验）
+      if ((url.pathname === '/api/pta/session' || url.pathname === '/api/pta/cookie') && request.method === 'POST') {
+        const body: any = await request.json().catch(() => ({}));
+        const res = await saveAndVerifyPtaSession(env, body);
+        return corsJson({ ...res, time: nowUtc8() }, res.statusCode);
       }
 
       // 获取当前 D1 队列待办
