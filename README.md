@@ -1,11 +1,10 @@
 <div align="center">
 
-# ☁️ afk-cloud (v1.1.0)
+# ☁️ afk-cloud (v0.0.1)
 
-**Cloudflare Edge + Google Cloud Free-First Multi-Platform Autonomous Agent**
+**Personal Autonomous Cloud Agent on Cloudflare Edge + Google AI Pro (`agy`) + GCP Free Tier**
 
-基于 **Cloudflare Workers + D1** 与 **GCP Free-First (`e2-micro` + Cloud Run Jobs)** 的多平台个人云端自治 Agent。  
-原生集成 **超星学习通** 与 **PTA 拼题 A** 双生产级协议插件、本地 **五语言编程评测沙箱**、**Antigravity (`agy`)** 深度求解引擎、**Telegram 双向远程控制** 以及 **6 标签暗夜毛玻璃 Web 控制台**。
+处于早期开发阶段（`v0.0.1`，暂无正式版）的个人云端自治 Agent：基于 **Cloudflare Workers + D1** 与 **GCP 永久免费层 (`e2-micro` + Cloud Run Jobs)** 运行 **Antigravity (`agy`)**、Telegram 双向控制、个人待办/简报、五语言本地沙箱与 6 标签暗夜毛玻璃 Web 控制台；并以可插拔 Skill 形式附带集成 **超星学习通** 与 **PTA 拼题 A** 插件（智慧树为 TODO）。
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Plugins: Chaoxing + PTA](https://img.shields.io/badge/Plugins-Chaoxing%20%7C%20PTA%20Ready-emerald.svg)
@@ -20,8 +19,8 @@
 ## 🌟 核心特性一览
 
 - **🧩 插件化多平台统一架构 (`Chaoxing` × `PTA` × `Zhihuishu [TODO]`)**
-  - **超星学习通 (`chaoxing` v1.2.0)**：原生协议适配器，覆盖多类型签到、课程公告同步、全部课程章节任务点进度追踪 (`/api/courses/progress`)、课件批量拉取与 RAG 上下文构建、作业/重开测验识别与双轨求解、讨论区抓帖 + 课件 RAG 拟稿与审批发布。
-  - **PTA 拼题 A (`pta` v1.1.0)**：直连 `pintia.cn/api`，支持 **7 类题型**（编程题、单选、多选、判断、填空、程序填空、主观题）、远程题库实时监听与上新同步、**五语言本地沙箱编译对拍**、PTA 官方判题轮询、以及 **防 `OVERRIDDEN` 整卷答案合并提交**（默认仅保存提交题解，绝不越权调用 `/end` 提前交卷）。
+  - **超星学习通 (`chaoxing` v0.0.1)**：原生协议适配器，覆盖多类型签到、课程公告同步、全部课程章节任务点进度追踪 (`/api/courses/progress`)、课件批量拉取与 RAG 上下文构建、作业/重开测验识别与双轨求解、讨论区抓帖 + 课件 RAG 拟稿与审批发布。
+  - **PTA 拼题 A (`pta` v0.0.1)**：直连 `pintia.cn/api`，支持 **7 类题型**（编程题、单选、多选、判断、填空、程序填空、主观题）、远程题库实时监听与上新同步、**五语言本地沙箱编译对拍**、PTA 官方判题轮询、以及 **防 `OVERRIDDEN` 整卷答案合并提交**（默认仅保存提交题解，绝不越权调用 `/end` 提前交卷）。
 - **🖥️ 双面协同控制面 (Cloudflare Edge + Host Shim)**
   - Cloudflare Workers 7×24h Cron 自主巡检任务、通知与登录态，并在遇到源站对数据中心 IP 的 `403` 拦截时（如 PTA Cloudflare 风控）自动桥接宿主机 Shim (`POST /pta/inspect`) 完成兜底探测。
   - 提供 **6 标签实时暗夜毛玻璃监控看板**（作业与实验任务、话题讨论、考试与随堂测验、自动签到记录、在读课程概况、通知通道与架构）。
@@ -76,9 +75,9 @@ flowchart TB
 
 | 插件 ID | 名称与版本 | 状态 | 核心能力 | 实现与策略说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| **`chaoxing`** | 超星学习通自适应插件 (`v1.2.0`) | ✅ **已投产** | `courses`, `materials`, `homework`, `signin`, `discussions` | 原生 HTTP 会话与登录态缓存；支持课程列表、课程公告、全课程章节任务点进度抓取、课件 RAG 资料下载、多类型签到（普通/二维码/位置/手势/拍照）与自适应退避、讨论区拟稿审批及作业/重开测验安全草稿暂存 |
-| **`pta`** | PTA 拼题 A 编程评测与监听插件 (`v1.1.0`) | ✅ **已投产** | `courses`, `homework`, `sandbox` | 直连 `pintia.cn/api` 题目集/题目/提交历史；支持 Edge + Shim 7×24h 活跃题目集自动发现、本地 5 语言沙箱对拍 + 远程判题轮询、7 种题型统一作答与 **防 `OVERRIDDEN` 全量答案合并暂存**；内置 `PTASession` `HttpOnly` 完整度拦截校验 |
-| **`zhihuishu`** | 智慧树 / 知到合规播放插件 (`v1.1.0`) | 🚧 **TODO / 实验性** | `courses`, `homework`, `browser-cdp` | 仅保留新版 `studyvideoh5.zhihuishu.com/stuStudy` 的 Playwright CDP 合规倍速播放代码骨架；因网易易盾滑块验证码与高内存浏览器在 `e2-micro`（1GB RAM）上的限制，暂未投入无人值守运行 |
+| **`chaoxing`** | 超星学习通自适应插件 (`v0.0.1`) | ✅ **已可用** | `courses`, `materials`, `homework`, `signin`, `discussions` | 原生 HTTP 会话与登录态缓存；支持课程列表、课程公告、全课程章节任务点进度抓取、课件 RAG 资料下载、多类型签到（普通/二维码/位置/手势/拍照）与自适应退避、讨论区拟稿审批及作业/重开测验安全草稿暂存 |
+| **`pta`** | PTA 拼题 A 编程评测与监听插件 (`v0.0.1`) | ✅ **已可用** | `courses`, `homework`, `sandbox` | 直连 `pintia.cn/api` 题目集/题目/提交历史；支持 Edge + Shim 7×24h 活跃题目集自动发现、本地 5 语言沙箱对拍 + 远程判题轮询、7 种题型统一作答与 **防 `OVERRIDDEN` 全量答案合并暂存**；内置 `PTASession` `HttpOnly` 完整度拦截校验 |
+| **`zhihuishu`** | 智慧树 / 知到合规播放插件 (`v0.0.1`) | 🚧 **TODO / 实验性** | `courses`, `homework`, `browser-cdp` | 仅保留新版 `studyvideoh5.zhihuishu.com/stuStudy` 的 Playwright CDP 合规倍速播放代码骨架；因网易易盾滑块验证码与高内存浏览器在 `e2-micro`（1GB RAM）上的限制，暂未投入无人值守运行 |
 
 ---
 

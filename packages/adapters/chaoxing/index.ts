@@ -37,7 +37,7 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly manifest: PluginManifest = {
     id: 'chaoxing',
     name: '超星学习通自适应插件 (Skill)',
-    version: '1.2.0',
+    version: '0.0.1',
     description: '超星协议原生适配器，涵盖登录态缓存、全类型签到、18门课程课件RAG拉取、双轨作业求解、讨论区拟稿与安全草稿暂存',
     capabilities: ['courses', 'materials', 'homework', 'signin', 'discussions'],
   };
@@ -395,6 +395,24 @@ export class ChaoxingAdapter implements PlatformAdapter, PlatformPlugin {
             ? ` | 待刷: ${summary.pendingChapterTitles.slice(0, 3).join('、')}${summary.pendingChapterTitles.length > 3 ? ' 等' : ''}`
             : '';
         console.log(`${badge} 《${c.courseName}》 (ID: ${c.courseId}) | 完成率: ${summary.completionRate}%${pendingHint}`);
+        if (kw) {
+          const courseEntryUrl = `https://mooc1-1.chaoxing.com/visit/stucoursemiddle?courseid=${c.courseId}&clazzid=${c.classId}`;
+          console.log(blue(`    🔗 课程主页: ${courseEntryUrl}`));
+          const pendingChapterObjs = (summary.chapters || []).filter(
+            (ch) => ch.status === 'pending' || ch.unfinishedPoints > 0
+          );
+          for (const ch of pendingChapterObjs.slice(0, 15)) {
+            console.log(yellow(`    👉 ${ch.title} (待完成 ${ch.unfinishedPoints} 个任务点)`));
+            console.log(`       ${ch.url}`);
+          }
+          if (pendingChapterObjs.length > 15) {
+            console.log(
+              yellow(`    … 其余 ${pendingChapterObjs.length - 15} 个待完成章节请通过课程主页查看`)
+            );
+          } else if (pendingChapterObjs.length === 0) {
+            console.log(green(`    ✅ 该课程所有章节任务点均已完成！`));
+          }
+        }
       } catch (err: any) {
         console.log(red(`[章节进度跳过] 《${c.courseName}》: ${err?.message || err}`));
       }

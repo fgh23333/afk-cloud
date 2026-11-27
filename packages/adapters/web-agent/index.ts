@@ -102,7 +102,7 @@ export class WebBrowserAdapter implements PlatformAdapter, PlatformPlugin {
     this.manifest = {
       id: platform,
       name: `${this.preset.displayName} 真实浏览器自治插件 (Skill)`,
-      version: '1.0.0',
+      version: '0.0.1',
       description: '通过真实 Chromium CDP 与持久化 Profile 操控 Web 平台，支持视频合规守护与 DOM 表单智能作答',
       capabilities: ['browser-cdp', 'homework'],
     };

@@ -75,7 +75,7 @@ export class PtaAdapter implements PlatformAdapter, PlatformPlugin {
   public readonly manifest: PluginManifest = {
     id: 'pta',
     name: 'PTA 拼题 A 编程评测与监听插件 (Skill)',
-    version: '1.1.0',
+    version: '0.0.1',
     description:
       '基于 PTA 原生 REST API 与 D1/本地 Profile Cookie 持久化的自治插件，支持题目集实时监听、多题型批量/沙箱求解、草稿暂存与防覆盖整组提交',
     capabilities: ['courses', 'homework', 'sandbox'],
