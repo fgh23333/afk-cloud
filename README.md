@@ -284,19 +284,21 @@ pnpm shim
 当前处于 **`v0.0.1` 早期开发与自用阶段（暂无正式版）**，总体演进围绕 **「以 Google AI Pro (`agy`) + 免费云算力为核心的 7×24 Personal Agent 底座」**，教学/评测平台保持轻量可插拔定位：
 
 ### `v0.0.1`（当前 · Early Preview / 早期自用版）
-- **Personal Agent 核心底座**：Cloudflare Workers + D1 + Durable Objects 与 GCP Always-Free (`e2-micro`) Shim 双面协同；Zero-Trust Tunnel + HMAC-SHA256 + D1 Nonce 防重放；Telegram `/agent-chat` 自然语言直连本机 `agy` 与 `/todo` 待办管理；5 通道 4 层防重告警；6 标签暗夜毛玻璃看板与 `pnpm preview` 脱敏预览。
+- **Personal Agent 核心底座**：Cloudflare Workers + D1 + Durable Objects 与 GCP Always-Free (`e2-micro`) Shim 双面协同；Zero-Trust Tunnel + HMAC-SHA256 + D1 Nonce 防重放；Telegram `/agent-chat` 自然语言直连本机 `agy`（已可配合 Google Workspace 插件处理 Gmail / Drive / Docs / Sheets / Slides）与 `/todo` 待办管理；5 通道 4 层防重告警；6 标签暗夜毛玻璃看板与 `pnpm preview` 脱敏预览。
+- **PTA 多路径接入与长效保活**：已落地浏览器伴侣扩展（[`extensions/pta-session-sync/`](extensions/pta-session-sync/)）、桌面端 `pnpm afk pta login`、Web 看板应急同步、滚动 `Set-Cookie` 续期及 `<12h` 到期预警。
 - **本地沙箱与算力分层**：五语言本地隔离沙箱（Java 17 / C++ / C / Python / Node）、`agy` + OpenAI 兼容接口双轨路由、Tier 2/3 Cloud Run Jobs 与 Spot GCE 自毁脚本。
 - **首批附带插件**：`chaoxing`（可用）、`pta`（可用）、`zhihuishu`（TODO 骨架）。
 
-### `v0.0.2`（交互体验与日常稳定性）
+### `v0.0.2`（交互体验、Google Workspace 联动与日常稳定性）
+- **Google Workspace × 个人底座深度联动**：将 `agy` 已打通的 Gmail / Drive / Docs / Sheets / Slides 能力接入 `afk-cloud` 自动工作流（如周报汇总归档云盘、重要邮件与 D1 待办/Telegram 互动互通）。
 - **Telegram Inline Keyboard 行内交互按钮**：聊天窗口一键批准讨论拟稿、确认作业草稿、重试/忽略异常任务、勾选完成个人待办。
 - **Personal Agent 日常自动化**：支持轻量自定义定时巡检（如 RSS、GitHub Release、指定网页变更跟踪 + `agy` 摘要推送）及基于 D1 的个人碎片笔记/记忆检索。
-- **附带插件打磨**：学习通 `mobilelearn` 可选代理路由配置、PTA `PTASession` 到期提前提醒与更轻量的 Cookie 更新引导。
+- **附带插件打磨**：学习通 `mobilelearn` 可选代理路由配置、Web 看板单课按需刷新章节任务点进度。
 
-### `v0.0.3`（多模态与外部工具扩展）
-- **深化 Google AI Pro / Gemini 能力利用**：支持 Telegram 图片、PDF、语音消息多模态解析与入库总结，逐步接入 MCP 外部工具生态（日历、邮件、个人文档工作流）。
-- **插件体系解耦与热插拔**：抽离独立 Plugin SDK 与清单开关，支持用户按需启用/禁用任意附带插件，或编写自己的个人插件。
-- **可观测性增强**：看板补充任务耗时统计、模型调用配额追踪与执行日志筛选检索。
+### `v0.0.3`（多端生态打通：iPhone + Mac + Computer Use 与多模态）
+- **云端 × 本地多端生态联动（iPhone + Mac + Gemini Mac 版 Computer Use）**：通过安全隧道将 Mac 本地节点接入底座，并借助 **iPhone（快捷指令 / Bark / Telegram 随身触发）+ Mac + Gemini Mac 版 Computer Use** 补齐真实桌面 GUI 与跨 App 操控能力，形成「Cloudflare Edge 7×24 放哨 ↔ GCP Shim / `agy` + Google Workspace ↔ iPhone ↔ Mac」全链路联动。
+- **多模态解析深化**：支持 Telegram 图片、PDF、语音消息多模态解析与入库总结。
+- **插件体系解耦与可观测性增强**：抽离独立 Plugin SDK 与清单开关支持按需热插拔，看板补充任务耗时统计、模型配额追踪与日志检索。
 
 ### `v0.1.0`（首个公开 Beta · 低门槛自托管）
 - **容器化与交互式初始化向导**：提供标准 `Dockerfile` / `docker-compose.yml` 与向导式 CLI，一键生成 `.env`、`wrangler.jsonc` 与 Tunnel 配置，大幅降低新用户部署成本。
