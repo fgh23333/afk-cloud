@@ -18,6 +18,15 @@ export interface SolverState {
   activeJobStartedAt?: string | null;
 }
 
+export function isManualHandlingAwaitingTask(task: { status?: string; summary?: string }): boolean {
+  if (task.status !== 'awaiting_approval') return false;
+  const s = String(task.summary || '');
+  return (
+    s.includes('⚠️') ||
+    /缺少可解析|已拦截无效草稿|需人工|章节任务点未达标|附件不可读|人工上传/.test(s)
+  );
+}
+
 export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
   initialState = { initialized: false, activeJobId: null, activeJobStartedAt: null };
 
@@ -644,6 +653,11 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
     if (task.status === 'submitted') {
       return { success: true, jobId, status: 'submitted', msg: '任务此前已正式提交' };
     }
+    if (isManualHandlingAwaitingTask(task)) {
+      const reason =
+        '该作业未保存有效草稿（缺少可解析原题或需人工上传附件），请点击“打开作答界面”前往学习通手动完成，无法一键审批提交。';
+      return { success: false, jobId, status: task.status, msg: reason, reason };
+    }
 
     const submitRes = await this.submitTask(jobId);
     if (submitRes.ok) {
@@ -777,7 +791,11 @@ export class SolverAgent extends Agent<ExtendedNotifyEnv, SolverState> {
         body,
       });
       if (!res.ok) {
-        const reason = `shim /submit 返回 HTTP ${res.status}，任务状态已保留为 ${prevStatus}`;
+        const errData: any = await res.json().catch(() => ({}));
+        const reason =
+          res.status === 404
+            ? '本机 Shim 未找到该任务的本地草稿缓存 (HTTP 404，可能已重启)，请先点“重新派发 agy”生成草稿后再审批提交，或直接打开平台手动提交。'
+            : `shim /submit 返回 HTTP ${res.status}${errData?.error ? ` (${errData.error})` : ''}，任务状态已保留为 ${prevStatus}`;
         console.warn(`[SolverAgent] ${reason}`);
         await this.revertSubmittingStatus(jobId, prevStatus, prevUpdatedAt);
         return { ok: false, reason };
