@@ -235,9 +235,17 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
       Boolean(c && c.trim() !== '' && c !== '未命名课程' && c !== '未知课程');
 
     for (const t of tasks) {
+      const summaryText = String(t.result_summary || '');
+      const isManualSummary =
+        t.status === 'awaiting_approval' &&
+        (summaryText.includes('⚠️') ||
+          /缺少可解析|已拦截无效草稿|需人工|章节任务点未达标|附件不可读|人工上传/.test(summaryText));
+
       let statusLabel = '未派发';
       if (t.status === 'dispatched' || t.status === 'processing') {
         statusLabel = '已派发';
+      } else if (isManualSummary) {
+        statusLabel = '需人工处理';
       } else if (t.status === 'draft_saved' || t.status === 'awaiting_approval') {
         statusLabel = '做完暂存';
       } else if (t.status === 'submitting') {
@@ -305,8 +313,12 @@ export async function getDashboardData(env: EdgeEnv): Promise<DashboardData> {
         statusLabel,
         platform: t.platform || 'chaoxing',
         computeTier: t.compute_tier || 'tier1-cloud-run',
-        resultSummary: t.result_summary || '',
-        aiSolved: t.status === 'draft_saved' || t.status === 'submitting' || t.status === 'submitted',
+        resultSummary: summaryText,
+        aiSolved:
+          t.status === 'draft_saved' ||
+          t.status === 'submitting' ||
+          t.status === 'submitted' ||
+          (t.status === 'awaiting_approval' && !isManualSummary),
         url: primaryUrl,
         directUrl,
         noticeUrl,
@@ -1340,11 +1352,15 @@ export function renderDashboardHtml(): string {
         const safeEndDate = escapeHtml(hw.endDate || '无截止限制');
         const safeResultSummary = escapeHtml(hw.resultSummary || '');
         const safeTaskIdAttr = escapeHtml(hw.taskId || '');
+        const isManualNotice =
+          hw.status === 'awaiting_approval' &&
+          (safeResultSummary.includes('⚠️') ||
+            /缺少可解析|已拦截无效草稿|需人工|章节任务点未达标|附件不可读|人工上传/.test(safeResultSummary));
+        const canApproveSubmit = isDraft && !isManualNotice;
 
         let badge = '';
         let statusDesc = '';
         if (isDraft) {
-          const isManualNotice = hw.status === 'awaiting_approval' && safeResultSummary.includes('⚠️');
           if (isManualNotice) {
             badge = '<span class="text-xs px-2 py-0.5 rounded-full font-medium border bg-amber-500/20 text-amber-300 border-amber-500/30">⚠️ 需人工处理</span>';
             statusDesc = safeResultSummary || '缺少可直接作答的表单正文或附件无法自动解析，请在学习通确认';
@@ -1407,19 +1423,19 @@ export function renderDashboardHtml(): string {
 
             <div class="pt-2.5 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
               <div class="text-[11px] text-slate-500">
-                \${isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isSubmitting ? '<span class="text-violet-300/90">📤 正在向平台提交确认中</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
+                \${isManualNotice ? '<span class="text-amber-300/90">🖐️ 未保存草稿 · 请打开平台手动处理</span>' : isDraft ? '<span class="text-amber-300/90">🛡️ 草稿检查点已保存</span>' : isSubmitting ? '<span class="text-violet-300/90">📤 正在向平台提交确认中</span>' : isDispatched ? '<span class="text-blue-300/80">⚡ 求解排队中</span>' : ''}
               </div>
               <div class="flex items-center gap-2 flex-wrap">
                 \${answerBtn}
                 <button onclick="dispatchTask('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-medium rounded-lg \${isFailed ? 'bg-rose-600/80 hover:bg-rose-500 text-white border border-rose-500/40' : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'} transition active:scale-95 flex items-center gap-1" title="派发至云端 agy / 本地 shim 求解">
                   <span>\${isPending ? '🚀 派发给 agy' : isFailed ? '🔁 重试求解' : isIgnored ? '🔄 恢复并派发' : '🔄 重新派发 agy'}</span>
                 </button>
-                \${(isFailed || isPending) ? \`
+                \${(isFailed || isPending || isManualNotice) ? \`
                   <button onclick="ignoreTaskUI('\${safeTaskIdAttr}')" class="px-2 py-1 text-xs font-medium rounded-lg bg-slate-800/70 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/70 transition active:scale-95" title="忽略并归档该任务">
                     <span>🚫 忽略</span>
                   </button>
                 \` : ''}
-                \${isDraft ? \`
+                \${canApproveSubmit ? \`
                   <button onclick="approveSubmit('\${safeTaskIdAttr}')" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition active:scale-95 shadow-md shadow-emerald-900/30 flex items-center gap-1" title="确认并正式提交作业草稿">
                     <span>✅ 审批提交 &rarr;</span>
                   </button>

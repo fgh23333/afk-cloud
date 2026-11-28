@@ -955,7 +955,152 @@ async function runTests() {
     console.log(' ✅ [Test 8/8 PASS] 上课分时段监听、4 门低频批次与 90-150s 随机扰动间隔通过');
   }
 
-  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 8 项测试 100% 通过！\n');
+  // Test 9: ⚠️ 需人工处理作业（无草稿）防误批保护、Shim 404/409 清晰报错提示与看板按钮/文案隐藏回归验证
+  {
+    const manualId = 'chaoxing-notice-work-59003809-158750280';
+    const draftId = 'chaoxing-notice-work-91009999-158750280';
+    const manualSummary =
+      '⚠️ 作业《空间解析几何笔记与作业》缺少可解析的正文或附件内容（第 406102016 题缺少有效正文或附件内容），已拦截无效草稿暂存与循环重试，请打开学习通查看原题确认';
+
+    const db = createMockD1([
+      {
+        task_id: manualId,
+        platform: 'chaoxing',
+        course_id: '268784887',
+        class_id: '158750280',
+        course_name: '高等数学（二）',
+        title: '空间解析几何笔记与作业',
+        status: 'awaiting_approval',
+        compute_tier: 'tier1-cloud-run',
+        deadline: '2026/11/30 10:51:00',
+        result_summary: manualSummary,
+        payload_json: JSON.stringify({ url: 'https://mooc1-api.chaoxing.com/examApi/intoexamorwork?workId=59003809' }),
+        updated_at: '2026/11/28 10:05:50 (UTC+8)',
+        created_at: '2026/11/28 09:52:25 (UTC+8)',
+      },
+      {
+        task_id: draftId,
+        platform: 'chaoxing',
+        course_id: '268784887',
+        class_id: '158750280',
+        course_name: '数据结构',
+        title: '正常已暂存草稿作业',
+        status: 'draft_saved',
+        compute_tier: 'tier1-cloud-run',
+        deadline: '2099/12/31 23:59:00',
+        result_summary: '已通过双轨引擎生成草稿并安全暂存（3/3 题）',
+        payload_json: JSON.stringify({ url: 'https://mooc1.chaoxing.com/mooc2/work/dowork?workId=91009999' }),
+        updated_at: '2026/11/28 10:10:00 (UTC+8)',
+        created_at: '2026/11/28 10:00:00 (UTC+8)',
+      },
+    ]);
+
+    const sql = createMockDoSql([
+      {
+        job_id: draftId,
+        platform: 'chaoxing',
+        task_url: 'https://mooc1.chaoxing.com/mooc2/work/dowork?workId=91009999',
+        status: 'draft_saved',
+        deadline: '2099/12/31 23:59:00',
+        qa_json: '[]',
+        summary: '已保存草稿',
+        attempts: 1,
+        updated_at: '2026/11/28 10:10:00 (UTC+8)',
+      },
+    ]);
+
+    const agent = new (SolverAgent as any)(
+      { storage: { sql } },
+      { DB: db, AFK_SHIM_URL: 'https://shim.test.local', AFK_SHIM_SECRET: 'test-shim-secret-at-least-32-chars-long' }
+    );
+    agent.env = {
+      DB: db,
+      AFK_SHIM_URL: 'https://shim.test.local',
+      AFK_SHIM_SECRET: 'test-shim-secret-at-least-32-chars-long',
+    };
+    agent.ctx = { storage: { sql } };
+    agent.onStart();
+
+    const origFetch = globalThis.fetch;
+    let shimSubmitCalls = 0;
+    let shimResponseStatus = 404;
+    let shimErrorMsg = 'Job not found';
+    try {
+      globalThis.fetch = (async () => {
+        shimSubmitCalls++;
+        return new Response(JSON.stringify({ error: shimErrorMsg }), { status: shimResponseStatus });
+      }) as typeof fetch;
+
+      // 1. approveTask 必须前置拦截“⚠️ 需人工处理”的无草稿任务，绝不打给 Shim
+      const manualAppRes = await agent.approveTask(manualId);
+      assert.strictEqual(manualAppRes.success, false, '需人工处理的无草稿任务严禁进入提交');
+      assert.strictEqual(shimSubmitCalls, 0, '需人工处理任务被拦截后不得向 Shim /submit 发请求');
+      assert.ok(String(manualAppRes.reason).includes('未保存有效草稿'), `应返回中文拦截原因，实际: ${manualAppRes.reason}`);
+      assert.strictEqual(db.pendingTasks.get(manualId)?.status, 'awaiting_approval');
+
+      // 2. Shim 返回 404 时应给出清晰重派提示并安全回退状态
+      shimResponseStatus = 404;
+      const notFoundRes = await agent.approveTask(draftId);
+      assert.strictEqual(notFoundRes.success, false);
+      assert.ok(String(notFoundRes.reason).includes('重新派发 agy'), `404 应提示先重新派发，实际: ${notFoundRes.reason}`);
+      assert.strictEqual(db.pendingTasks.get(draftId)?.status, 'draft_saved');
+
+      // 3. Shim 返回 409 时应透传具体 error 文案
+      shimResponseStatus = 409;
+      shimErrorMsg = '当前阶段为 awaiting_approval，仅 draft_saved 可提交';
+      const conflictRes = await agent.approveTask(draftId);
+      assert.strictEqual(conflictRes.success, false);
+      assert.ok(String(conflictRes.reason).includes('仅 draft_saved 可提交'), `409 应透传明确错误，实际: ${conflictRes.reason}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. 看板聚合与 JSDOM 渲染：manualId 必须显示“需人工处理/未保存草稿”，隐藏“审批提交”，提供“忽略”；draftId 保留“审批提交”
+    const dash = await getDashboardData({ DB: db } as any);
+    const manualHw = dash.homeworks?.find((h) => h.taskId === manualId);
+    const draftHw = dash.homeworks?.find((h) => h.taskId === draftId);
+    assert.strictEqual(manualHw?.statusLabel, '需人工处理');
+    assert.strictEqual(manualHw?.aiSolved, false);
+    assert.strictEqual(draftHw?.statusLabel, '做完暂存');
+    assert.strictEqual(draftHw?.aiSolved, true);
+
+    const html = renderDashboardHtml();
+    const dom = new JSDOM(html, {
+      url: 'https://afk.example.com/',
+      runScripts: 'dangerously',
+      beforeParse(win) {
+        (win as any).tailwind = {};
+        (win as any).fetch = async (url: string) => {
+          if (String(url).includes('/api/dashboard')) {
+            return { ok: true, json: async () => dash };
+          }
+          return { ok: true, json: async () => ({}) };
+        };
+      },
+    });
+    try {
+      const w = dom.window as any;
+      await w.refreshData();
+      const cards = Array.from(w.document.querySelectorAll('#homeworkList > div')) as HTMLElement[];
+      const manualCard = cards.find((el) => el.textContent?.includes('空间解析几何笔记与作业'));
+      const draftCard = cards.find((el) => el.textContent?.includes('正常已暂存草稿作业'));
+      assert.ok(manualCard, '应渲染人工处理作业卡片');
+      assert.ok(draftCard, '应渲染正常草稿作业卡片');
+
+      assert.ok(manualCard!.textContent?.includes('未保存草稿'), '人工处理卡应提示未保存草稿');
+      assert.ok(manualCard!.innerHTML.includes(`ignoreTaskUI('${manualId}')`), '人工处理卡应提供忽略归档按钮');
+      assert.strictEqual(manualCard!.innerHTML.includes(`approveSubmit('${manualId}')`), false, '人工处理卡绝不得再渲染审批提交按钮');
+      assert.strictEqual(manualCard!.textContent?.includes('草稿检查点已保存'), false, '人工处理卡不得误标草稿检查点已保存');
+
+      assert.ok(draftCard!.innerHTML.includes(`approveSubmit('${draftId}')`), '正常 draft_saved 卡片仍应保留审批提交按钮');
+      assert.ok(draftCard!.textContent?.includes('草稿检查点已保存'), '正常 draft_saved 卡片仍应保留草稿检查点提示');
+    } finally {
+      dom.window.close();
+    }
+    console.log(' ✅ [Test 9/9 PASS] ⚠️ 需人工处理作业防误批保护、Shim 报错明确化与看板按钮隔离通过');
+  }
+
+  console.log('\n🎉 签到回溯、看板渲染与 submitting 状态机全部 9 项测试 100% 通过！\n');
 }
 
 runTests().catch((err) => {
